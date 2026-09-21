@@ -65,6 +65,7 @@ import { UsageStore } from "./usageStore.ts";
 import { configureUsageHistory, usageHistoryPath } from "./usageHistory.ts";
 import { ContextGuard, contextGuardConfigFromEnv, type GuardNotice } from "./contextGuard.ts";
 import { ViewerRegistry } from "./viewerRegistry.ts";
+import { startPtmxWatch } from "./ptmxWatch.ts";
 import {
   loadAuthConfig,
   isLoopback,
@@ -1833,6 +1834,14 @@ httpServer.listen(PORT, HOST, () => {
   // 監督機能の状態のみ表示。キー値は出さない。
   console.log(`[ebi-team] ${supervisor.describeStartup()}`);
   console.log(`[ebi-team] dev フロント: http://localhost:5173 （Vite）`);
+  // pty master fd（/dev/ptmx）の保持本数を起動時＋5 分ごとにログする保険。
+  // 枯渇すると spawn が "posix_spawnp failed." で失敗し続けるため、閾値超えは UI notice にも出す。
+  startPtmxWatch({
+    liveCount: () => registry.list().length,
+    onAlert: (level, message) => {
+      broadcast({ type: "notice", id: "ptmx-watch", text: `[${level}] ${message}` });
+    },
+  });
   // 固定エビの自動起動（非同期・失敗してもサーバは継続）。
   void startFixedEbi();
 });
