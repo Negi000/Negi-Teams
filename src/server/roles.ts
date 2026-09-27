@@ -24,6 +24,7 @@ import {
   isImplementedBackendId,
   type BackendId,
 } from "./backends/index.ts";
+import { validateEffort, type Effort } from "./effort.ts";
 
 /**
  * 役割 id。spawn 時に role として渡す。
@@ -58,6 +59,13 @@ export interface EbiRole {
   permissionMode: PermissionMode;
   /** 既定モデル（alias）。 */
   defaultModel: string;
+  /**
+   * この役割で spawn したときの推論努力度（claude の `--effort`）。
+   * 未指定なら config の effortByModel（モデル→effort 表）→ CLI 既定へフォールバックする。
+   * 優先順位: spawn の明示 effort > この役割既定 > effortByModel > CLI 既定。
+   * claude 以外の backend では無視される（`--effort` は claude 方言のフラグ）。
+   */
+  effort?: Effort;
   /**
    * 役割ごとの既定バックエンド（PR-E）。未指定なら「config.defaultBackend → env EBI_BACKEND
    * → claude」へフォールバックする。
@@ -241,6 +249,17 @@ function normalizeCustomRole(id: string, raw: unknown): EbiRole {
   const defaultModel =
     asOptionalString(r.defaultModel, "defaultModel", id) ??
     (backend === undefined || backend === "claude" ? CUSTOM_ROLE_DEFAULT_MODEL : "");
+
+  // effort（任意）。値域外は起動時に落として気づけるよう明示エラーにする。
+  const effortRaw = asOptionalString(r.effort, "effort", id);
+  let effort: Effort | undefined;
+  if (effortRaw !== undefined) {
+    try {
+      effort = validateEffort(effortRaw);
+    } catch (err) {
+      throw new Error(`カスタム役割 "${id}" の ${(err as Error).message}`);
+    }
+  }
   const appendSystemPrompt = asOptionalString(r.appendSystemPrompt, "appendSystemPrompt", id) ?? "";
 
   return {
@@ -253,6 +272,7 @@ function normalizeCustomRole(id: string, raw: unknown): EbiRole {
     backend,
     appendSystemPrompt,
     ...(ackWatchMs === undefined ? {} : { ackWatchMs }),
+    ...(effort === undefined ? {} : { effort }),
   };
 }
 

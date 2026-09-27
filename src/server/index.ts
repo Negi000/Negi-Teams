@@ -40,6 +40,7 @@ import {
   loadRawCustomRoles,
   loadDevChannelsAllowlist,
   loadBackendSettings,
+  loadEffortByModel,
   validatePermissionMode,
   DEFAULT_PERMISSION_MODE,
   EMPTY_BACKEND_SETTINGS,
@@ -47,6 +48,13 @@ import {
   type FixedEbiSpec,
 } from "./config.ts";
 import { EBI_ROLES, resolveRole, registerCustomRoles, unknownRoleError } from "./roles.ts";
+import {
+  EMPTY_EFFORT_BY_MODEL,
+  describeEffort,
+  effortArgs,
+  resolveEffort,
+  type EffortByModel,
+} from "./effort.ts";
 import { isRunningFromSrc, mcpConfigPathFor, type McpConfigRole } from "./mcpConfigPath.ts";
 import { needsPreflight, runPreflight } from "./backendPreflight.ts";
 import {
@@ -104,6 +112,9 @@ const COMMAND = process.env.EBI_COMMAND ?? "claude";
 // config 由来のバックエンド既定（top-level "defaultBackend" / "backends"）。
 // listen 前に loadAndApplyBackendSettings() が確定させる（それまでは「既定なし」）。
 let backendSettings: BackendSettings = EMPTY_BACKEND_SETTINGS;
+// config 由来のモデル→effort 既定表（top-level "effortByModel"）。
+// listen 前に loadAndApplyEffortByModel() が確定させる（それまでは「表なし」＝CLI 既定）。
+let effortByModel: EffortByModel = EMPTY_EFFORT_BY_MODEL;
 // サーバ既定のバックエンド id。優先度は spawn 引数 > 役割(EbiRole.backend) >
 // config.defaultBackend > env EBI_BACKEND > "claude"。
 // 未実装 id を指定されたら起動前に throw する（黙って claude に落とさない）。
@@ -1143,6 +1154,24 @@ async function spawnAgent(params: GeneralizedSpawnParams): Promise<string> {
       ? spawnConfig.command
       : (backendSettings.backends[backendId]?.command ?? backend.defaultCommand);
 
+  // 推論努力度（--effort）の解決: 明示 effort > 役割の effort > config の effortByModel >
+  // CLI 既定。`--effort` は claude 方言のフラグなので、実際に claude を起動するときだけ付ける
+  // （codex/gemini は reasoning effort の語彙が別。EBI_COMMAND=bash 等のスタブ起動にも付けない）。
+  // 明示値の検証は backend に関わらず行う（不正値を黙って捨てない）。
+  const baseExtraArgs = extraArgsForBackend(backendId);
+  const resolvedEffort = resolveEffort({
+    explicit: params.effort,
+    role: role?.effort ?? null,
+    model,
+    table: effortByModel,
+    existingArgs: baseExtraArgs,
+  });
+  const isClaudeLaunch =
+    backendId === DEFAULT_BACKEND_ID && resolveBackend(command)?.id === DEFAULT_BACKEND_ID;
+  const extraArgs = isClaudeLaunch
+    ? [...baseExtraArgs, ...effortArgs(resolvedEffort)]
+    : baseExtraArgs;
+
   // 役割付きなら ebi-control MCP（最小権限・reply_to_master 等）を追加する。
   // 「どのフラグをどう付けるか」はバックエンド実装（backends/claude.ts の buildArgs）に閉じており、
   // ここでは抽象パラメータ（mcpConfigPath / notifyMode）を渡すだけにする。
@@ -1165,6 +1194,8 @@ async function spawnAgent(params: GeneralizedSpawnParams): Promise<string> {
   //   どのエビの cost/context かを識別できるようにする（ダッシュボード）。
   // command 種別に関わらず注入してよい（bash テストでも env 継承の確認ができる）。
   const launchEnv = { EBI_ID: agentId };
+  const effortNote = isClaudeLaunch ? describeEffort(resolvedEffort) : null;
+  if (effortNote) console.log(`[ebi-team] [${agentId}] ${effortNote}`);
 
   // バックエンド固有の起動引数を組み立てる（claude なら
   // --model / --permission-mode / --append-system-prompt / --mcp-config / dev-channels）。
@@ -1180,7 +1211,7 @@ async function spawnAgent(params: GeneralizedSpawnParams): Promise<string> {
     // フォルダ信頼ゲートを出させないために宣言するディレクトリ（codex のみ使用）。
     trustPaths,
     notifyMode: isNotifyMode(),
-    extraArgs: extraArgsForBackend(backendId),
+    extraArgs,
   });
 
   // 起動前チェック（認証ファイル / 必須 env / CLI バージョン）。
@@ -1459,6 +1490,11 @@ export interface SendMessageParams {
   role?: string;
   /** spawnIfMissing で起動する際のバックエンド（未指定は役割の既定→サーバ既定）。 */
   backend?: string;
+  /**
+   * spawnIfMissing で起動する際の推論努力度（low/medium/high）。
+   * 未指定なら役割の effort → config の effortByModel → CLI 既定。
+   */
+  effort?: string;
   /** 【後方互換】spawnIfMissing で起動する際 engineer 役割にするか（既定 true 相当）。role が優先。 */
   asEngineer?: boolean;
 }
@@ -1530,6 +1566,7 @@ async function sendMessage(params: SendMessageParams): Promise<SendMessageResult
       kind: "dynamic",
       role: roleId,
       backend: params.backend,
+      effort: params.effort,
     });
     spawned = true;
     agent = registry.get(to);
@@ -1768,6 +1805,26 @@ async function loadAndApplyBackendSettings(): Promise<void> {
 }
 
 /**
+ * ebi-team.config.json の top-level "effortByModel"（モデル→推論努力度の既定表）を読み、
+ * サーバ既定へ反映する。httpServer.listen()／固定エビ自動起動より前に完了させ、以降の spawn が
+ * 常に表を見るようにする。config が無い/未指定なら何もしない（＝CLI 既定 effort）。
+ * 検証失敗時は警告のみで起動を継続する。
+ */
+async function loadAndApplyEffortByModel(): Promise<void> {
+  try {
+    effortByModel = await loadEffortByModel(CONFIG_PATH);
+    if (effortByModel.length > 0) {
+      console.log(
+        `[ebi-team] effort 既定表: ` +
+          effortByModel.map((r) => `${r.pattern}=${r.effort}`).join(", "),
+      );
+    }
+  } catch (err) {
+    console.warn(`[ebi-team] effortByModel の読み込みに失敗（CLI 既定 effort で継続）:`, err);
+  }
+}
+
+/**
  * ワンショット要約エンジン（ask_supervisor / WS summarize）の backend / model を
  * config の supervisor 固定エビから引き継ぐ。
  *
@@ -1789,6 +1846,7 @@ async function loadAndApplySupervisorEngine(): Promise<void> {
 // spawn 要求（WS / 制御API いずれも）を受け付ける前にカスタム役割・許可リスト・
 // バックエンド既定を確定させる。
 await loadAndApplyBackendSettings();
+await loadAndApplyEffortByModel();
 await loadAndRegisterCustomRoles();
 await loadAndApplyDevChannelsAllowlist();
 await loadAndApplySupervisorEngine();

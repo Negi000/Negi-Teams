@@ -47,6 +47,12 @@ export interface GeneralizedSpawnParams {
    * 実装済みでない backend id は明示エラーで弾く（黙って claude に落とさない）。
    */
   backend?: string;
+  /**
+   * 推論努力度（claude の `--effort`。low/medium/high。未検証文字列で受け、spawnAgent 側で検証）。
+   * 未指定なら「役割の effort → config の effortByModel → CLI 既定」。
+   * claude 以外の backend では無視される（`--effort` は claude 方言のフラグ）。
+   */
+  effort?: string;
   /** エビ種別（既定 dynamic）。 */
   kind?: AgentKind;
   /**
@@ -95,6 +101,8 @@ export interface SendMessageInput {
   role?: string;
   /** spawnIfMissing で起動する際のバックエンド（未指定は役割の既定→サーバ既定）。 */
   backend?: string;
+  /** spawnIfMissing で起動する際の推論努力度（未指定は役割 → effortByModel → CLI 既定）。 */
+  effort?: string;
   /** 【後方互換】spawnIfMissing で起動する際 engineer 役割にするか。role が優先。 */
   asEngineer?: boolean;
 }
@@ -335,6 +343,7 @@ export function createControlApi(deps: ControlDeps) {
           appendSystemPrompt: asString(body.appendSystemPrompt) ?? null,
           permissionMode: asString(body.permissionMode),
           backend: asString(body.backend),
+          effort: asString(body.effort),
           kind: (kindRaw as AgentKind | undefined) ?? "dynamic",
           role: asString(body.role),
           asEngineer: asBool(body.asEngineer),
@@ -486,6 +495,7 @@ export function createControlApi(deps: ControlDeps) {
           branch: asString(body.branch),
           role: asString(body.role),
           backend: asString(body.backend),
+          effort: asString(body.effort),
           asEngineer: asBool(body.asEngineer),
         });
         if (result.ok) {

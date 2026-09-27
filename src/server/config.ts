@@ -32,6 +32,16 @@ import {
   MASTER_BRAIN_IDS,
   type MasterBrainId,
 } from "./master/brain.ts";
+// 推論努力度（--effort）の解決は effort.ts が SoT（純関数・I/O なし）。
+import {
+  EMPTY_EFFORT_BY_MODEL,
+  describeEffort,
+  effortArgs,
+  normalizeEffortByModel,
+  resolveEffort,
+  type Effort,
+  type EffortByModel,
+} from "./effort.ts";
 
 // permission-mode の語彙は backends/types.ts（バックエンド非依存の抽象語彙）が SoT。
 // 既存の import 元（roles.ts / index.ts / control-server.ts 等）を壊さないよう再エクスポートする。
@@ -103,6 +113,11 @@ interface RawConfig {
   defaultBackend?: unknown;
   /** バックエンド別の既定（command / defaultModel）。検証は loadBackendSettings。 */
   backends?: unknown;
+  /**
+   * モデル→推論努力度（claude の `--effort`）の既定表（{ モデルパターン: low|medium|high }）。
+   * 検証・引き当ては effort.ts（normalizeEffortByModel / effortForModel）が SoT。
+   */
+  effortByModel?: unknown;
 }
 
 /**
@@ -242,6 +257,23 @@ export async function loadBackendSettings(configPath: string): Promise<BackendSe
   }
 }
 
+// ===== 推論努力度の既定（top-level "effortByModel"） =====
+
+/**
+ * ebi-team.config.json の top-level "effortByModel" を読み、正規化して返す。
+ * - ファイルが無い／キーが無ければ空の表（＝従来どおり CLI 既定 effort に任せる）。
+ * - 検証失敗は throw（呼び出し側で警告ログにして起動継続する想定）。
+ */
+export async function loadEffortByModel(configPath: string): Promise<EffortByModel> {
+  const parsed = await readRawConfig(configPath);
+  if (parsed === null) return EMPTY_EFFORT_BY_MODEL;
+  try {
+    return normalizeEffortByModel(parsed.effortByModel);
+  } catch (err) {
+    throw new Error(`${configPath} の ${(err as Error).message}`);
+  }
+}
+
 /** master の UI 方式。既定は terminal（現行の PTY 経路と完全に同一）。 */
 export type MasterUiMode = "terminal" | "chat";
 
@@ -265,8 +297,18 @@ export interface FixedEbiSpec {
    * MasterBrain へ直接渡すため、正規化済みの値をここにも持つ）。
    */
   permissionMode: PermissionMode;
-  /** config の args（$EBI_TEAM 等を展開済み・**方言フラグを付ける前**の生の追加引数）。 */
+  /**
+   * config の args（$EBI_TEAM 等を展開済み・**方言フラグを付ける前**の生の追加引数）。
+   * ただし effortByModel が効いた場合は解決済みの `--effort <値>` がここに含まれる
+   * （claude 方言のフラグだが、PTY 経路と master チャット経路の両方が extraArgs を
+   * そのまま末尾へ流すため、1 か所で揃えるのが最も漏れが無い）。
+   */
   extraArgs: string[];
+  /**
+   * この固定エビに実際に付与した推論努力度（`--effort`）。
+   * null なら付与していない（args に明示があった／表に当たらなかった＝CLI 既定）。
+   */
+  effort: Effort | null;
   /**
    * notification（mailbox 購読）経路で受信するか（既定 true）。
    * false のとき送信側は購読確立を待たず PTY 注入で届ける（受信 PTY 固定）。
@@ -412,7 +454,12 @@ function asStringArray(v: unknown): string[] {
  * 起動引数（args）の組み立て順:
  *   [--model M]? [--permission-mode P]? [--append-system-prompt S]? ...任意 args
  */
-function normalizeOne(raw: RawFixedEbi, configDir: string, defaults: ConfigDefaults): FixedEbiSpec {
+function normalizeOne(
+  raw: RawFixedEbi,
+  configDir: string,
+  defaults: ConfigDefaults,
+  effortByModel: EffortByModel = EMPTY_EFFORT_BY_MODEL,
+): FixedEbiSpec {
   const id = asString(raw.id);
   if (!id) throw new Error("固定エビの id（文字列）が必要です");
 
@@ -478,14 +525,33 @@ function normalizeOne(raw: RawFixedEbi, configDir: string, defaults: ConfigDefau
   const command =
     asString(raw.command) ?? (backendId ? getBackend(backendId).defaultCommand : defaults.command);
 
+  // 実際に使うバックエンド（明示 > command からの解決 > サーバ既定）。
+  const resolvedBackendId: BackendId =
+    backendId ?? resolveBackend(command)?.id ?? defaults.backend ?? DEFAULT_BACKEND_ID;
+
+  // 推論努力度（--effort）。claude 方言のフラグなので、**その固定エビが実際に claude で動く
+  // ときだけ**適用する（backend 明示 claude / command が claude に解決できる場合）。
+  // どの backend にも一致しない command（bash 等のスタブ起動）には付けない＝従来どおり。
+  const isClaudeLaunch =
+    backendId === DEFAULT_BACKEND_ID ||
+    (backendId === null && resolveBackend(command)?.id === DEFAULT_BACKEND_ID);
+  const resolvedEffort = isClaudeLaunch
+    ? resolveEffort({ model, table: effortByModel, existingArgs: extraArgs })
+    : { effort: null, source: null };
+  // args 側に明示があればそれを優先する（resolveEffort が effort:null を返す）＝二重付与しない。
+  const extraArgsWithEffort = [...extraArgs, ...effortArgs(resolvedEffort)];
+
   const args = buildClaudeArgs({
     command,
     backendId,
     model,
     permissionMode,
     appendSystemPrompt,
-    extraArgs,
+    extraArgs: extraArgsWithEffort,
   });
+
+  const effortNote = describeEffort(resolvedEffort);
+  if (effortNote) console.log(`[ebi-team] 固定エビ ${id}: ${effortNote}`);
 
   // notifySubscribe（既定 true）。false は「受信を PTY 注入に固定」する印。
   const notifySubscribe = raw.notifySubscribe === undefined ? true : asBoolean(raw.notifySubscribe, id);
@@ -496,7 +562,8 @@ function normalizeOne(raw: RawFixedEbi, configDir: string, defaults: ConfigDefau
     ui,
     brain,
     permissionMode,
-    extraArgs,
+    extraArgs: extraArgsWithEffort,
+    effort: resolvedEffort.effort,
     // 固定エビの backend は **明示指定 > command から解決**（サーバ既定を波及させない）。
     // 理由: 設計上 master は常に claude（統括系を落とさない）で、EBI_BACKEND=codex のような
     // サーバ既定をそのまま master に付けると、claude/bash のプロセスに codex の性質
@@ -508,7 +575,7 @@ function normalizeOne(raw: RawFixedEbi, configDir: string, defaults: ConfigDefau
       args,
       cwd,
       model,
-      backend: backendId ?? resolveBackend(command)?.id ?? defaults.backend ?? DEFAULT_BACKEND_ID,
+      backend: resolvedBackendId,
       // 役割プロンプトは args だけでは足りない。gemini は `--append-system-prompt` 相当を
       // 持たず per-エビ GEMINI.md（backend.buildEnv 経由）で注入するため、生の本文を
       // launch にも載せて agent.ts → backend.buildEnv へ渡す。
@@ -541,7 +608,8 @@ export async function loadFixedEbi(
   }
 
   const configDir = dirname(configPath);
-  const specs = list.map((raw) => normalizeOne(raw as RawFixedEbi, configDir, defaults));
+  const effortByModel = normalizeEffortByModel(parsed.effortByModel);
+  const specs = list.map((raw) => normalizeOne(raw as RawFixedEbi, configDir, defaults, effortByModel));
 
   // id 重複チェック。
   const seen = new Set<string>();
