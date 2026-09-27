@@ -205,6 +205,21 @@ UI では各エビに backend バッジ（🟣 claude / 🟢 codex / 🔵 gemini
 
 詳細は `docs/backends/claude.md` / `docs/backends/codex.md` / `docs/backends/gemini.md` を参照してください。
 
+### 推論努力度 (effort) のモデル別既定
+
+claude の `--effort`（推論努力度 `low` / `medium` / `high`）は、従来 master 固定エビの `args` に直書きする経路しか無く、役割付きの動的エビ（engineer 等）には届かず CLI 既定（`medium`）で走っていました。top-level `effortByModel` に **モデル→effort の既定表** を 1 つ置くと、全 spawn 経路（固定エビ・役割付き動的エビ・`model` 上書き spawn）が同じ表を見て自動で `--effort` を付けます。キーは `*` をワイルドカードに使え、同じモデルに複数当たる場合は **完全一致 > より具体的（長い）パターン > 記載順** で決まります。
+
+```jsonc
+{
+  "effortByModel": { "claude-opus-5-5": "high" },   // Opus 5.5 は常に high で走らせる
+  "roles": {
+    "deep-thinker": { "defaultModel": "claude-opus-5-5", "effort": "high" }  // 役割ごとの既定も書ける
+  }
+}
+```
+
+適用の優先順位は **`args` の `--effort` 明示 > spawn の `effort` 明示（`spawn_ebi` / `spawn_engineer` / `send_message` の `effort` 引数・`POST /control/spawn` の `effort`）> 役割の `effort` > `effortByModel` > claude CLI 既定**。`args` に `--effort` が書かれているエビには**二重付与しません**（運用者が書いた値が常に勝つ）。`--effort` は claude 方言のフラグなので codex / gemini のエビには付きません。表が効いたエビは起動ログに `effort: high (by model)` のように出ます。設定変更の反映にはサーバ再起動が必要です。
+
 ### master チャット UI (master chat)
 
 統括役（master）だけは、ターミナル表示（xterm）ではなく **ChatGPT のような専用チャット画面**で動かせます。既定は従来どおりのターミナルで、`ui` を書かない限りこの機能は一度も動きません。

@@ -28,6 +28,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { availableRoleIds, registerCustomRoles, type EbiRoleId } from "../server/roles.ts";
 import { ALL_BACKEND_IDS } from "../server/backends/index.ts";
+import { EFFORT_LEVELS } from "../server/effort.ts";
 import { loadRawCustomRoles } from "../server/config.ts";
 import { deliveryText } from "../shared/deliveryTag.ts";
 import { resolveConfigPath } from "./configPath.ts";
@@ -146,6 +147,15 @@ const BACKEND_DESC =
   "claude / codex / gemini とも実装済み。" +
   "codex / gemini は cost・context を報告しない（ダッシュボードは「—（未対応）」表示）ほか、" +
   "model は backend ごとに語彙が違う（claude の opus/sonnet は codex/gemini では不可）";
+
+/**
+ * 推論努力度（claude の `--effort`）。省略時はサーバ側が
+ * 「役割の effort → config の effortByModel（モデル→effort 表）→ CLI 既定」で解決する。
+ * claude 以外の backend では無視される（`--effort` は claude 方言のフラグ）。
+ */
+const EFFORT_IDS = [...EFFORT_LEVELS] as [string, ...string[]];
+const EFFORT_DESC =
+  "推論努力度 low/medium/high（省略時は役割の effort → config の effortByModel → CLI 既定）。claude backend のみ有効";
 
 /** 制御API を呼ぶ共通ヘルパー。失敗時は { ok:false, error } を返す（throw しない）。 */
 async function callControl(
@@ -321,16 +331,18 @@ async function spawnRoleAndInject(args: {
   task: string;
   model?: string;
   backend?: string;
+  effort?: string;
   cwd?: string;
   useWorktree?: boolean;
   repoPath?: string;
   branch?: string;
 }) {
-  const { role, task, model, backend, cwd, useWorktree, repoPath, branch } = args;
+  const { role, task, model, backend, effort, cwd, useWorktree, repoPath, branch } = args;
   const spawnRes = await callControl("POST", "/control/spawn", {
     role,
     model,
     backend,
+    effort,
     cwd,
     useWorktree,
     repoPath,
@@ -371,6 +383,7 @@ server.tool(
     task: z.string().describe("委譲するタスク内容（起動後に注入される）"),
     model: z.string().optional().describe("モデル上書き（未指定は役割の既定モデル）"),
     backend: z.enum(BACKEND_IDS).optional().describe(BACKEND_DESC),
+    effort: z.enum(EFFORT_IDS).optional().describe(EFFORT_DESC),
     cwd: z.string().optional().describe("作業ディレクトリ（未指定はサーバ既定）"),
     useWorktree: z.boolean().optional().describe("true なら git worktree を切って隔離 cwd で起動"),
     repoPath: z.string().optional().describe("worktree の元 repo パス"),
@@ -387,6 +400,7 @@ server.tool(
     task: z.string().describe("engineer に委譲するタスク内容（起動後に注入される）"),
     model: z.string().optional().describe("モデル（既定 opus）"),
     backend: z.enum(BACKEND_IDS).optional().describe(BACKEND_DESC),
+    effort: z.enum(EFFORT_IDS).optional().describe(EFFORT_DESC),
     cwd: z.string().optional().describe("作業ディレクトリ（未指定はサーバ既定）"),
     useWorktree: z.boolean().optional().describe("true なら git worktree を切って隔離 cwd で起動"),
     repoPath: z.string().optional().describe("worktree の元 repo パス"),
@@ -413,12 +427,13 @@ server.tool(
     ),
     model: z.string().optional().describe("spawn 時のモデル上書き（未指定は役割の既定）"),
     backend: z.enum(BACKEND_IDS).optional().describe(`spawn 時の${BACKEND_DESC}`),
+    effort: z.enum(EFFORT_IDS).optional().describe(`spawn 時の${EFFORT_DESC}`),
     cwd: z.string().optional().describe("spawn 時の作業ディレクトリ（未指定はサーバ既定）"),
     useWorktree: z.boolean().optional().describe("spawn 時に git worktree を切って隔離 cwd で起動"),
     repoPath: z.string().optional().describe("worktree の元 repo パス"),
     branch: z.string().optional().describe("worktree ブランチ名（未指定は ebi/<id> 採番）"),
   },
-  async ({ to, message, spawnIfMissing, role, model, backend, cwd, useWorktree, repoPath, branch }) => {
+  async ({ to, message, spawnIfMissing, role, model, backend, effort, cwd, useWorktree, repoPath, branch }) => {
     const r = await callControl("POST", "/control/send", {
       to,
       message,
@@ -428,6 +443,7 @@ server.tool(
       role: role ?? "engineer",
       model,
       backend,
+      effort,
       cwd,
       useWorktree,
       repoPath,
