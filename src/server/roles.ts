@@ -126,7 +126,8 @@ export const BUILTIN_ROLES: Record<string, EbiRole> = {
     mcpRole: "engineer",
     permissionMode: "bypassPermissions",
     // 既定は明示ID運用（"opus" などのエイリアスは CLI 版依存で解決先が変わるため）。
-    defaultModel: "claude-opus-5",
+    // effort は役割に持たせず config の effortByModel（claude-opus-5-5 → medium）で決める。
+    defaultModel: "claude-opus-5-5",
     // 実装役の既定は claude 固定（PR-E 時点。codex/gemini は明示指定 or カスタム役割で使う）。
     backend: "claude",
     appendSystemPrompt: ENGINEER_APPEND_SYSTEM_PROMPT,
