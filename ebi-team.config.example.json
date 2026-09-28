@@ -6,7 +6,7 @@
   "devChannelsAllowlist": ["plugin:slack@<your-marketplace-id>"],
   "_comment_effortByModel": "モデル→推論努力度（claude の --effort）の既定表。{ モデルパターン: \"low\"|\"medium\"|\"high\" } で書く。キーは `*` をワイルドカードに使える（例 \"claude-opus-*\"）。当たったモデルで起動するエビには自動で --effort が付く（固定エビ・役割付き動的エビ・model 上書き spawn すべて同じ表を見る）。適用の優先順位は args の --effort 明示 > spawn の effort 明示 > 役割の effort > この表 > claude CLI 既定(medium)。同じモデル名に複数のパターンが当たる場合は 完全一致 > より具体的（長い）パターン > 記載順。--effort は claude 方言のフラグなので codex / gemini のエビには付かない。",
   "effortByModel": {
-    "claude-opus-5-5": "high"
+    "claude-opus-5-5": "medium"
   },
   "_comment_backends": "マルチバックエンド（PR-E）。defaultBackend はサーバ既定のバックエンド id（claude/codex/gemini。env EBI_BACKEND より優先。未指定なら env → claude）。backends は backend 別の既定 { command?: 起動バイナリ, defaultModel?: そのバックエンドの既定モデル }。解決順は spawn 引数 backend > 役割の backend > defaultBackend > env EBI_BACKEND > claude。master は何を設定しても常に claude 固定（統括系を落とさない fail-safe）。model の語彙はバックエンドごとに別物（claude の opus/sonnet は codex/gemini では通らない）。詳細は docs/backends/*.md。",
   "defaultBackend": "claude",
