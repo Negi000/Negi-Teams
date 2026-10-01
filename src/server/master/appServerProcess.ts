@@ -2,6 +2,7 @@
 // not wired to the existing master or worker startup paths. It never retries.
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { CodexAppServerClient, type AppServerClientOptions } from "./appServerClient.ts";
+import { WindowsProcessTree, type ProcessTreeIdentity, type ProcessTreeReceipt } from "./windowsProcessTree.ts";
 
 export interface AppServerProcessOptions {
   executable: string;
@@ -16,6 +17,7 @@ export interface AppServerExit {
   signal: NodeJS.Signals | null;
   error: string | null;
   stderrBytes: number;
+  treeReceipt?: ProcessTreeReceipt | null;
 }
 
 /** The model process does not need the browser's application login secret. */
@@ -28,17 +30,22 @@ export class AppServerProcess {
   readonly client: CodexAppServerClient;
   readonly pid: number | null;
   readonly exited: Promise<AppServerExit>;
+  readonly treeIdentity: ProcessTreeIdentity | null;
   private stderrTail: Buffer = Buffer.alloc(0);
   private stderrBytes = 0;
   private readonly stderrLimitBytes: number;
   private settled = false;
 
   private constructor(private readonly child: ChildProcessWithoutNullStreams,
-                      options: AppServerProcessOptions) {
-    this.pid = child.pid ?? null;
+                      options: AppServerProcessOptions,private readonly tree?:WindowsProcessTree) {
+    this.pid = tree?.identity.rootPid ?? child.pid ?? null;
+    this.treeIdentity=tree?.identity??null;
     this.stderrLimitBytes = options.stderrLimitBytes ?? 16_384;
     this.client = new CodexAppServerClient(child.stdout, child.stdin, options.client);
-    this.exited = new Promise<AppServerExit>((resolve) => {
+    this.exited = tree ? tree.exited.then(result=>{
+      this.settled=true;this.client.close(new Error(result.error??"Contained App Server exited"));
+      return {code:result.receipt?.rootCode??result.code,signal:null,error:result.error,stderrBytes:this.stderrBytes,treeReceipt:result.receipt};
+    }) : new Promise<AppServerExit>((resolve) => {
       let spawnError: Error | null = null;
       child.on("error", (error) => { spawnError = error; });
       child.on("close", (code, signal) => {
@@ -77,6 +84,12 @@ export class AppServerProcess {
     catch (error) { child.kill(); throw error; }
   }
 
+  /** Explicit containment, no fallback. Job membership begins at CreateProcess. */
+  static async launchContained(options:AppServerProcessOptions,trustedRoot:string):Promise<AppServerProcess>{
+    const tree=await WindowsProcessTree.launch({...options,env:appServerChildEnv(options.env),trustedRoot});
+    try{return new AppServerProcess(tree.child,options,tree)}catch(error){await tree.stop();throw error}
+  }
+
   /** Bounded diagnostic only. Never logged automatically. */
   get stderr(): { bytes: number; tail: string } {
     return { bytes: this.stderrBytes, tail: this.stderrTail.toString("utf8") };
@@ -85,6 +98,7 @@ export class AppServerProcess {
   /** Stop only this owned child. No automatic restart or fallback. */
   async stop(graceMs = 3000): Promise<AppServerExit> {
     if (!Number.isSafeInteger(graceMs) || graceMs < 1) throw new Error("stop grace invalid");
+    if(this.tree){await this.tree.stop(graceMs);return this.exited}
     if (!this.settled) this.child.kill();
     const timer = setTimeout(() => {
       if (!this.settled) this.child.kill("SIGKILL");

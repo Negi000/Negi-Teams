@@ -64,11 +64,11 @@ export async function submitVaultRun(prepared: PreparedVaultRun, scheduler: File
       resources: config.resources.map((name) => ({ name, mode: "write" as const })), reserveUsd: 0 } } });
 }
 
-export async function verifyVaultRun(prepared: PreparedVaultRun, signal?: AbortSignal, outputName = "verification.json") {
+export async function verifyVaultRun(prepared: PreparedVaultRun, signal?: AbortSignal, outputName = "verification.json",processOwner?:TaskExecutionOwner) {
   if (!/^verification(?:-r[1-9][0-9]?)?\.json$/.test(outputName)) throw new Error("Verification output name invalid");
   const { config, contract } = prepared;
   return verifyConfiguredCheckout({ ...config, baseSha: contract.baseSha, allowedPaths: contract.scope.allowedPaths,
-    requiredVerification: contract.verification, commands: config.verification }, signal, outputName);
+    requiredVerification: contract.verification, commands: config.verification,processOwner }, signal, outputName);
 }
 
 export async function executeVaultRun(prepared: PreparedVaultRun, scheduler: FileScheduler,
@@ -84,6 +84,7 @@ export async function executeVaultRun(prepared: PreparedVaultRun, scheduler: Fil
   // Admission occurs before opening either provider process.
   try { return await runScheduledVaultTask({ scheduler, dispatchKey: `${config.runId}:dispatch`, signal,
     admit:hooks?.admit,
+    beforeRelease:()=>owner.assertProcessesEnded(),
     onCapacityReleased: hooks?.onCapacityReleased,
     run: { runId: config.runId, cwd: config.checkout, vaultDirectory: config.vault,
       snapshotPath: config.snapshot, ledger, artifactDir: join(config.outputDir, "artifacts"),
@@ -91,7 +92,7 @@ export async function executeVaultRun(prepared: PreparedVaultRun, scheduler: Fil
       deadlineAtMs,
       astra: { client: null as never, ...config.astra }, sol: { client: null as never, ...config.sol },
       ...(prepared.approvedPlan ? { approvedPlan: prepared.approvedPlan } : {}),
-      verify: () => verifyVaultRun(prepared, signal) },
+      verify: () => verifyVaultRun(prepared, signal,"verification.json",owner) },
     execute: async (options) => {
       if (signal?.aborted) throw new Error("Run stopped before provider dispatch");
       const bindings = new Map<TaskRole, { attemptId: string; threadId: string; turnId: string }>();
@@ -131,21 +132,23 @@ export async function executeVaultRun(prepared: PreparedVaultRun, scheduler: Fil
           try { provider?.client.answerApproval(request, false); } catch { /* provider may be gone */ }
         });
       } : undefined;
-      const stop = () => { if (astra) void astra.stop(); if (sol) void sol.stop(); };
+      const stop = () => { if (astra) void astra.stop().catch(()=>{}); if (sol) void sol.stop().catch(()=>{}); };
       signal?.addEventListener("abort", stop, { once: true });
       try {
         if (!prepared.approvedPlan) {
           await owner.launching("astra");
-          astra = AppServerProcess.launch({ executable: config.executable,
+          const launch={ executable: config.executable,
             args: boundedAppServerArgs(true), env: subscriptionChildEnv(), cwd: config.checkout,
-            client: { transportTimeoutMs: 20_000, onApproval: onApproval("astra") } });
-          await owner.started("astra", astra.pid);
+            client: { transportTimeoutMs: 20_000, onApproval: onApproval("astra") } };
+          astra=process.platform==="win32"?await AppServerProcess.launchContained(launch,owner.processTreeRoot):AppServerProcess.launch(launch);
+          await owner.started("astra", astra.pid,astra.treeIdentity??undefined);
         }
         await owner.launching("sol");
-        sol = AppServerProcess.launch({ executable: config.executable,
+        const launch={ executable: config.executable,
           args: boundedAppServerArgs(true), env: subscriptionChildEnv(), cwd: config.checkout,
-          client: { transportTimeoutMs: 20_000, onApproval: onApproval("sol") } });
-        await owner.started("sol", sol.pid);
+          client: { transportTimeoutMs: 20_000, onApproval: onApproval("sol") } };
+        sol=process.platform==="win32"?await AppServerProcess.launchContained(launch,owner.processTreeRoot):AppServerProcess.launch(launch);
+        await owner.started("sol", sol.pid,sol.treeIdentity??undefined);
         for (const provider of [...(astra ? [astra] : []), sol]) {
           await provider.client.initialize();
           const account = await provider.client.readAccountMode();
@@ -184,7 +187,7 @@ export async function executeVaultRun(prepared: PreparedVaultRun, scheduler: Fil
         signal?.removeEventListener("abort", stop);
         const stopped = await Promise.allSettled(([ ["astra", astra], ["sol", sol] ] as const)
           .filter((entry) => entry[1] !== null).map(async ([role, provider]) => {
-            await provider!.stop();await owner.exited(role, provider!.pid);
+            const exit=await provider!.stop();await owner.exited(role, provider!.pid,exit.treeReceipt);
           }));
         const failed = stopped.find((item) => item.status === "rejected");
         if (failed?.status === "rejected") throw failed.reason;

@@ -94,3 +94,25 @@ test("pre-dispatch exception releases a job; exception after an attempt stays un
     assert.equal((await scheduler.read()).state?.entries[1]?.status, "needs_reconciliation");
   });
 });
+
+test("missing owned process exit evidence retains conflicting checkout and execution capacity",async()=>{
+  await fixture(async({scheduler,checkout,options})=>{
+    await scheduler.append(event("conflict",{type:"submit",work:{id:"conflicting",parentId:null,dependencies:[],role:"sol",checkout,
+      checkoutMode:"write",resources:[],reserveUsd:0}}));
+    await assert.rejects(runScheduledVaultTask({scheduler,dispatchKey:"unconfirmed-exit",run:options,
+      execute:async()=>result("run-a","ready_for_review"),beforeRelease:async()=>{throw Error("Missing Job receipt")}}),/Missing Job receipt/);
+    assert.equal((await scheduler.read()).state?.entries[0].status,"needs_reconciliation");
+    assert.equal(await scheduler.startNext("must-not-run"),null);
+  });
+});
+
+test("unknown verification cannot be settled as a known failed run",async()=>{
+  await fixture(async({scheduler,checkout,options})=>{
+    await scheduler.append(event("unknown-check-conflict",{type:"submit",work:{id:"conflicting",parentId:null,dependencies:[],role:"sol",checkout,
+      checkoutMode:"write",resources:[],reserveUsd:0}}));
+    const unknown=result("run-a","blocked");unknown.verification={outcome:"unknown",evidenceRef:"local:verification-threw"};
+    await runScheduledVaultTask({scheduler,dispatchKey:"unknown-check",run:options,execute:async()=>unknown});
+    assert.equal((await scheduler.read()).state?.entries[0].status,"needs_reconciliation");
+    assert.equal(await scheduler.startNext("must-not-run"),null);
+  });
+});

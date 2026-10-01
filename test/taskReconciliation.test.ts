@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
 import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
@@ -16,10 +16,11 @@ import { submitVaultRun } from "../src/server/orchestration/vaultTaskExecution.t
 import { inspectTaskExecutionOwner } from "../src/server/orchestration/taskExecutionOwner.ts";
 import type { VaultRunConfig } from "../src/server/orchestration/vaultRunConfig.ts";
 import type { VaultTaskContract } from "../src/server/orchestration/vaultTaskContract.ts";
+import { WindowsProcessTree } from "../src/server/master/windowsProcessTree.ts";
 
 const git=(cwd:string,args:string[])=>execFileSync("git",args,{cwd,windowsHide:true,stdio:["ignore","pipe","pipe"]}).toString().trim();
-async function fixture(operation:(f:Awaited<ReturnType<typeof setup>>)=>Promise<void>){const f=await setup();try{await operation(f)}finally{f.release();await f.service.close();await rm(f.root,{recursive:true,force:true})}}
-async function setup(){
+async function fixture(operation:(f:Awaited<ReturnType<typeof setup>>)=>Promise<void>,verificationUnknown=false){const f=await setup(verificationUnknown);try{await operation(f)}finally{f.release();await f.service.close();await rm(f.root,{recursive:true,force:true})}}
+async function setup(verificationUnknown=false){
   const root=await mkdtemp(join(tmpdir(),"negi-recovery-")),checkout=join(root,"checkout"),vault=join(root,"vault"),outputDir=join(root,"output");
   await mkdir(checkout);await mkdir(join(checkout,"docs"));await mkdir(vault);
   await mkdir(join(checkout,"docs/sub"));await writeFile(join(checkout,"docs/sub/file.txt"),"delete fixture\n");
@@ -49,7 +50,16 @@ async function setup(){
       await append({type:"bind_provider",attemptId:"astra-attempt",threadId:"thread-fixture",turnId:"turn-fixture"});
       await writeFile(join(prepared.config.checkout,"docs/result.txt"),"retained dirty work\n");
       await mkdir(join(outputDir,"artifacts"),{recursive:true});await writeFile(join(outputDir,"artifacts/astra-attempt.md"),"retained partial result\n");
-      const state=await append({type:"provider_unknown",attemptId:"astra-attempt",reason:"Synthetic connection loss"});
+      let state;
+      if(verificationUnknown){
+        const outputRef=join(outputDir,"artifacts/astra-attempt.md")+"#sha256="+createHash("sha256").update("retained partial result\n").digest("hex");
+        await append({type:"complete_attempt",attemptId:"astra-attempt",resolvedModel:config.astra.model,threadId:"thread-fixture",turnId:"turn-fixture",outputRef});
+        await append({type:"start_attempt",attemptId:"sol-attempt",role:"sol",requestedModel:config.sol.model});
+        await append({type:"bind_provider",attemptId:"sol-attempt",threadId:"thread-sol",turnId:"turn-sol"});
+        const solPath=join(outputDir,"artifacts/sol-attempt.md"),text="Completed synthetic work.\n";await writeFile(solPath,text);
+        await append({type:"complete_attempt",attemptId:"sol-attempt",resolvedModel:config.sol.model,threadId:"thread-sol",turnId:"turn-sol",outputRef:solPath+"#sha256="+createHash("sha256").update(text).digest("hex")});
+        state=await append({type:"verify",outcome:"unknown",evidenceRef:"local:verification-process-unconfirmed"});
+      }else state=await append({type:"provider_unknown",attemptId:"astra-attempt",reason:"Synthetic connection loss"});
       await scheduler.append({key:"fixture:unknown",at:new Date().toISOString(),action:{type:"unknown",workId:config.runId,reason:"Synthetic connection loss"}});
       if(wait)await gate;return state;
     }};
@@ -62,6 +72,18 @@ async function start(f:Awaited<ReturnType<typeof setup>>,live=false){
   const until=Date.now()+5000;for(;;){const view=await f.service.snapshot(v.id);if(view.status==="needs_reconciliation"&&(live||!view.live))return view;
     if(Date.now()>until)throw Error("Fixture did not settle");await new Promise(resolve=>setTimeout(resolve,10))}
 }
+test("unknown verification after completed Sol remains inspectable without enabling close",async()=>fixture(async f=>{
+  f.setStatus("completed");const v=await start(f),before=await readFile(join(f.checkout,"docs/result.txt"));
+  assert.equal((await new FileTaskLedger(join(f.config.outputDir,"run.jsonl")).read()).state?.status,"blocked");
+  const inspection=await f.service.inspectReconciliation(v.id,v.configSha256,randomUUID());
+  assert.equal(inspection.dossier.taskStatus,"blocked");assert.equal(inspection.dossier.attempt.role,"sol");
+  assert.equal(inspection.dossier.attempt.state,"completed");assert.equal(inspection.canClose,false);
+  assert.match(inspection.heldReasons.join("\n"),/検証結果が不明/);
+  assert.deepEqual(f.calls(),{provider:1,execute:1});
+  await assert.rejects(f.service.closeReconciliation(v.id,v.configSha256,randomUUID(),inspection.inspectionId,inspection.dossierSha256),/uncertain/);
+  assert.equal((await new FileScheduler(f.config.schedulerPath).read()).state?.entries[0].status,"needs_reconciliation");
+  assert.deepEqual(await readFile(join(f.checkout,"docs/result.txt")),before);assert.deepEqual(f.calls(),{provider:1,execute:1});
+},true));
 test("explicit inspected close preserves dirty bytes, abandons the attempt permanently and verifies signed replay",async()=>fixture(async f=>{
   const v=await start(f),before=git(f.checkout,["status","--porcelain"]),bytes=await readFile(join(f.checkout,"docs/result.txt"));
   const request=randomUUID(),inspection=await f.service.inspectReconciliation(v.id,v.configSha256,request);
@@ -106,7 +128,7 @@ test("a direct provider PID exit never substitutes for missing process-tree cont
     {kind:"exited",role:"astra",pid:process.pid,ownerId:owner.id}].map(e=>JSON.stringify(e)+"\n").join(""));
   const inspection=await f.service.inspectReconciliation(v.id,v.configSha256,randomUUID());
   assert.equal(inspection.dossier.owner.status,"finished");assert.equal(inspection.canClose,false);
-  assert.match(inspection.heldReasons.join(" "),/子プロセス全体/);
+  assert.match(inspection.heldReasons.join(" "),/実行枠/);
   await assert.rejects(f.service.closeReconciliation(v.id,v.configSha256,randomUUID(),inspection.inspectionId,inspection.dossierSha256),/uncertain/);
   assert.equal((await new FileScheduler(f.config.schedulerPath).read()).state?.entries[0].status,"needs_reconciliation");
 }));
@@ -134,12 +156,24 @@ test("nested directory deletion and an approval exceeding 512KB remain inspectab
     assert.equal(inspection.dossier.approvalSummary.count,1);
     assert.equal(inspection.dossier.checkout.safe,true);
 }));
-test("a saved close with an interrupted scheduler write resumes only its metadata, without another provider call",async()=>fixture(async f=>{
+for(const legacy of [false,true])test(legacy?"historical pending close without job projection resumes its signed metadata":
+  "a saved close with an interrupted scheduler write resumes only its metadata, without another provider call",async()=>fixture(async f=>{
   const v=await start(f),inspection=await f.service.inspectReconciliation(v.id,v.configSha256,randomUUID()),closeId=randomUUID();
   const append=FileScheduler.prototype.append;FileScheduler.prototype.append=async function(event,validate){
     if(event.key===`task-close:${closeId}:scheduler`)throw Error("Synthetic scheduler write interrupted");return append.call(this,event,validate)};
   try{await assert.rejects(f.service.closeReconciliation(v.id,v.configSha256,closeId,inspection.inspectionId,inspection.dossierSha256),/interrupted/)}
   finally{FileScheduler.prototype.append=append}
+  if(legacy){
+    // Construct the historical signed fixture shape, never mutate user proofs.
+    const root=join(f.root,"state/reconciliation-proofs"),key=await readFile(join(root,"server-signing-key"));let digest="";
+    for(const id of [inspection.inspectionId,closeId]){const path=join(root,id+".json"),envelope=JSON.parse(await readFile(path,"utf8"));
+      const dossier=JSON.parse(envelope.receipt.data.dossier);delete dossier.owner.jobExit;
+      digest=createHash("sha256").update(JSON.stringify(dossier)).digest("hex");
+      envelope.receipt.data.dossier=JSON.stringify(dossier);envelope.receipt.artifactSha256=digest;
+      envelope.signature=createHmac("sha256",key).update(JSON.stringify(envelope.receipt)).digest("hex");await writeFile(path,JSON.stringify(envelope)+"\n");
+    }
+    const path=join(f.config.outputDir,"recovery-close.json"),intent=JSON.parse(await readFile(path,"utf8"));intent.dossierSha256=digest;await writeFile(path,JSON.stringify(intent)+"\n");
+  }
   assert.equal((await f.service.snapshot(v.id)).status,"needs_reconciliation");await f.service.close();
   const restored=await LocalTaskService.open(f.catalog,f.runtime);
   try{
@@ -148,6 +182,20 @@ test("a saved close with an interrupted scheduler write resumes only its metadat
     assert.equal((await restored.closeReconciliation(v.id,v.configSha256,closeId,pending.inspectionId,pending.dossierSha256)).status,"stopped");
     assert.deepEqual(f.calls(),{execute:1,provider:2});
   }finally{await restored.close()}
+}));
+
+test("an empty Windows job receipt still cannot close real provider work because external brokers are unproven",{skip:process.platform!=="win32"},async()=>fixture(async f=>{
+  const v=await start(f),owner=JSON.parse(await readFile(join(f.config.outputDir,"execution-owner.json"),"utf8"));
+  const tree=await WindowsProcessTree.launch({executable:process.execPath,args:["-e","process.exit(0)"],cwd:f.checkout,env:process.env,trustedRoot:join(f.root,"job-fixture")});
+  const result=await tree.exited;assert.ok(result.receipt);
+  await writeFile(join(f.config.outputDir,"execution-children.jsonl"),[
+    {kind:"launch",role:"astra",ownerId:owner.id},{kind:"started",role:"astra",pid:tree.identity.rootPid,tree:tree.identity,ownerId:owner.id},
+    {kind:"exited",role:"astra",pid:tree.identity.rootPid,tree:result.receipt,ownerId:owner.id}].map(e=>JSON.stringify(e)+"\n").join(""));
+  const inspection=await f.service.inspectReconciliation(v.id,v.configSha256,randomUUID());
+  assert.equal(inspection.dossier.owner.jobExit,"confirmed");assert.equal(inspection.canClose,false);
+  assert.match(inspection.heldReasons.join(" "),/外部サービス/);
+  await assert.rejects(f.service.closeReconciliation(v.id,v.configSha256,randomUUID(),inspection.inspectionId,inspection.dossierSha256),/uncertain/);
+  assert.equal((await new FileScheduler(f.config.schedulerPath).read()).state?.entries[0].status,"needs_reconciliation");
 }));
 test("authenticated same-origin recovery HTTP accepts only pinned identities and the page script parses",async()=>fixture(async f=>{
   const v=await start(f),handle=createTaskHttp(f.service,{token:"fixture-auth",noAuth:false}),server=createServer((req,res)=>{

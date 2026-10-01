@@ -40,8 +40,9 @@ export interface TaskReconciliationView {
 }
 export type InspectTaskProvider=(config:VaultRunConfig,threadId:string,turnId:string)=>Promise<ProviderTurnEvidence>;
 export const inspectTaskProvider:InspectTaskProvider=async(config,threadId,turnId)=>{
-  const provider=AppServerProcess.launch({executable:await realpath(config.executable),cwd:config.checkout,
-    args:boundedAppServerArgs(true),env:subscriptionChildEnv(),client:{transportTimeoutMs:20_000}});
+  const options={executable:await realpath(config.executable),cwd:config.checkout,
+    args:boundedAppServerArgs(true),env:subscriptionChildEnv(),client:{transportTimeoutMs:20_000}};
+  const provider=process.platform==="win32"?await AppServerProcess.launchContained(options,join(config.outputDir,"inspection-process-trees")):AppServerProcess.launch(options);
   try{
     await provider.client.initialize();const account=await provider.client.readAccountMode();
     if(account.type!=="chatgpt"||!account.requiresOpenaiAuth)throw Error("Task inspection requires ChatGPT login");
@@ -120,9 +121,11 @@ async function localDossier(source:TaskReconciliationSource):Promise<TaskReconci
   await regular(join(config.outputDir,"run.jsonl"),8_000_000);await regular(config.schedulerPath,8_000_000);
   const ledger=await source.ledger.read(),schedule=await source.scheduler.read(),state=ledger.state;
   const entry=schedule.state?.entries.find(e=>e.work.id===config.runId);
-  const attempt=state?[...state.attempts].reverse().find(a=>["unknown","running"].includes(a.state)):undefined;
+  const unknownVerification=state?.verification?.outcome==="unknown";
+  const attempt=state?([...state.attempts].reverse().find(a=>["unknown","running"].includes(a.state))??
+    (unknownVerification?state.attempts.at(-1):undefined)):undefined;
   if(!state||!entry||!attempt||!["running","needs_reconciliation"].includes(entry.status)||
-    !["needs_reconciliation","planning","working"].includes(state.status)||
+    !(["needs_reconciliation","planning","working"].includes(state.status)||(state.status==="blocked"&&unknownVerification))||
     entry.claimKey!==`${config.runId}:dispatch`||entry.work.checkout!==config.checkout)
     throw Error("This phase requires a separate recovery decision; no uncertain provider attempt can be closed");
   const authoritySha256=await storedContract(source,state);
@@ -143,6 +146,7 @@ function terminal(d:TaskReconciliationDossier){const p=d.provider;return Boolean
   p.source==="thread/turns/list"&&Number.isSafeInteger(p.pagesRead)&&p.pagesRead>0&&p.pagesRead<=20&&Number.isFinite(p.observedAtMs));}
 function reasons(d:TaskReconciliationDossier):string[]{
   const held:string[]=[];
+  if(!["running","unknown"].includes(d.attempt.state))held.push("検証結果が不明です。検証記録と残っている処理を照合してください。");
   if(!terminal(d))held.push("保存された実行の終了をプロバイダーで確認できません。");
   const safety=d.provider?.processSafety,passive=["agentMessage","userMessage","reasoning","plan","contextCompaction"];
   if(!safety||safety.source!=="thread/items/list"||!safety.complete||!safety.noExecutableItems||
@@ -151,10 +155,11 @@ function reasons(d:TaskReconciliationDossier):string[]{
     !Array.isArray(safety.itemTypes)||safety.itemTypes.some(type=>!passive.includes(type))||! /^[0-9a-f]{64}$/.test(safety.sha256))
     held.push("コマンド等が残した処理の終了を確認できません。実行枠を保持して照合してください。");
   if(!["finished","dead"].includes(d.owner.status))held.push(({missing:"元の実行の所有記録がありません。",live:"元の実行プロセスが終了したと確認できません。",unknown:"元の実行の所有記録を照合できません。"} as Record<string,string>)[d.owner.status]??"実行の終了確認が必要です。");
-  // Direct PID exit is insufficient for Codex/MCP/command descendants, including
-  // processes started during provider initialization. No real provider claim is
-  // released until a future contained process-tree receipt is implemented.
-  if(d.owner.childPids.length)held.push("モデルが起動した子プロセス全体の終了記録が未対応のため、実行枠の解放を保留しています。");
+  // Job receipts cover inherited descendants, not WMI/services or other brokers.
+  // Neither a direct PID exit nor an empty job proves all initiated work ended.
+  if(d.owner.childPids.length)held.push(d.owner.jobExit==="confirmed"?
+    "所属する処理の終了は確認しましたが、外部サービス経由で起動した処理は確認できないため、実行枠を保持します。":
+    "起動した処理全体の終了を確認できないため、実行枠の解放を保留しています。");
   if(!d.checkout.safe||d.artifact.state==="unsafe")held.push("差分または成果ファイルを安全に読み取れません。");
   return held;
 }
@@ -181,8 +186,12 @@ export class LocalTaskReconciliation {
   }
   private async sameLocalArtifacts(source:TaskReconciliationSource,dossier:TaskReconciliationDossier):Promise<boolean>{
     const state=(await source.ledger.read()).state;
+    const owner=await inspectTaskExecutionOwner(source.config.outputDir,source.config.runId,source.configSha256,`${source.config.runId}:dispatch`);
+    // Historical signed previews lack the new derived job projection. Their raw
+    // owner bytes are still pinned by sha256; preserve exact pending retries.
+    const {jobExit,...historicalOwner}=owner;void jobExit;
     return !source.isActive()&&Boolean(state&&await storedContract(source,state)===dossier.authoritySha256)&&
-      reconciliationHash(await inspectTaskExecutionOwner(source.config.outputDir,source.config.runId,source.configSha256,`${source.config.runId}:dispatch`))===reconciliationHash(dossier.owner)&&
+      reconciliationHash(dossier.owner.jobExit===undefined?historicalOwner:owner)===reconciliationHash(dossier.owner)&&
       reconciliationHash(await checkoutFacts(source.config,dossier.contract.scope?.allowedPaths??[]))===reconciliationHash(dossier.checkout)&&
       reconciliationHash(await artifactFacts(source.config,dossier.attempt))===reconciliationHash(dossier.artifact);
   }

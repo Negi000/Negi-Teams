@@ -70,7 +70,7 @@
 
 確認は保存済みのthread/turnだけを対象にします。ChatGPT認証・OpenAI provider・登録checkoutの一致を確かめ、`thread/read`・`thread/turns/list`・`thread/items/list`から状態を読みます。確認からモデルturn、新しい会話、再実行、割込み、機械検証は開始しません。確認時点と内容のhashを署名保存し、同じrequest IDの再送は同じ記録を返します。更新確認は別request IDです。
 
-通常のTask runnerとCLIは、親の所有記録、provider起動前の意図、直接の子PIDと終了、ホスト側の処理完了をモデルの書込範囲外へ保存します。終端turnだけではホスト側の検証や子孫プロセスの終了は証明できません。**実providerの子PIDを持つTaskは終了操作を許可せず、実行枠を保持します。** 子プロセス全体を管理する仕組みと、その終了証明は未実装です。所有記録がない旧Task、生存/不明な所有者、未取得/進行中のturn、コマンドや未知のitemを含む履歴も保留します。
+通常のTask runnerとCLIは、親の所有記録、provider起動前の意図、子PIDと終了、ホスト側の処理完了をモデルの書込範囲外へ保存します。Windowsでは下記のJob所属終了記録も保存します。終端turnや空のJobだけでは、外部サービス経由を含む起動済み処理全体の終了は証明できません。**実providerの子PIDを持つ照合待ちTaskは終了操作を許可せず、実行枠を保持します。** 所有記録がない旧Task、生存/不明な所有者、未取得/進行中のturn、コマンドや未知のitemを含む履歴も保留します。
 
 終了操作は、子providerを持たない合成runtimeだけで検証した原型です。確認した内容と新しいprovider観測を照合し、署名付き終了判断→Taskの試行をabandoned/Taskをstopped→schedulerをfailedの順で保存します。差分・部分成果を保持し、成果受入や再投入にはしません。完全な署名付き終了判断が残り、現在の差分・成果・契約・所有記録が一致する場合だけ、同じ操作IDで残りの台帳保存を再試行できます。この再試行ではprovider呼出しや検証を繰り返しません。実Taskで終了・実行枠解放が成功したという実証はありません。
 
@@ -84,6 +84,22 @@
 - completed成果の完全な救済、検証/人間レビューへの引継ぎ、Astraの継続、汎用の取消・再開・照合は別の残る条件です。
 
 通常ビルド済みサーバーと実Codexの読取接続で、合成の保存済みunknown試行を確認しました。合成thread/turnを実providerで確認できないため、画面は保留と終了不可を表示しました。元checkoutのHEAD・dirty bytes・部分成果は変わらず、モデルturn/Jev呼出しはありません。これは実Taskの復旧成功の証拠ではありません。
+
+### WindowsのJob所属プロセス管理（2026-10-02）
+
+Windowsの通常Task実行では、Astra・Sol・登録された機械検証コマンド・`git diff --check`をそれぞれJob Object内で起動します。読取専用の照合providerも同じ起動方式です。`PROC_THREAD_ATTRIBUTE_JOB_LIST`を用いてプロセス生成時に所属させ、breakawayを許可しません。親の停止・管理通信の切断・supervisorの終了時には、そのJobに所属する処理を停止します。providerが自然終了して子孫が残った場合も、所属する子孫の停止を確認してから終了記録を返します。
+
+終了記録にはroot/supervisor PID、Job ID、helper hash、rootのexit code、所属プロセス数0、観測時刻を保存します。記録と起動時のIDが一致しなければ所有guardを保持します。schedulerが正常/失敗として枠を解放する前にも、起動した全roleの終了記録を確認します。検証結果が不明な場合は、Task台帳上の`blocked`を確定失敗と扱わず、schedulerの枠を保持して照合待ちにします。完了したSolの成果と不明な検証も照合画面で確認できますが、終了操作は許可しません。
+
+ローカル修正版・統合検証のようにTask親ownerを持たないWindowsの検証には、出力名ごとの`verification-owners`記録を作ります。既存のTask ownerを上書きしません。以前の署名済み照合記録は、新しい派生表示項目を持たなくても元bytesのhashを照合して読み直します。
+
+実行条件はWindows 10以降・x64と、インストール済み.NET Frameworkの`Framework64/v4.0.30319/csc.exe`です。trusted output内で同梱C# sourceをコンパイルし、helperのhashを起動前に照合します。コンパイラ取得やインストールは行いません。コンパイル/Job起動が失敗した場合に通常spawnへ切り替えません。Windowsの検証コマンドは実行可能ファイルを指定してください。`.cmd`などshell経由を要するコマンドの自動代替はありません。非Windowsの既存起動経路には、このJob終了保証はありません。
+
+**JobはOS sandboxではありません。** WMIの`Win32_Process.Create`やサービス等の外部brokerから起動した処理はJobの所属外になり得ます。この境界は[MicrosoftのJob Objects仕様](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)と、WMIから起動した子が空Jobの終了記録後も残るネイティブ試験で確認しました。試験ではその試験が所有するPIDだけを後処理しています。外部brokerの制限や追加の停止証明は未実装であり、空Jobを根拠に実Taskの照合終了を有効化しません。原子的な所属の方式は[Microsoftの実装説明](https://devblogs.microsoft.com/oldnewthing/20230209-00/?p=107812)を参照しました。
+
+所属子孫の停止・自然終了・親/supervisor終了・breakaway拒否・RPC/envの維持・検証timeout・正常なVault→Astra→Sol→検証→scheduler精算をローカル試験で確認しました。最後の通常経路は合成App Serverによる試験であり、実モデルの成果品質を示しません。実CodexではinitializeとChatGPT account読取だけを行い、空Jobの終了記録を確認しました。モデルturnとJev呼出しはありません。
+
+最終の標準TS回帰は757件中754成功・3skip・失敗/未完了0、型検査とビルドも成功しました。今回の画面デザインは前回のブラウザ確認時から維持しており、新しいブラウザ/実機試験を実施したという主張ではありません。外部broker制限や実Taskの照合終了が完成したという結果でもありません。
 
 ## 確認した範囲
 

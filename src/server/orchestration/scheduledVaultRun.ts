@@ -19,6 +19,7 @@ export interface ScheduledVaultRunOptions {
   signal?: AbortSignal;
   onCapacityReleased?: () => Promise<void>;
   admit?:TaskAdmissionGuard;
+  beforeRelease?:()=>Promise<void>;
 }
 
 function actualApiCost(state: TaskSnapshot): number | null {
@@ -43,6 +44,11 @@ export async function runScheduledVaultTask(options: ScheduledVaultRunOptions): 
     const event: SchedulerEvent = { key: `${dispatchKey}:${keySuffix}`,
       at: new Date().toISOString(), action };
     await scheduler.append(event);
+  };
+  const confirmRelease=async()=>{
+    try{await options.beforeRelease?.()}
+    catch(error){await record("processes-unknown",{type:"unknown",workId:run.runId,
+      reason:"Owned process termination has not been confirmed; retain checkout and execution slot"});throw error}
   };
   let result: TaskSnapshot;
   const executionRun: VaultRunOptions = registered.work.execution === "astra_to_sol" ? { ...run,
@@ -92,6 +98,7 @@ export async function runScheduledVaultTask(options: ScheduledVaultRunOptions): 
     try { state = (await run.ledger.read()).state; ledgerRead = true; }
     catch { /* keep the reservation when ledger inspection fails */ }
     if (ledgerRead && (state === null || state.attempts.length === 0)) {
+      await confirmRelease();
       await record("preflight-failed", { type: "settle", workId: run.runId,
         outcome: "failed", evidenceRef: "local:pre-dispatch-exception", actualCostUsd: null });
     } else {
@@ -100,15 +107,18 @@ export async function runScheduledVaultTask(options: ScheduledVaultRunOptions): 
     }
     throw error;
   }
-  if (result.status === "needs_reconciliation") {
+  if (result.status === "needs_reconciliation" || result.verification?.outcome==="unknown") {
     await record("outcome-unknown", { type: "unknown", workId: run.runId,
-      reason: result.stopReason ?? "task provider outcome requires reconciliation" });
+      reason: result.verification?.outcome==="unknown"?"Verification result unknown; inspect verification and process records":
+        result.stopReason ?? "task provider outcome requires reconciliation" });
   } else if ((result.status === "ready_for_review" || result.status === "accepted") &&
              result.verification?.outcome === "passed") {
+    await confirmRelease();
     await record("verified", { type: "settle", workId: run.runId,
       outcome: "verified", evidenceRef: result.verification.evidenceRef,
       actualCostUsd: actualApiCost(result) });
   } else {
+    await confirmRelease();
     await record("failed", { type: "settle", workId: run.runId,
       outcome: "failed", evidenceRef: result.verification?.evidenceRef ??
         `ledger:${result.status}`, actualCostUsd: actualApiCost(result) });
