@@ -52,8 +52,16 @@ async function completed(prepared: PreparedVaultRun, scheduler: FileScheduler,
   for (const role of ["astra", "sol"] as const) {
     await append({ type: "start_attempt", attemptId: role, role, requestedModel: config[role].model });
     await append({ type: "bind_provider", attemptId: role, threadId: `thread-${role}`, turnId: `turn-${role}` });
+    const plan = "Synthetic plan", planPath = join(config.outputDir, "synthetic-plan.md");
+    if (role === "astra") await writeFile(planPath, plan);
+    const outputRef = role === "astra" ? `${planPath}#sha256=${createHash("sha256").update(plan).digest("hex")}` : "synthetic:output";
     await append({ type: "complete_attempt", attemptId: role, resolvedModel: config[role].model,
-      threadId: `thread-${role}`, turnId: `turn-${role}`, outputRef: "synthetic:output" });
+      threadId: `thread-${role}`, turnId: `turn-${role}`, outputRef });
+    if (role === "astra") {
+      await scheduler.append({ key: `${config.runId}:planning-complete`, at: new Date().toISOString(), action: {
+        type: "finish_planning", workId: config.runId, planRef: outputRef, threadId: "thread-astra", turnId: "turn-astra" } });
+      assert.ok(await scheduler.tryStartWorker(config.runId, `${config.runId}:worker`));
+    }
   }
   const state = await append({ type: "verify", outcome: "passed", evidenceRef });
   await scheduler.append({ key: `${config.runId}:settle`, at: new Date().toISOString(), action: {
@@ -350,6 +358,14 @@ test("Task HTTP requires cookie authentication and same-origin, pinned mutations
     try {
       assert.equal((await fetch(`${url}/api/tasks`)).status, 401);
       assert.equal((await fetch(`${url}/api/tasks?summary=1`)).status, 401);
+      assert.equal((await fetch(`${url}/api/tasks/capacity/summary`)).status, 401);
+      const capacityResponse = await fetch(`${url}/api/tasks/capacity/summary`, { headers: cookie });
+      assert.equal(capacityResponse.headers.get("cache-control"), "no-store");
+      const capacity = await capacityResponse.json();
+      assert.deepEqual(capacity, { maxConcurrent: 3, planners: 1, workers: 2,
+        usage: { global: 0, planners: 0, workers: 0, waitingWorkers: 0, unresolved: 0, legacyUnphased: 0 }, draining: false });
+      assert.equal((await fetch(`${url}/api/tasks/capacity/summary`, { method: "POST", headers: cookie })).status, 405);
+      assert.deepEqual(await (await fetch(`${url}/api/tasks/capacity/summary`, { headers: cookie })).json(), capacity);
       assert.equal((await fetch(`${url}/api/tasks`, { headers: { Authorization: "Bearer synthetic-task-login" } })).status, 401);
       const view = await (await fetch(`${url}/api/tasks/synthetic-run`, { headers: cookie })).json();
       const summary = await (await fetch(`${url}/api/tasks?summary=1`, { headers: cookie })).json();

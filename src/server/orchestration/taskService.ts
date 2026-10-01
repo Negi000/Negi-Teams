@@ -2,7 +2,7 @@
 import { createHash } from "node:crypto";
 import { lstat, mkdir, open, readFile, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { FileScheduler, schedulerWorkEligible } from "./scheduler.ts";
+import { FileScheduler, parseSchedulerCapacity, schedulerCapacityUsage, schedulerWorkEligible, type ScheduledPhase } from "./scheduler.ts";
 import { scheduledMasterTurns, type MasterTurnAdmission } from "./masterTurnAdmission.ts";
 import { FileTaskLedger, type TaskEvent, type TaskSnapshot } from "./singleTask.ts";
 import { HumanReviewProofStore, isReviewRequestId } from "./humanReviewProof.ts";
@@ -70,6 +70,7 @@ export interface TaskRunView {
   outOfScope: string[]; invariants: string[];
   astra: VaultRunConfig["astra"]; sol: VaultRunConfig["sol"];
   status: string; canStart: boolean; canStop: boolean; live: boolean;
+  executionPhase: ScheduledPhase | null;
   stopRequested: boolean; error: string | null; verificationOutcome: string | null;
   acceptedBy: string | null; attempts: Array<{ role: string; model: string;
     state: string; usage: TaskSnapshot["attempts"][number]["usage"] }>;
@@ -108,6 +109,7 @@ export class LocalTaskService {
     submit: submitVaultRun, execute: executeVaultRun }): Promise<LocalTaskService> {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Task catalog invalid");
     const row = raw as Record<string, unknown>;
+    const capacity = row.capacity === undefined ? undefined : parseSchedulerCapacity(row.capacity);
     if (typeof row.stateRoot !== "string" || !Array.isArray(row.runs) ||
         row.runs.length < 1 || row.runs.length > 100) throw new Error("Task catalog roots/runs invalid");
     const root = await localDestination(row.stateRoot, true);
@@ -148,9 +150,18 @@ export class LocalTaskService {
     }
     await mkdir(root, { recursive: true });
     const operationProofs = await HumanReviewProofStore.open(join(root, "operation-proofs"));
-    return new LocalTaskService(root, runs, new FileScheduler(schedulerPath!), runtime, operationProofs);
+    const scheduler = new FileScheduler(schedulerPath!);
+    await scheduler.ensureSubscriptionConfiguration(capacity);
+    return new LocalTaskService(root, runs, scheduler, runtime, operationProofs);
   }
   list(): Array<{ id: string; title: string }> { return this.runs.map((run) => ({ id: run.config.runId, title: run.title })); }
+  async capacitySnapshot() {
+    const state = (await this.scheduler.read()).state;
+    if (!state || !state.roleLimits) throw new Error("Task role capacity not configured");
+    const usage = schedulerCapacityUsage(state);
+    return { maxConcurrent: state.maxConcurrent, ...state.roleLimits, usage,
+      draining: usage.global > state.maxConcurrent || usage.planners > state.roleLimits.planners || usage.workers > state.roleLimits.workers };
+  }
   /** A resident planner uses the exact scheduler and a server-owned evidence directory. */
   masterTurnAdmission(masterId: string): MasterTurnAdmission {
     return scheduledMasterTurns({ root: join(this.root, "master-turns"), masterId,
@@ -360,7 +371,7 @@ export class LocalTaskService {
     if (!parent || !["verified", "failed"].includes(parent.status)) throw new Error("Task revision provider outcome is not terminal");
     const validationWorkId = `${run.config.runId}:local-revision-${number}`;
     await this.scheduler.append({ key: `${validationWorkId}:submit`, at: new Date().toISOString(),
-      action: { type: "submit", work: { ...parent.work, id: validationWorkId, parentId: run.config.runId, dependencies: [] } } });
+      action: { type: "submit", work: { ...parent.work, execution: "direct", id: validationWorkId, parentId: run.config.runId, dependencies: [] } } });
     try { await this.scheduler.claim(validationWorkId, `${validationWorkId}:local-dispatch`); }
     catch (error) {
       await this.scheduler.append({ key: `${validationWorkId}:cancel-before-checks`, at: new Date().toISOString(), action: {
@@ -501,7 +512,7 @@ export class LocalTaskService {
       acceptance: run.contract.acceptance as string[], allowedPaths: scope?.allowedPaths ?? [],
       outOfScope: scope?.out ?? [], invariants: run.contract.invariants as string[] ?? [],
       verification: run.contract.verification as string[], astra: run.config.astra, sol: run.config.sol,
-      status, canStart: !request && !entry && !state && !this.closing,
+      status, executionPhase: entry?.phase ?? null, canStart: !request && !entry && !state && !this.closing,
       canStop: Boolean(active || entry?.status === "queued"), live: Boolean(active),
       stopRequested: active?.controller.signal.aborted ?? false,
       error: error?.error ?? reviewError ?? state?.stopReason ?? entry?.reason ?? null,
@@ -563,6 +574,7 @@ export class LocalTaskService {
         if (this.active.has(id) || !entry || !schedulerWorkEligible(state, entry)) continue;
         const controller = new AbortController();
         const promise = Promise.resolve().then(() => this.runtime.execute(prepared, this.scheduler, controller.signal, {
+          onCapacityReleased: () => this.pump(),
           knowledgeProofDirectory: this.knowledgeProofDirectory,
           verifyApproval: ({ event, state }) => this.verifyOperationDecision(this.registered(id), event, state),
           onApproval: (approval, decide) => {

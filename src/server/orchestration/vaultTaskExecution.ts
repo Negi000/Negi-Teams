@@ -27,6 +27,7 @@ export interface TaskExecutionHooks {
   onApproval: (approval: TaskOperationApproval,
     decide: (allow: boolean, approvalRef: string, at: string, requestId: string) => Promise<void>) => void;
   verifyApproval: ReconciliationVerifier;
+  onCapacityReleased?: () => Promise<void>;
 }
 
 export async function prepareVaultRun(raw: VaultRunConfig): Promise<PreparedVaultRun> {
@@ -52,6 +53,7 @@ export async function submitVaultRun(prepared: PreparedVaultRun, scheduler: File
   await scheduler.append({ key: `${config.runId}:submit`, at: new Date().toISOString(),
     action: { type: "submit", work: { id: config.runId, parentId: null, dependencies: [],
       role: "sol", checkout: config.checkout, checkoutMode: "write",
+      execution: "astra_to_sol",
       resources: config.resources.map((name) => ({ name, mode: "write" as const })), reserveUsd: 0 } } });
 }
 
@@ -94,13 +96,16 @@ export async function executeVaultRun(prepared: PreparedVaultRun, scheduler: Fil
   const { config, contract } = prepared;
   // One deadline covers both roles and verification, not a fresh budget per turn.
   const deadline = AbortSignal.timeout(contract.limits.timeLimitMinutes * 60_000);
+  const deadlineAtMs = Date.now() + contract.limits.timeLimitMinutes * 60_000;
   signal = signal ? AbortSignal.any([signal, deadline]) : deadline;
   const ledger = new FileTaskLedger(join(config.outputDir, "run.jsonl"), Date.now, undefined, undefined, hooks?.verifyApproval);
   // Admission occurs before opening either provider process.
-  return runScheduledVaultTask({ scheduler, dispatchKey: `${config.runId}:dispatch`,
+  return runScheduledVaultTask({ scheduler, dispatchKey: `${config.runId}:dispatch`, signal,
+    onCapacityReleased: hooks?.onCapacityReleased,
     run: { runId: config.runId, cwd: config.checkout, vaultDirectory: config.vault,
       snapshotPath: config.snapshot, ledger, artifactDir: join(config.outputDir, "artifacts"),
       turnTimeoutMs: Math.min(600_000, contract.limits.timeLimitMinutes * 60_000),
+      deadlineAtMs,
       astra: { client: null as never, ...config.astra }, sol: { client: null as never, ...config.sol },
       verify: () => verifyVaultRun(prepared, signal) },
     execute: async (options) => {
@@ -178,7 +183,11 @@ export async function executeVaultRun(prepared: PreparedVaultRun, scheduler: Fil
               key: `operation-discard:${approval.id}`, at: new Date().toISOString(),
               action: { type: "discard_approval", approvalId: approval.id, reason: "provider_turn_ended" } });
           },
-          beforeSol: async () => { if (signal?.aborted) throw new Error("User requested stop"); } });
+          beforeSol: async () => {
+            if (signal?.aborted) throw new Error("User requested stop");
+            await options.beforeSol?.();
+            if (signal?.aborted) throw new Error("User requested stop");
+          } });
       } finally {
         signal?.removeEventListener("abort", stop);
         await Promise.allSettled([astra.stop(), ...(sol ? [sol.stop()] : [])]);

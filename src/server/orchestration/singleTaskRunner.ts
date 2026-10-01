@@ -13,6 +13,8 @@ export interface SingleTaskClient {
   startTurn: CodexAppServerClient["startTurn"];
   waitForTurn: CodexAppServerClient["waitForTurn"];
 }
+/** Trusted scheduler cancellation while no worker provider turn has been sent. */
+export class TaskPreWorkerStopError extends Error {}
 export interface SingleTaskRunOptions {
   runId: string;
   contract: ContractRef;
@@ -198,7 +200,8 @@ export async function runSingleTask(options: SingleTaskRunOptions): Promise<Task
   if (expired()) return append({ type: "stop", reason: "Task time limit expired before Sol" });
   if (options.beforeSol) {
     try { await options.beforeSol(); }
-    catch { return append({ type: "stop", reason: "Contract or checkout changed before Sol dispatch" }); }
+    catch (error) { return append({ type: "stop", reason: error instanceof TaskPreWorkerStopError
+      ? error.message : "Contract or checkout changed before Sol dispatch" }); }
   }
   const work = await attempt("sol", options.sol,
     promptForSol(options.contract, plan.text, options.solContext));

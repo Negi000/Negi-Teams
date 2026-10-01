@@ -1,7 +1,11 @@
 // Admission wrapper for one Vault-backed Astra -> Sol run.
 // A repeated dispatch key never starts the provider a second time.
-import { resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { lstat, readFile, realpath } from "node:fs/promises";
+import { isAbsolute, relative, resolve } from "node:path";
+import { setTimeout as wait } from "node:timers/promises";
 import { runSingleTaskFromVault } from "./vaultTaskContract.ts";
+import { TaskPreWorkerStopError } from "./singleTaskRunner.ts";
 import type { TaskSnapshot } from "./singleTask.ts";
 import { FileScheduler, type SchedulerAction, type SchedulerEvent } from "./scheduler.ts";
 
@@ -11,6 +15,8 @@ export interface ScheduledVaultRunOptions {
   dispatchKey: string;
   run: VaultRunOptions;
   execute?: (options: VaultRunOptions) => Promise<TaskSnapshot>;
+  signal?: AbortSignal;
+  onCapacityReleased?: () => Promise<void>;
 }
 
 function actualApiCost(state: TaskSnapshot): number | null {
@@ -36,7 +42,45 @@ export async function runScheduledVaultTask(options: ScheduledVaultRunOptions): 
     await scheduler.append(event);
   };
   let result: TaskSnapshot;
-  try { result = await (options.execute ?? runSingleTaskFromVault)(run); }
+  const executionRun: VaultRunOptions = registered.work.execution === "astra_to_sol" ? { ...run,
+    beforeSol: async () => {
+      await run.beforeSol?.();
+      const planned = (await run.ledger.read()).state;
+      const attempt = planned?.attempts.at(-1);
+      if (planned?.runId !== run.runId || planned.status !== "ready_for_worker" || attempt?.role !== "astra" ||
+          attempt.state !== "completed" || !attempt.outputRef || !attempt.threadId || !attempt.turnId)
+        throw new Error("Astra terminal planning evidence missing");
+      const at = attempt.outputRef.lastIndexOf("#sha256=");
+      if (at < 1) throw new Error("Astra planning artifact digest missing");
+      const path = attempt.outputRef.slice(0, at), expected = attempt.outputRef.slice(at + 8);
+      const assertPlan = async () => {
+        const root = await realpath(run.artifactDir), actual = await realpath(path);
+        const rel = relative(root.toLowerCase(), actual.toLowerCase()), entry = await lstat(path);
+        if (!rel || rel.startsWith("..") || isAbsolute(rel) || entry.isSymbolicLink() || !entry.isFile() || entry.size > 2_000_000 ||
+            createHash("sha256").update(await readFile(actual)).digest("hex") !== expected)
+          throw new Error("Astra planning artifact changed or outside run output");
+      };
+      await assertPlan();
+      await record("planning-complete", { type: "finish_planning", workId: run.runId,
+        planRef: attempt.outputRef, threadId: attempt.threadId, turnId: attempt.turnId });
+      try { await options.onCapacityReleased?.(); } catch { /* the durable transition remains valid */ }
+      for (;;) {
+        if (options.signal?.aborted) throw new TaskPreWorkerStopError("作業枠の待機中に停止しました。作業は開始していません。");
+        if (run.deadlineAtMs !== undefined && Date.now() >= run.deadlineAtMs)
+          throw new TaskPreWorkerStopError("作業枠の待機中に制限時間を超えました。作業は開始していません。");
+        if (await scheduler.tryStartWorker(run.runId, `${dispatchKey}:worker`)) break;
+        try { await wait(100, undefined, { signal: options.signal }); }
+        catch { throw new TaskPreWorkerStopError("作業枠の待機中に停止しました。作業は開始していません。"); }
+      }
+      // The wait can outlive an operator's edits. Check again while holding the worker lease.
+      await assertPlan();
+    } } : run;
+  try {
+    result = await (options.execute ?? runSingleTaskFromVault)(executionRun);
+    if (registered.work.execution === "astra_to_sol" && ["ready_for_review", "accepted"].includes(result.status) &&
+        (await scheduler.read()).state?.entries.find(entry => entry.work.id === run.runId)?.phase !== "working")
+      throw new Error("Pipeline completed without a recorded worker admission");
+  }
   catch (error) {
     // Once a task attempt was recorded, a provider may have performed work.
     // Keep the checkout and slot reserved until the provider and diff are reviewed.
