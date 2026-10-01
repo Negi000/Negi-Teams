@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
-import { CodexAppServerClient, type CodexApprovalRequest, type CodexDynamicToolCall, type CodexDynamicToolResult } from "../src/server/master/appServerClient.ts";
+import { CodexAppServerClient, type CodexApprovalRequest, type CodexDynamicToolCall, type CodexDynamicToolResult, type CodexDynamicToolLimits } from "../src/server/master/appServerClient.ts";
 
 function fakeServer(handle: (request: Record<string, unknown>) => unknown,
                     options: ConstructorParameters<typeof CodexAppServerClient>[2] = {}) {
@@ -43,10 +43,11 @@ function basic(request: Record<string, unknown>): unknown {
 
 const taskTool = { type: "function" as const, name: "negi_dispatch_task", description: "Fixed Task dispatch",
   inputSchema: { type: "object", additionalProperties: false } };
-async function dynamicFixture(handler: (call: CodexDynamicToolCall) => Promise<CodexDynamicToolResult>) {
+async function dynamicFixture(handler: (call: CodexDynamicToolCall) => Promise<CodexDynamicToolResult>,
+                              limits?: Record<string, CodexDynamicToolLimits>) {
   const f = fakeServer(basic, { onDynamicToolCall: handler });
   await f.client.initialize(); await f.client.discoverModels();
-  await f.client.startThread({ cwd: "E:/repo", model: "gpt-6-astra", sandbox: "read-only", dynamicTools: [taskTool] });
+  await f.client.startThread({ cwd: "E:/repo", model: "gpt-6-astra", sandbox: "read-only", dynamicTools: [taskTool], dynamicToolLimits: limits });
   await f.client.startTurn("delegate fixed Task", "medium");
   const call = (id: string, overrides: Record<string, unknown> = {}) => f.toClient.write(JSON.stringify({
     jsonrpc: "2.0", id, method: "item/tool/call", params: { threadId: "thread-a", turnId: "turn-a",
@@ -54,6 +55,66 @@ async function dynamicFixture(handler: (call: CodexDynamicToolCall) => Promise<C
   return { ...f, call };
 }
 const microtasks = () => new Promise<void>(resolve => setImmediate(resolve));
+
+test("host-owned native limits admit bounded Japanese plans and project context without exposing limits to the provider", async () => {
+  let calls = 0;
+  let resultText = "仕様".repeat(7000);
+  const limits = { [taskTool.name]: { argumentBytes: 50_000, resultBytes: 64_000 } };
+  const f = await dynamicFixture(async () => { calls++; return { success: true, text: resultText }; }, limits);
+  try {
+    limits[taskTool.name].argumentBytes = 64_000; // Host input is copied at registration.
+    const start = f.messages.find(m => m.method === "thread/start")!.params as Record<string, unknown>;
+    assert.deepEqual(start.dynamicTools, [taskTool]); assert.equal(start.dynamicToolLimits, undefined);
+    f.call("japanese-plan", { arguments: { plan: "仕様".repeat(4000) } });
+    f.call("duplicate-plan", { arguments: { plan: "仕様".repeat(4000) } });
+    await microtasks(); assert.equal(calls, 1);
+    const result = f.messages.find(m => m.id === "japanese-plan")!.result as { success: boolean; contentItems: Array<{text: string}> };
+    assert.equal(result.success, true); assert.equal(Buffer.byteLength(result.contentItems[0].text), 42_000);
+    f.call("over-host-limit", { callId: "too-large", arguments: { plan: "仕様".repeat(9000) } });
+    assert.equal((f.messages.at(-1)!.error as Record<string, unknown>).code, -32602); assert.equal(calls, 1);
+    f.call("foreign-large", { tool: "unregistered", arguments: { plan: "仕様".repeat(4000) } });
+    assert.equal((f.messages.at(-1)!.error as Record<string, unknown>).code, -32602);
+    resultText = "x".repeat(64_001);
+    f.call("over-result-limit", { callId: "large-result", arguments: {} }); await microtasks();
+    assert.equal((f.messages.find(m => m.id === "over-result-limit")!.result as Record<string, unknown>).success, false);
+    assert.equal(calls, 2);
+  } finally { f.client.close(); }
+});
+
+test("unregistered or unbounded native limit overrides fail before starting a provider thread", async () => {
+  const inherited = Object.assign(Object.create({ argumentBytes: 64_000, resultBytes: 64_000 }), { a: 1, b: 2 });
+  for (const limits of [{ unregistered: { argumentBytes: 50_000, resultBytes: 64_000 } },
+    { [taskTool.name]: { argumentBytes: 64_001, resultBytes: 24_000 } },
+    { [taskTool.name]: { argumentBytes: 8000, resultBytes: 0 } }, { [taskTool.name]: inherited }]) {
+    const f = fakeServer(basic, {onDynamicToolCall: async () => ({ success: true, text: "ok" })});
+    try {
+      await f.client.initialize(); await f.client.discoverModels();
+      await assert.rejects(f.client.startThread({ cwd: "E:/repo", model: "gpt-6-astra", sandbox: "read-only",
+        dynamicTools: [taskTool], dynamicToolLimits: limits }), /limits invalid/);
+      assert.equal(f.messages.some(m => m.method === "thread/start"), false);
+    } finally { f.client.close(); }
+  }
+});
+
+test("prototype names and inherited limit entries retain default native bounds", async () => {
+  for (const name of ["__proto__", taskTool.name]) {
+    let calls = 0;
+    const f = fakeServer(basic, { onDynamicToolCall: async () => { calls++; return { success: true, text: "x".repeat(24_001) }; } });
+    try {
+      await f.client.initialize(); await f.client.discoverModels();
+      await f.client.startThread({ cwd: "E:/repo", model: "gpt-6-astra", sandbox: "read-only",
+        dynamicTools: [{ ...taskTool, name }],
+        dynamicToolLimits: Object.create({ [name]: { argumentBytes: 64_000, resultBytes: 64_000 } }) });
+      await f.client.startTurn("test bounds", "medium");
+      const call = (id: string, args: unknown) => f.toClient.write(JSON.stringify({ jsonrpc: "2.0", id,
+        method: "item/tool/call", params: { threadId: "thread-a", turnId: "turn-a", callId: id, tool: name, arguments: args } }) + "\n");
+      call("oversized", "x".repeat(8001));
+      assert.equal((f.messages.at(-1)!.error as Record<string, unknown>).code, -32602); assert.equal(calls, 0);
+      call("default-result", {}); await microtasks(); assert.equal(calls, 1);
+      assert.equal((f.messages.find(m => m.id === "default-result")!.result as Record<string, unknown>).success, false);
+    } finally { f.client.close(); }
+  }
+});
 
 test("registered native tool opts into the protocol and coalesces duplicate calls without repeating dispatch", async () => {
   let calls = 0, release!: (result: CodexDynamicToolResult) => void;

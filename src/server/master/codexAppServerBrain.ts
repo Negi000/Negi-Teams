@@ -132,7 +132,8 @@ export class CodexAppServerBrain implements MasterBrain {
         ...((options.systemPrompt || this.options.taskTools) ? {
           instructions: (options.systemPrompt ?? "") + (this.options.taskTools ? taskInstructions : "") +
             (this.options.taskTools?.authoring ? authoringInstructions : "") } : {}),
-        ...(this.options.taskTools ? { dynamicTools: this.options.taskTools.definitions } : {}) });
+        ...(this.options.taskTools ? { dynamicTools: this.options.taskTools.definitions,
+          dynamicToolLimits: this.options.taskTools.limits } : {}) });
       if (identity.rerouted) throw new Error("App Server rerouted the requested model");
       this.emit({ kind: "session", sessionId: identity.threadId, model: identity.resolvedModel,
         apiKeySource: null, mcpServers: [], capabilities: ["read-only",

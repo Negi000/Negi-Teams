@@ -1,10 +1,11 @@
 // Planner tools dispatch the same fixed catalog and scheduler used by the Task UI.
 // They cannot create roots/commands, alter contracts, approve operations or accept results.
 import { createHash } from "node:crypto";
-import type { CodexDynamicToolCall, CodexDynamicToolDefinition, CodexDynamicToolResult } from "../master/appServerClient.ts";
+import type { CodexDynamicToolCall, CodexDynamicToolDefinition, CodexDynamicToolResult, CodexDynamicToolLimits } from "../master/appServerClient.ts";
 import type { LocalTaskService, TaskRunView, TaskRequestOrigin } from "./taskService.ts";
 import type { TaskResultContext } from "./taskResults.ts";
 import type { LocalTaskAuthoringService } from "./taskAuthoring.ts";
+import { TaskDecompositionKeyError } from "./taskDecomposition.ts";
 
 const runId = { type: "string", pattern: "^[a-zA-Z0-9._-]{1,100}$" };
 const baselineId = { type: "string", pattern: "^base-[a-f0-9]{24}$" };
@@ -48,6 +49,7 @@ const authoringDefinitions = [
 ];
 export interface RegisteredTaskTools {
   definitions: CodexDynamicToolDefinition[];
+  limits?: Record<string, CodexDynamicToolLimits>;
   invoke(call: CodexDynamicToolCall): Promise<CodexDynamicToolResult>;
   prepareResultContext?: (threadId: string, input: string) => Promise<TaskResultContext | null>;
   authoring?: boolean;
@@ -76,7 +78,10 @@ function requestUuid(origin: TaskRequestOrigin): string {
 export function registeredTaskTools(service: LocalTaskService, masterId: string,
   authoring?: { service:LocalTaskAuthoringService; planner:{model:string;effort:string} }): RegisteredTaskTools {
   if (!/^[a-zA-Z0-9._-]{1,100}$/.test(masterId)) throw new Error("Task planner identity invalid");
-  return { definitions: structuredClone([...definitions,...(authoring?authoringDefinitions:[])]), ...(authoring?{authoring:true}:{}),
+  return { definitions: structuredClone([...definitions,...(authoring?authoringDefinitions:[])]), ...(authoring?{authoring:true,
+    limits: { negi_propose_task: { argumentBytes: 10_000, resultBytes: 24_000 },
+      negi_propose_task_decomposition: { argumentBytes: 50_000, resultBytes: 24_000 },
+      negi_read_project: { argumentBytes: 8000, resultBytes: 64_000 } }}:{}),
     prepareResultContext: (threadId, input) => service.prepareResultContext(masterId, threadId, input), async invoke(call) {
     try {
       const origin: TaskRequestOrigin = { kind: "master", masterId, threadId: call.threadId, turnId: call.turnId, callId: call.callId };
@@ -133,7 +138,13 @@ export function registeredTaskTools(service: LocalTaskService, masterId: string,
       const text = JSON.stringify(value);
       if (Buffer.byteLength(text) > (call.tool==="negi_read_project"?64_000:24_000)) throw new Error("Complete Task response exceeds tool limit");
       return { success: true, text };
-    } catch {
+    } catch (error) {
+      if (call.tool === "negi_propose_task_decomposition" && error instanceof TaskDecompositionKeyError) {
+        return { success: false, text: JSON.stringify({ code: "invalid_decomposition_key",
+          error: "作業IDは小文字の英字から始め、英小文字・数字・ハイフンだけで40文字以内にしてください。依存先も同じIDを使います。例: task-counts。",
+          field: `decomposition.nodes[${error.nodeIndex}].${error.field}`, saved: false, executionStarted: false,
+          noAutomaticRetry: true }) };
+      }
       return { success: false, text: JSON.stringify({ error: "Taskの契約・版・現在の状態を照合できません。再委任せずTask画面で確認してください。",
         nextTool: call.tool.includes("project")||call.tool.startsWith("negi_propose_task") ? "negi_read_project" : "negi_read_task", noAutomaticRetry: true }) };
     }

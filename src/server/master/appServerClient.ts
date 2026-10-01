@@ -71,6 +71,8 @@ export interface AppServerClientOptions {
 export interface CodexDynamicToolDefinition {
   type: "function"; name: string; description: string; inputSchema: Record<string, unknown>;
 }
+/** Host-owned limits. These are never sent to the provider or read from tool arguments. */
+export interface CodexDynamicToolLimits { argumentBytes: number; resultBytes: number }
 export interface CodexDynamicToolCall {
   threadId: string; turnId: string; callId: string; tool: string; arguments: unknown;
 }
@@ -97,6 +99,7 @@ export class CodexAppServerClient {
   private readonly approvals = new Map<string, CodexApprovalRequest>();
   private readonly approvalTimers = new Map<string, NodeJS.Timeout>();
   private dynamicToolNames = new Set<string>();
+  private dynamicToolLimits = new Map<string, CodexDynamicToolLimits>();
   private readonly dynamicCalls = new Map<string, { fingerprint: string; result: Promise<CodexDynamicToolResult> }>();
 
   constructor(readable: Readable, writable: Writable, private readonly options: AppServerClientOptions = {}) {
@@ -185,7 +188,8 @@ export class CodexAppServerClient {
   }
 
   async startThread(options: { cwd: string; model: string; sandbox: "read-only" | "workspace-write";
-    instructions?: string; dynamicTools?: CodexDynamicToolDefinition[] }): Promise<CodexThreadIdentity> {
+    instructions?: string; dynamicTools?: CodexDynamicToolDefinition[];
+    dynamicToolLimits?: Record<string, CodexDynamicToolLimits> }): Promise<CodexThreadIdentity> {
     this.requireInitialized();
     if (this.identity || this.threadRequestPending || this.needsReconciliation || !options.cwd || !options.model) {
       throw new Error("thread already started, uncertain, or options missing");
@@ -199,7 +203,17 @@ export class CodexAppServerClient {
           !tool.description.trim() || tool.description.length > 2000 || !record(tool.inputSchema)) ||
         new Set(tools.map(tool => tool.name)).size !== tools.length || JSON.stringify(tools).length > 32_000)
       throw new Error("Dynamic tool registry invalid");
+    const limits = options.dynamicToolLimits ?? {};
+    if (!record(limits) || Object.entries(limits).some(([name, limit]) => !tools.some(tool => tool.name === name) ||
+        !record(limit) || Object.keys(limit).length !== 2 || !Object.hasOwn(limit, "argumentBytes") || !Object.hasOwn(limit, "resultBytes") ||
+        !Number.isSafeInteger(limit.argumentBytes) || limit.argumentBytes < 1 || limit.argumentBytes > 64_000 ||
+        !Number.isSafeInteger(limit.resultBytes) || limit.resultBytes < 1 || limit.resultBytes > 64_000))
+      throw new Error("Dynamic tool limits invalid");
     this.dynamicToolNames = new Set(tools.map(tool => tool.name));
+    const ownLimits = new Map(Object.entries(limits).map(([name, limit]) => [name,
+      { argumentBytes: limit.argumentBytes, resultBytes: limit.resultBytes }]));
+    this.dynamicToolLimits = new Map(tools.map(tool => [tool.name,
+      ownLimits.get(tool.name) ?? { argumentBytes: 8000, resultBytes: 24_000 }]));
     this.threadRequestPending = true;
     try {
       const result = record(await this.transport.request("thread/start", {
@@ -543,10 +557,11 @@ export class CodexAppServerClient {
   private onDynamicToolRequest(id: string | number, params: unknown): void {
     const value = record(params), threadId = string(value?.threadId), turnId = string(value?.turnId);
     const callId = string(value?.callId), tool = string(value?.tool);
+    const limits = tool ? this.dynamicToolLimits.get(tool) : undefined;
     if (!this.options.onDynamicToolCall || !threadId || !turnId || !callId || callId.length > 200 ||
         !tool || !this.dynamicToolNames.has(tool) || (value?.namespace !== null && value?.namespace !== undefined) ||
         threadId !== this.identity?.threadId || turnId !== this.activeTurnId || this.dispatchBlocked ||
-        value?.arguments === undefined || Buffer.byteLength(JSON.stringify(value.arguments)) > 8000) {
+        !limits || value?.arguments === undefined || Buffer.byteLength(JSON.stringify(value.arguments)) > limits.argumentBytes) {
       this.transport.rejectServerRequest(id, -32602, "Dynamic tool identity, registry or arguments mismatch");
       return;
     }
@@ -562,7 +577,7 @@ export class CodexAppServerClient {
       return this.options.onDynamicToolCall!({ threadId, turnId, callId, tool, arguments: structuredClone(value.arguments) });
     }).then(result => {
         if (!result || typeof result.success !== "boolean" || typeof result.text !== "string" ||
-            Buffer.byteLength(result.text) > 24_000) throw new Error("Dynamic result invalid or exceeds limit");
+            Buffer.byteLength(result.text) > limits.resultBytes) throw new Error("Dynamic result invalid or exceeds limit");
         return result;
       }).catch(() => ({ success: false,
         text: "Task操作の結果を確認できません。再委任せず、Task画面で現在の状態を確認してください。" }));

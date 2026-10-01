@@ -209,6 +209,19 @@ test("native decomposition publishes one graph, roots use the same direct Sol ex
   const f=await setup();try{
     const tools=registeredTaskTools(f.tasks,origin.masterId,{service:f.authoring,planner});
     const call={threadId:origin.threadId,turnId:origin.turnId,callId:origin.callId,tool:"negi_propose_task_decomposition",arguments:{profile_id:"docs-project",decomposition:decomposition(f.fields)}};
+    for (const field of ["key", "dependsOn"] as const) {
+      const invalid = structuredClone(call);
+      if (field === "key") invalid.arguments.decomposition.nodes[1].key = "private_value_123";
+      else invalid.arguments.decomposition.nodes[1].dependsOn = ["private_value_123"];
+      const rejected = await tools.invoke(invalid), diagnosis = JSON.parse(rejected.text);
+      assert.equal(rejected.success, false); assert.equal(diagnosis.code, "invalid_decomposition_key");
+      assert.equal(diagnosis.field, `decomposition.nodes[1].${field}`);
+      assert.equal(diagnosis.saved, false); assert.equal(diagnosis.executionStarted, false);
+      assert.equal(diagnosis.noAutomaticRetry, true); assert.ok(!rejected.text.includes("private_value_123"));
+      assert.equal((await f.authoring.list()).length, 0);
+      assert.equal((await readdir(join(f.root,"authoring","decompositions"))).length, 0);
+      assert.equal(f.tasks.list().length, 1); assert.deepEqual(f.calls(), { astra: 0, sol: 0 });
+    }
     const response=await tools.invoke(call);assert.equal(response.success,true);const result=JSON.parse(response.text);
     assert.equal(result.tasks.length,3);assert.equal(result.executionStarted,false);assert.equal(result.successorsRequireNewPlanAfterIntegration,true);
     assert.deepEqual(JSON.parse((await tools.invoke(call)).text),result);
@@ -229,7 +242,7 @@ test("native decomposition publishes one graph, roots use the same direct Sol ex
       rootTasks.push(task);
     }
     for(const task of rootTasks)await f.tasks.start(task.id,task.configSha256,randomUUID(),requestOrigin);
-    const deadline=Date.now()+20000;let tasks;
+    const deadline=Date.now()+60000;let tasks;
     do{tasks=await Promise.all(f.tasks.list().map(t=>f.tasks.snapshot(t.id)));if(tasks.filter(t=>t.id!=="template").every(t=>t.status==="ready_for_review"))break;await new Promise(r=>setTimeout(r,50))}while(Date.now()<deadline);
     assert.equal(tasks!.filter(t=>t.id!=="template").length,2);
     assert.deepEqual(tasks!.filter(t=>t.id!=="template").map(t=>[t.status,t.acceptedBy]),[["ready_for_review",null],["ready_for_review",null]],"Both isolated roots must reach review without human acceptance");

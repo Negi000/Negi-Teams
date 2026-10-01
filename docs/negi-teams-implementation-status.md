@@ -2,7 +2,7 @@
 
 2026-10-02（JST）。基準は `NEGI_TEAMS_MASTER_PLAN.ja.md` のPhase 0〜8と `REQUIREMENTS_TRACEABILITY.ja.md`。この表は実装・合成テスト・実モデル観測・人間受入を分ける。Git管理外の実行証拠も参照しており、実装差分の公開を全Phaseの完了宣言とは扱わない。
 
-最新の追加は[通常の統合画面](./negi-teams-integration-execution.md)。以下の経緯と末尾の追加節は時系列の証拠であり、過去の失敗・残条件を後の成功へ合算しない。
+最新の追加は[実コードでの分解・統合・後続実行](./negi-teams-code-integration-qa.md)。通常チャットの実Astra計画と実Sol3件を、Material 3の契約・操作確認・統合・レビュー・保存基準からの新契約へ接続して確認した。以下の経緯と末尾の追加節は時系列の証拠であり、過去の失敗・残条件を後の成功へ合算しない。
 
 追加の[統括から登録Taskへの接続](./negi-teams-master-task-tools.md)では、通常Codex Masterに固定Taskの一覧・完全な契約の読取・同一schedulerへの委任を接続した。起動元は人間受入と別に保存する。実Astraの読取確認と関連TS45件は成功した。Material 3の320px/375px表示と48px角の停止ボタンも確認した。全件の並列試験では知識連携の待ち時間超過、次の試験では旧PTY配送の時間依存による失敗を観測し、直列試験でもPTY待ちとGitの時間切れが出た。全件の成功を今回の確認結果としては主張しない。旧MCP/PTYと常駐統括の全面移行は引き続き未完了。
 

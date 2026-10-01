@@ -18,6 +18,12 @@ export interface TaskDecompositionNode {
   handoff: string;
 }
 const nodeKey = /^[a-z][a-z0-9-]{0,39}$/;
+/** Safe input diagnosis, raised before any graph publication. Never includes raw input. */
+export class TaskDecompositionKeyError extends Error {
+  constructor(readonly nodeIndex: number, readonly field: "key" | "dependsOn") {
+    super("Task decomposition node key format invalid");
+  }
+}
 function text(raw: unknown, maximum: number): string {
   if (typeof raw !== "string" || !raw.trim() || raw.length > maximum || /[\0]/.test(raw) || raw.includes("```"))
     throw new Error("Task decomposition text invalid");
@@ -31,13 +37,14 @@ export function taskDecomposition(raw: unknown, parseTask: (raw: unknown) => Tas
       !Array.isArray(value.nodes) || value.nodes.length < 2 || value.nodes.length > 8 ||
       !Array.isArray(value.coordination) || value.coordination.length < 1 || value.coordination.length > 8)
     throw new Error("Task decomposition shape invalid");
-  const nodes = value.nodes.map(raw => {
+  const nodes = value.nodes.map((raw, index) => {
     const n = raw as Record<string, unknown>;
     if (!n || Array.isArray(n) || Object.keys(n).length !== 4 ||
         Object.keys(n).some(k => !["key", "dependsOn", "handoff", "task"].includes(k)) ||
-        typeof n.key !== "string" || !nodeKey.test(n.key) || !Array.isArray(n.dependsOn) || n.dependsOn.length > 7 ||
-        n.dependsOn.some(k => typeof k !== "string" || !nodeKey.test(k)) || new Set(n.dependsOn).size !== n.dependsOn.length)
+        !Array.isArray(n.dependsOn) || n.dependsOn.length > 7 || new Set(n.dependsOn).size !== n.dependsOn.length)
       throw new Error("Task decomposition node invalid");
+    if (typeof n.key !== "string" || !nodeKey.test(n.key)) throw new TaskDecompositionKeyError(index, "key");
+    if (n.dependsOn.some(k => typeof k !== "string" || !nodeKey.test(k))) throw new TaskDecompositionKeyError(index, "dependsOn");
     return { key: n.key, dependsOn: [...n.dependsOn] as string[], handoff: text(n.handoff, 500), task: parseTask(n.task) };
   });
   const byKey = new Map(nodes.map(n => [n.key, n]));
