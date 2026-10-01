@@ -123,10 +123,11 @@ export class LocalTaskService {
     const row = raw as Record<string, unknown>;
     const capacity = row.capacity === undefined ? undefined : parseSchedulerCapacity(row.capacity);
     if (typeof row.stateRoot !== "string" || !Array.isArray(row.runs) ||
-        row.runs.length < 1 || row.runs.length > 100) throw new Error("Task catalog roots/runs invalid");
+        row.runs.length > 100) throw new Error("Task catalog roots/runs invalid");
     const root = await localDestination(row.stateRoot, true);
     const runs: CatalogRun[] = [];
-    let schedulerPath: string | null = null;
+    let schedulerPath: string | null = row.schedulerPath === undefined ? null :
+      await localDestination(String(row.schedulerPath), false);
     for (const entry of row.runs) {
       if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error("Task catalog run invalid");
       const item = entry as Record<string, unknown>;
@@ -160,6 +161,7 @@ export class LocalTaskService {
           (run !== other && (inside(run.config.outputDir, other.config.outputDir) || inside(other.config.outputDir, run.config.outputDir))))
         throw new Error("Task catalog state must be outside every checkout and Vault, with distinct run outputs");
     }
+    if (!schedulerPath) throw new Error("Task catalog requires a shared scheduler path");
     await mkdir(root, { recursive: true });
     const operationProofs = await HumanReviewProofStore.open(join(root, "operation-proofs"));
     const scheduler = new FileScheduler(schedulerPath!);
@@ -231,6 +233,19 @@ export class LocalTaskService {
     const run = this.registered(id);
     return { config: structuredClone(run.config), contract: structuredClone(run.contract) };
   }
+  /** Trusted startup profile, without inventing an active Task Contract. */
+  async validateAuthoringConfiguration(raw: unknown): Promise<VaultRunConfig> {
+    const config = parseVaultRunConfig(raw);
+    if (config.approvedPlan) throw new Error("Authoring configuration cannot grant a Task approval");
+    config.checkout = await realpath(config.checkout); config.vault = await realpath(config.vault);
+    config.executable = await realpath(config.executable);
+    config.schedulerPath = await localDestination(config.schedulerPath, false);
+    if (config.schedulerPath.toLowerCase() !== this.scheduler.path.toLowerCase()) throw new Error("Authoring profile must share the scheduler");
+    for (const writable of [config.checkout,config.vault,...this.knowledgeRegistrations().flatMap(r=>[r.checkout,r.vault])])
+      for (const target of [this.root,config.schedulerPath,config.snapshot,config.outputDir])
+        if (inside(writable,target) || inside(target,writable)) throw new Error("Authoring evidence overlaps writable source roots");
+    await assertVaultRunOutputPaths(config); return config;
+  }
   /** Recovered signed authoring outputs join the same catalog and scheduler. No dispatch. */
   async registerAuthoredRun(title: string, raw: VaultRunConfig): Promise<void> {
     if (this.closing || !title.trim() || title.length > 200 || !raw.approvedPlan) throw new Error("Authored Task registration invalid");
@@ -238,7 +253,7 @@ export class LocalTaskService {
     config.checkout = await realpath(config.checkout); config.vault = await realpath(config.vault);
     config.outputDir = await localDestination(config.outputDir, true);
     config.schedulerPath = await localDestination(config.schedulerPath, false);
-    if (config.schedulerPath.toLowerCase() !== this.runs[0].config.schedulerPath.toLowerCase())
+    if (config.schedulerPath.toLowerCase() !== this.scheduler.path.toLowerCase())
       throw new Error("Authored Task must use the shared scheduler");
     // A recovered result may already have a dirty checkout or changed Vault.
     // Registration restores visibility only; normal start/review preflight checks freshness.

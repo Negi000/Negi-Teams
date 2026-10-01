@@ -21,7 +21,7 @@ export interface AppServerExit {
 /** The model process does not need the browser's application login secret. */
 export function appServerChildEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   return Object.fromEntries(Object.entries(env).filter(([key]) =>
-    !["EBI_AUTH_TOKEN", "NEGI_REVIEW_CONFIG", "NEGI_TASK_CONFIG", "NEGI_KNOWLEDGE_CONFIG", "NEGI_INTEGRATION_CONFIG"].includes(key.toUpperCase())));
+    !["EBI_AUTH_TOKEN", "NEGI_REVIEW_CONFIG", "NEGI_TASK_CONFIG", "NEGI_KNOWLEDGE_CONFIG", "NEGI_INTEGRATION_CONFIG", "NEGI_TASK_AUTHORING_CONFIG", "NEGI_SETUP_ROOT"].includes(key.toUpperCase())));
 }
 
 export class AppServerProcess {

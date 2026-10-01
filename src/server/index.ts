@@ -70,6 +70,9 @@ import { LocalTaskAuthoringService } from "./orchestration/taskAuthoring.ts";
 import { createTaskAuthoringHttp } from "./orchestration/taskAuthoringHttp.ts";
 import { LocalIntegrationExecutionService } from "./orchestration/integrationExecution.ts";
 import { createIntegrationHttp } from "./orchestration/integrationHttp.ts";
+import { LocalProjectSetup } from "./orchestration/projectSetup.ts";
+import { createProjectSetupHttp } from "./orchestration/projectSetupHttp.ts";
+import { startConfirmedSetupMaster } from "./orchestration/projectSetupStartup.ts";
 import { ChatAttachmentStore, MAX_ATTACHMENTS_PER_TURN } from "./chatAttachments.ts";
 import { shareChatImage } from "./chatImages.ts";
 import { configureFixedEbiLog, fixedEbiLogPath, logFixedEbi } from "./fixedEbiLog.ts";
@@ -113,6 +116,15 @@ const HOST = process.env.EBI_HOST ?? "127.0.0.1";
 // 未設定なら token=null（＝非 loopback からのアクセスは全拒否の安全側デフォルト）。
 // loopback（母艦ローカル・内部 MCP 呼び）は token の有無に関わらず常に無認証で通す。
 const authConfig = loadAuthConfig();
+const legacyProjectConfiguration=Boolean(process.env.NEGI_TASK_CONFIG||process.env.NEGI_REVIEW_CONFIG||
+  process.env.NEGI_TASK_AUTHORING_CONFIG||process.env.NEGI_INTEGRATION_CONFIG||process.env.NEGI_KNOWLEDGE_CONFIG);
+if(process.env.NEGI_SETUP_ROOT&&!authConfig.token)throw Error("NEGI_SETUP_ROOT requires EBI_AUTH_TOKEN");
+const projectSetup=process.env.NEGI_SETUP_ROOT&&!legacyProjectConfiguration?
+  await LocalProjectSetup.open(process.env.NEGI_SETUP_ROOT,[process.cwd()]):null;
+const savedProjectSetup=await projectSetup?.current();
+const setupStartup=savedProjectSetup?await projectSetup!.startup(savedProjectSetup):null;
+let setupModelsVerified=!setupStartup;
+let setupActivationError:string|null=null;
 const reviewConfigPath = process.env.NEGI_REVIEW_CONFIG;
 let reviewService: LocalReviewService | null = null;
 if (reviewConfigPath) {
@@ -121,7 +133,7 @@ if (reviewConfigPath) {
   const bytes = await readFile(reviewConfigPath);
   if (bytes.length > 256_000) throw new Error("Review config exceeds local size limit");
   reviewService = await LocalReviewService.open(JSON.parse(bytes.toString("utf8")));
-}
+}else if(setupStartup)reviewService=await LocalReviewService.open(setupStartup.reviews);
 const taskConfigPath = process.env.NEGI_TASK_CONFIG;
 let taskService: LocalTaskService | null = null;
 if (taskConfigPath) {
@@ -130,7 +142,7 @@ if (taskConfigPath) {
   const bytes = await readFile(taskConfigPath);
   if (bytes.length > 256_000) throw new Error("Task config exceeds local size limit");
   taskService = await LocalTaskService.open(JSON.parse(bytes.toString("utf8")));
-}
+}else if(setupStartup)taskService=await LocalTaskService.open(setupStartup.tasks);
 if (taskService && reviewService) await taskService.connectReviews(reviewService);
 let taskAuthoringService:LocalTaskAuthoringService|null=null;
 if(process.env.NEGI_TASK_AUTHORING_CONFIG){
@@ -138,8 +150,10 @@ if(process.env.NEGI_TASK_AUTHORING_CONFIG){
   if(!isAbsolute(path)||!authConfig.token||!taskService)throw new Error("Task authoring requires an absolute config path and authenticated Task service");
   const bytes=await readFile(path);if(bytes.length>256000)throw new Error("Task authoring config exceeds local size limit");
   taskAuthoringService=await LocalTaskAuthoringService.open(JSON.parse(bytes.toString("utf8")),taskService);
-}
+}else if(setupStartup&&taskService)taskAuthoringService=await LocalTaskAuthoringService.open(setupStartup.authoring,taskService);
 const taskAuthoringApi=createTaskAuthoringHttp(taskAuthoringService,authConfig);
+const projectSetupApi=createProjectSetupHttp(projectSetup,authConfig,()=>({legacyConfigured:legacyProjectConfiguration,
+  active:!!setupStartup&&setupModelsVerified&&!!taskAuthoringService&&!!masterSession&&masterSession.state!=="stopped"&&masterSession.state!=="starting",activationError:setupActivationError}));
 const integrationConfigPath = process.env.NEGI_INTEGRATION_CONFIG;
 let integrationReviewService: LocalIntegrationReviewService | null = null;
 if (integrationConfigPath) {
@@ -467,10 +481,10 @@ if (taskService) {
 }
 
 /** MasterSession を作って起動し、registry へ chat 配送先として登録する。 */
-async function startMasterChatSession(spec: FixedEbiSpec): Promise<void> {
-  const codexReadOnly = spec.brain === "codex"
+async function startMasterChatSession(spec: FixedEbiSpec, setupOptions?:ReturnType<typeof codexMasterLaunchOptions>): Promise<void> {
+  const codexReadOnly = setupOptions ?? (spec.brain === "codex"
     ? codexMasterLaunchOptions({ model: spec.launch.model, extraArgs: spec.extraArgs })
-    : null;
+    : null);
   if (codexReadOnly && !taskService)
     throw new Error("Codex chat master requires NEGI_TASK_CONFIG for shared turn admission");
   // config の args に --mcp-config を手書きしている場合はそちらを尊重する
@@ -531,7 +545,7 @@ async function startMasterChatSession(spec: FixedEbiSpec): Promise<void> {
     cwd: spec.launch.cwd,
     args: spec.extraArgs,
   });
-  await session.start();
+  if(setupOptions)await startConfirmedSetupMaster(session);else await session.start();
   if (taskService) {
     try {
       for (const result of await taskService.resultNotifications()) session.notifyTaskResult(result);
@@ -852,6 +866,10 @@ const httpServer = createServer(async (req, res) => {
   }
 
   // Reviews require an authenticated browser cookie, even on loopback.
+  if (await projectSetupApi(req, res, url)) return;
+  if(setupStartup&&!setupModelsVerified&&req.method==="POST"&&(/^\/api\/tasks(?:\/|$)/.test(url.pathname)||/^\/api\/task-plans(?:\/|$)/.test(url.pathname)||/^\/api\/integrations(?:\/|$)/.test(url.pathname))){
+    res.writeHead(503,{"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store"});res.end(JSON.stringify({error:"担当モデルの接続・利用条件を確認できないため、新しい作業を保留しています。プロジェクト設定を確認してください。"}));return;
+  }
   if (await reviewApi(req, res, url)) return;
   if (await knowledgeApi(req, res, url)) return;
   if (await taskAuthoringApi(req, res, url)) return;
@@ -920,7 +938,7 @@ const wss = new WebSocketServer({
 wss.on("connection", (ws) => {
   clients.add(ws);
   // 接続直後にサーバ能力（監督が有効か）を送る。クライアントはこれで要約 UI の出し分けをする。
-  send(ws, { type: "capabilities", supervisor: supervisor.enabled, reviews: reviewService !== null, tasks: taskService !== null,taskAuthoring:taskAuthoringService!==null });
+  send(ws, { type: "capabilities", supervisor: supervisor.enabled, reviews: reviewService !== null, tasks: taskService !== null,taskAuthoring:taskAuthoringService!==null&&setupModelsVerified,projectSetup:!!authConfig.token });
   // master が ui:"chat" なら、registry より**先に** state と直近の会話を送る。
   // クライアントは「chatState を受けた id＝chat モードの master」と判定して xterm ペインを
   // 作らない分岐に入るので、registry を先に送ると一瞬だけ PTY ペインが生えてしまう。
@@ -1089,6 +1107,7 @@ function handleClientMessage(ws: WebSocket, msg: ClientMessage): void {
           accepted, ...(reason ? { reason } : {}) });
         else if (!accepted) send(ws, { type: "error", text: reason ?? "送信できませんでした" });
       };
+      if(setupStartup&&!setupModelsVerified){report(false,"担当モデルの起動条件を確認できないため保留しています。今回の入力は未送信です。");break}
       const session = chatSessionFor(ws, msg.id);
       if (!session) { report(false, "統括が起動していません。今回の入力は未送信です。"); break; }
       void (async () => {
@@ -1768,6 +1787,16 @@ async function handleSummarize(ws: WebSocket, id: string): Promise<void> {
 async function startFixedEbi(): Promise<void> {
   try {
     const raw = await loadFixedEbi(CONFIG_PATH, { command: COMMAND, backend: BACKEND_ID });
+    if(setupStartup){
+      if(raw.length)throw Error("Saved project setup conflicts with fixed agents; choose the startup configuration explicitly");
+      const config=setupStartup.config,spec:FixedEbiSpec={id:"negi-master",kind:"master",ui:"chat",brain:"codex",permissionMode:"plan",extraArgs:[],notifySubscribe:false,
+        launch:{command:config.executable,args:[],cwd:config.checkout,model:config.astra.model,backend:"codex",systemPrompt:"Astraとして必須仕様を読み、利用者の目的を契約案へまとめる。Taskの開始は登録済みTaskの操作だけを使う。追加のCLI、別チャット、隠れた子agentを起動しない。"}};
+      await startMasterChatSession(spec,{...codexMasterLaunchOptions({model:spec.launch.model,extraArgs:[]},
+        {...process.env,EBI_CODEX_READ_ONLY_MASTER:"1",EBI_CODEX_APP_SERVER_EXE:config.executable,EBI_CODEX_MASTER_EFFORT:config.astra.effort}),requiredModels:[config.astra,config.sol]});
+      setupModelsVerified=true;
+      broadcast({type:"capabilities",supervisor:supervisor.enabled,reviews:reviewService!==null,tasks:taskService!==null,taskAuthoring:taskAuthoringService!==null,projectSetup:!!authConfig.token});
+      return;
+    }
     // master には役割別 MCP config を spawn 直前に自動付与する（config への手書きを不要にし、
     // dev / 本番のファイル名差分をサーバ側で吸収する）。args に明示があればそちらを優先。
     // master は backend=claude に固定する（config/env で他 backend を既定にしても統括系は落とさない）。
@@ -1803,6 +1832,7 @@ async function startFixedEbi(): Promise<void> {
       });
     }
   } catch (err) {
+    if(setupStartup)setupActivationError="担当モデル・ログイン・起動設定を確認できないため保留しています。現在の設定とサーバーの起動状態を確認してください。";
     console.warn(`[ebi-team] 固定エビ config の読み込みに失敗（動的エビのみで継続）:`, err);
   }
 }

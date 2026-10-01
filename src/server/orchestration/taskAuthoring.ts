@@ -147,8 +147,12 @@ export class LocalTaskAuthoringService {
     const root = await directory(value.storageRoot), profiles: Profile[] = [];
     for (const raw of value.profiles) {
       const p = raw as Record<string, unknown>;
-      if (!p || typeof p.id !== "string" || !label.test(p.id) || typeof p.templateRunId !== "string") throw new Error("Task authoring profile identity invalid");
-      const template = tasks.authoringTemplate(p.templateRunId), config = template.config;
+      if (!p || typeof p.id !== "string" || !label.test(p.id)) throw new Error("Task authoring profile identity invalid");
+      const template = typeof p.templateRunId === "string" && p.config === undefined && p.project === undefined ? tasks.authoringTemplate(p.templateRunId) :
+        p.templateRunId === undefined && typeof p.project === "string" && label.test(p.project) && p.config !== undefined ?
+          { config:await tasks.validateAuthoringConfiguration(p.config),contract:{project:p.project} } : null;
+      if (!template) throw new Error("Task authoring profile must select one trusted configuration source");
+      const config = template.config;
       if (config.approvedPlan) throw new Error("Task authoring template must be a fixed trusted registration");
       config.vault = await realpath(config.vault); config.executable = await realpath(config.executable);
       const repository = await directory(p.repository), worktreeRoot = await directory(p.worktreeRoot);

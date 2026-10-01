@@ -14,6 +14,7 @@ import { scheduledMasterTurns, MasterInputNotSentError, type MasterTurnAdmission
   "../src/server/orchestration/masterTurnAdmission.ts";
 import { TaskResultStore } from "../src/server/orchestration/taskResults.ts";
 import { createHash } from "node:crypto";
+import { startConfirmedSetupMaster } from "../src/server/orchestration/projectSetupStartup.ts";
 
 // Only Node speaks this synthetic protocol. No Codex binary or model is used.
 const fixture = String.raw`
@@ -219,6 +220,18 @@ test("resume, write mode and image input stay unavailable in the read-only bridg
   } finally { await brain.stop(); }
 });
 
+test("startup requirements validate worker model/effort before creating a provider thread",async()=>{
+  const root=await mkdtemp(join(tmpdir(),"negi-startup-models-"));try{
+    for(const role of [{model:"synthetic-sol-unavailable",effort:"medium"},{model:"synthetic-astra",effort:"high"}]){
+      const wire=join(root,role.effort+".jsonl"),instrumented=fixture.replace("let result;","if(process.argv[2])require('node:fs').appendFileSync(process.argv[2],JSON.stringify(message)+'\\n');let result;");
+      const brain=new CodexAppServerBrain({executable:process.execPath,args:["-e",instrumented,"ok",wire],effort:"medium",turnTimeoutMs:5000,requiredModels:[role]});
+      try{await assert.rejects(brain.start(start),/unavailable/);const messages=(await readFile(wire,"utf8")).trim().split("\n").map(v=>JSON.parse(v));assert.ok(messages.some(m=>m.method==="model/list"));assert.ok(!messages.some(m=>["thread/start","turn/start"].includes(m.method)))}finally{await brain.stop()}
+    }
+    const valid=new CodexAppServerBrain({executable:process.execPath,args:["-e",fixture,"ok"],effort:"medium",turnTimeoutMs:5000,requiredModels:[{model:"synthetic-astra",effort:"medium"}]});
+    try{await valid.start(start);assert.ok(valid.pid)}finally{await valid.stop()}
+  }finally{await rm(root,{recursive:true,force:true})}
+});
+
 test("synthetic read-only brain feeds the existing MasterSession without a cost estimate", async () => {
   const events: MasterChatEnvelope[] = [];
   const usages: MasterUsageSnapshot[] = [];
@@ -290,6 +303,17 @@ process.stdin.on("data", chunk => {
   }
 });
 `;
+
+test("confirmed setup stops absorbed Session launch failures without auto-restart or worker exposure",async()=>{
+  for(const fault of ["worker","auth"]){let launches=0;
+    const session=new MasterSession({id:"setup-master",brainId:"codex",cwd:process.cwd(),model:"synthetic-astra",permissionMode:"plan",systemPrompt:null,
+      mcpConfigPath:null,extraArgs:[],logPath:null,restartPolicy:{baseDelayMs:20,maxDelayMs:20,maxConsecutiveFailures:5,minHealthyMs:1000},
+      handlers:{onEvent:()=>{},onUsage:()=>{},onState:()=>{},onNotice:()=>{},onRateLimits:()=>{},onRegistryChange:()=>{}},
+      createBrain:()=>{launches++;return new CodexAppServerBrain({executable:process.execPath,args:["-e",fault==="auth"?nativeFixture.replace("requiresOpenaiAuth: true","requiresOpenaiAuth: false"):nativeFixture,"ok"],
+        effort:"medium",turnTimeoutMs:5000,subscriptionOnly:true,requiredModels:fault==="worker"?[{model:"unsupported-worker",effort:"medium"}]:[]})}});
+    try{await assert.rejects(startConfirmedSetupMaster(session),/ready state/);assert.equal(session.state,"stopped");await new Promise(r=>setTimeout(r,70));assert.equal(launches,1);assert.equal((await session.sendUserText("must remain unsent")).accepted,false)}finally{await session.stop()}
+  }
+});
 test("native Task tools flow through MasterSession without a false missing-MCP notice", async () => {
   const events: MasterChatEnvelope[] = [], notices: string[] = [];
   const calls: unknown[] = [];

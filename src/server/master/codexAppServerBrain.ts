@@ -29,6 +29,8 @@ export interface CodexAppServerBrainOptions {
   launch?: (options: AppServerProcessOptions) => AppServerProcess;
   taskTools?: RegisteredTaskTools;
   subscriptionOnly?: boolean;
+  /** Trusted startup requirements; metadata is never forwarded to the provider. */
+  requiredModels?: ReadonlyArray<{model:string;effort:string}>;
   admission?: MasterTurnAdmission;
 }
 
@@ -120,11 +122,13 @@ export class CodexAppServerBrain implements MasterBrain {
     });
     try {
       await process.client.initialize();
-      if (this.options.subscriptionOnly && (await process.client.readAccountMode()).type !== "chatgpt")
-        throw new Error("Codex master requires ChatGPT subscription authentication");
+      if (this.options.subscriptionOnly) {
+        const account=await process.client.readAccountMode();
+        if(account.type!=="chatgpt"||account.requiresOpenaiAuth!==true)throw new Error("Codex master requires ChatGPT subscription authentication");
+      }
       const catalog = await process.client.discoverModels();
-      if (!catalog.some((model) => model.model === options.model &&
-          model.efforts.includes(this.options.effort) && model.inputModalities.includes("text"))) {
+      if (![{model:options.model,effort:this.options.effort},...(this.options.requiredModels??[])].every(role=>catalog.some((model) => model.model === role.model &&
+          model.efforts.includes(role.effort) && model.inputModalities.includes("text")))) {
         throw new Error("requested model, effort or text input unavailable in account catalog");
       }
       const identity = await process.client.startThread({ cwd: options.cwd, model: options.model,

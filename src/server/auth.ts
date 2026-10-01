@@ -177,7 +177,7 @@ export function delay(ms: number): Promise<void> {
  * トークンを入力→POST /login→サーバが Cookie をセット→ "/" へ遷移、の一枚。
  */
 export function loginPageHtml(returnTo = "/"): string {
-  const destination = ["/reviews", "/tasks", "/knowledge"].includes(returnTo) ? returnTo : "/";
+  const destination = ["/reviews", "/tasks", "/knowledge", "/setup", "/task-plans", "/integrations"].includes(returnTo) ? returnTo : "/";
   return `<!doctype html>
 <html lang="ja"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>ログイン · Negi-Teams</title><link rel="icon" type="image/svg+xml" href="/negi-icon.svg"><style>${material3Styles}
 html,body{min-height:100%;}.negi-ui{min-height:100svh;display:grid;place-items:center;padding:24px max(16px,env(safe-area-inset-right)) max(24px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left));}.login-panel{width:100%;max-width:440px}.login-brand{margin-bottom:40px}.login-panel h1{font-size:32px;margin-bottom:12px}.login-panel .md-surface{padding:32px}.login-panel label{margin-top:24px}.login-panel input{font-size:16px}.login-panel button{width:100%;margin-top:20px}.login-panel #e{min-height:24px;margin-top:14px}

@@ -52,6 +52,19 @@ test("only the originating conversation gets at most eight current results and c
   });
 });
 
+test("independent result stores serialize concurrent publication and context ownership without removing another lock", async () => {
+  await fixture(async (store, root) => {
+    const other = await TaskResultStore.open(root);
+    await Promise.all(Array.from({ length: 16 }, (_, i) => (i % 2 ? other : store).publish(resultNotice("parallel-" + i))));
+    const contexts = await Promise.all(Array.from({ length: 8 }, (_, i) =>
+      (i % 2 ? other : store).prepareContext("master", "thread", "input-" + i, current)));
+    const notices = contexts.filter(Boolean).flatMap(c => JSON.parse(c!.text.split("\n").at(-1)!));
+    assert.equal(notices.length, 16); assert.equal(new Set(notices.map(n => n.id)).size, 16);
+    assert.equal((await other.list()).length, 16);
+    assert.equal((await readdir(root)).includes("results.jsonl.lock"), false);
+  });
+});
+
 test("delivery pins the exact provider input and terminal body, while reload never replays bound or unknown results", async () => {
   await fixture(async (store, root) => {
     await store.publish(resultNotice());

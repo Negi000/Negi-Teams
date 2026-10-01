@@ -131,7 +131,12 @@ export class TaskResultStore {
     for (;;) {
       try { lock = await open(path, "wx"); break; }
       catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST" || Date.now() >= deadline) throw error;
+        const code = (error as NodeJS.ErrnoException).code;
+        // Windows can report EPERM while the previous owner's closed lock is
+        // being unlinked. Retrying never grants ownership: only a successful
+        // exclusive create enters the action, and permanent denial still fails.
+        const contention = code === "EEXIST" || (process.platform === "win32" && code === "EPERM");
+        if (!contention || Date.now() >= deadline) throw error;
         await wait(10);
       }
     }

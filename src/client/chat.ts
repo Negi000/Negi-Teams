@@ -168,7 +168,8 @@ export class ChatPanel {
     this.input = document.createElement("textarea");
     this.input.className = "chat-input";
     this.input.rows = 1;
-    this.input.placeholder = "依頼や相談を入力（Enter で送信 / Shift+Enter で改行）";
+    this.input.placeholder = "依頼・相談";
+    this.input.title = "Enter で送信 / Shift+Enter で改行";
     this.input.setAttribute("aria-label", "統括へのメッセージ");
     this.input.addEventListener("keydown", (e) => this.onKeyDown(e));
     this.input.addEventListener("input", () => this.autoGrow());
@@ -552,7 +553,7 @@ export class ChatPanel {
         : "統括が起動していません…"
       : this.state === "busy"
         ? "実行中でも送れます（Enter で送信 / 中断は ⏹）"
-        : "依頼や相談を入力（Enter で送信 / Shift+Enter で改行）";
+        : "依頼・相談";
     this.newBtn.disabled = this.codexReadOnly || this.state === "starting";
     if (this.pending > 0) {
       this.pendingBar.hidden = false;
