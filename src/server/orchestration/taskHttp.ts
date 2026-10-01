@@ -28,7 +28,7 @@ async function body(req: IncomingMessage): Promise<Record<string, unknown>> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Task object required");
   return value as Record<string, unknown>;
 }
-export function createTaskHttp(service: LocalTaskService | null, auth: AuthConfig, authoring=false) {
+export function createTaskHttp(service: LocalTaskService | null, auth: AuthConfig, authoring=false,integrations=false) {
   return async (req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> => {
     if (url.pathname !== "/tasks" && url.pathname !== "/api/tasks" && !url.pathname.startsWith("/api/tasks/")) return false;
     if (!service || !auth.token) { json(res, 503, { error: "Task実行は設定されていません。" }); return true; }
@@ -42,7 +42,7 @@ export function createTaskHttp(service: LocalTaskService | null, auth: AuthConfi
     if (url.pathname === "/tasks" && req.method === "GET") {
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store",
         "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY" });
-      res.end(taskPageHtml(authoring)); return true;
+      res.end(taskPageHtml(authoring,integrations)); return true;
     }
     if (url.pathname === "/api/tasks/capacity/summary") {
       if (req.method !== "GET") { json(res, 405, { error: "Method not allowed" }); return true; }

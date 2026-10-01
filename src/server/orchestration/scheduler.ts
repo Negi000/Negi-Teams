@@ -325,7 +325,10 @@ export class FileScheduler {
     for (;;) {
       try { lock = await open(lockPath, "wx"); break; }
       catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST" || Date.now() >= deadline) throw error;
+        const code = (error as NodeJS.ErrnoException).code;
+        // Windows may report EPERM while an exclusive lock is being closed or
+        // deleted. Retry the same bounded exclusive open; never remove its owner.
+        if (!(code === "EEXIST" || (process.platform === "win32" && code === "EPERM")) || Date.now() >= deadline) throw error;
         await wait(10);
       }
     }

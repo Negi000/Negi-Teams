@@ -31,7 +31,7 @@ intent・署名・ref・recordの一部だけが残った場合は、画面で�
 
 実Git・Vault・HTTP・署名・通常Task service/schedulerを使う専用fixtureで、独立2Taskの検証済み変更 → 統合 → 人の操作を模した受入 → 保存した新基準 → native toolの後続案 → 契約確定 → Sol fixture → レビュー待ちを確認する。追加Astra attemptは0で、後続の人間受入はnull。改変、取消、別repository、保護領域重複、同時保存、同じintentの途中状態、再起動、Cookie/same-origin、入場lockの競合も検証対象とする。fixtureの受入を、利用者による実成果・実UIの受入とは扱わない。
 
-実subscriptionでの統合後計画、任意の実コード変更・競合解消、通常UIからの統合実行/第三worktree準備、実機safe area/仮想キーボード、全73要件の完成は未証明。既存の統合実行は信頼済みローカル設定/CLIによるもので、この追加は登録済み統合レビューから後続契約を作る経路を接続する。
+この節を実装した時点では、通常UIからの統合実行/第三worktree準備は未接続だった。現在は[成果を選ぶ統合画面](negi-teams-integration-execution.md)から、固定された独立Taskの統合・検証を開始できる。実subscriptionでの統合後計画、任意の実コード変更・競合解消、実機safe area/仮想キーボード、全73要件の完成は引き続き未証明。
 
 全Phase0〜8とNT-001〜NT-073を維持し、残る旧dispatch移行、provider照合、通知再発行、Jev全gate/日本語校正/残高上限、知識の複数事例/寿命/派生失効、政策の利益実証/承認、履歴最新性、初回profile設定・契約版移行・会話との結果関連付けを省略しない。
 

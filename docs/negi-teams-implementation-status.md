@@ -74,3 +74,15 @@ Material 3 Expressiveのレビューに「次の作業へ」、契約画面に�
 実HTTPに接続した画面操作でも、受入前の保存保留 → 受入 → 基準保存 → 後続案の確認 → 契約確定 → Task開始 → 検証 → 成果レビューを確認した。統合成果の受入取消後は続きのリンクを消し、保存済み基準の深いリンクも409として案と古い基準カードを消す。通常経路のconsole error/warningは0、取消済み基準への意図した409でresource errorを1件観測した。合成Solは先行2件と後続1件、Astra attemptと実provider turnは0、後続成果の人間受入はnull。375pxの続きの48pxリンクは下部ナビより上へ収まった。
 
 NT-004/008/009/010/016/018/063/073の追加進捗であり、全Phaseの完成宣言ではない。通常UIからの第三worktree準備・統合実行、任意の実コード/競合解消、実Astraの統合後計画、部分作成の手動照合/取消/再開、初回profile設定・契約版移行・作成元会話への結果関連付けは残る。旧dispatch全面移行、provider照合、通知再発行、Jev全gate/日本語校正/残高上限、知識の複数事例/寿命/派生失効、政策の利益実証/承認、変化中履歴の最新性、実機safe area/仮想キーボード・人の旅程受入も継続する。73要件を維持し、ゴールはACTIVE。
+
+## 2026-10-02追加: Material 3の通常統合画面
+
+Task画面から固定成果を2〜8件選び、設定済みprofileの別worktreeを準備し、既存schedulerで統合・検証して共通レビューへ渡す。[操作と境界](negi-teams-integration-execution.md)を追加した。同じproject/repository/base/schedulerと現在の契約・manifest・検証を確認し、重ならない変更だけを扱う。ブラウザにパス・コマンド・モデル設定を渡さない。元のTaskと主checkoutは保持する。
+
+開始前の停止、pure cancellation後の明示再試行、再起動後のcleanな待機の明示再開を接続した。別serverの停止と結果確定を共通lockで順序付ける。検証後にsourceとtargetの版・bytes・paths・type・modeを再確認する。署名済み結果を先に保存し、レビューの登録完了前はリンクを表示しない。部分作成・apply後の停止・stale lock・証拠不一致は自動再実行せず照合待ちに残す。
+
+独立監査で停止競合、検証による成果変更、取消と再試行、新規実行ファイルのmode、公開順序を修正した。全件回帰706件中703成功・失敗0・未完了0・3skip（既存Claude/POSIX ptmxと、Windowsで実行できない新規POSIX mode試験）。先の失敗は別記録として保持する。最後の表示順序とWindows lock修正後の関連11件もすべて成功。最終型検査・ビルドは成功。CIや実providerの成功の主張ではない。
+
+Chromium1440/320/375px・light/darkで成果選択、版と検証の展開、48px操作、3px focus、Enterでの開始、実行枠の待機と開始前停止、再起動後の明示再開を確認した。登録完了前のリンクを消す修正後、新しい実Git/Vault/HTTPのfixtureで統合→レビュー→合成の受入操作→基準保存→native toolの後続案→契約確定→Sol fixture→人間レビュー待ちまで接続した。元Taskと主checkoutのHEAD/index/差分は不変、合成Sol3回・Astra0回・実provider0回・後続の人間受入はnull。横幅は各viewport内に収まり、320pxで主要操作が下部ナビより上に表示されることを直接確認した。実機と利用者による実成果の受入は未確認。
+
+通常UIの第三worktree準備と独立成果の統合実行は合成Taskで接続した。任意の実コード変更の人間受入、競合解消の通常経路、実Astraの統合後計画、汎用の部分作成照合/取消/再開GUI、初回profile設定・契約版移行・作成元会話の結果関連付けは残る。旧dispatch、provider照合、通知再発行、Jev、知識管理、Policy、履歴最新性、実機モバイルの残条件も維持し、全73要件／Phase0〜8のゴールはACTIVE。

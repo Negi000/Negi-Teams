@@ -38,6 +38,10 @@ export interface TaskIntegrationOptions {
   scheduler: FileScheduler;
   sources: IntegrationSource[];
   verify: () => Promise<{ outcome: "passed" | "failed"; evidenceRef: string }>;
+  signal?: AbortSignal;
+  onPhase?: (phase: "capturing" | "applying" | "verifying") => Promise<void>;
+  checkBeforePublish?: () => Promise<void>;
+  publish?: (settle: () => Promise<void>) => Promise<void>;
 }
 export interface TaskIntegrationResult {
   status: "ready_for_review" | "failed";
@@ -69,6 +73,7 @@ async function targetParents(checkout: string, path: string): Promise<void> {
 }
 
 export async function integrateVerifiedTasks(options: TaskIntegrationOptions): Promise<TaskIntegrationResult> {
+  options.signal?.throwIfAborted();
   if (!/^[a-zA-Z0-9._-]{1,100}$/.test(options.id) || !/^[a-f0-9]{40}$/i.test(options.baseSha) ||
       !Array.isArray(options.sources) || options.sources.length < 2 || options.sources.length > 8)
     throw new Error("Integration identity/sources invalid");
@@ -126,7 +131,7 @@ export async function integrateVerifiedTasks(options: TaskIntegrationOptions): P
     if (state.verification.evidenceRef !== `${evidencePath}#sha256=${hash(await readFile(evidencePath))}` ||
         manifest.review.evidenceSha256 !== hash(await readFile(evidencePath)))
       throw new Error("Integration verification evidence changed");
-    if (/^(?:old mode|new mode|rename from|rename to|similarity index) /m.test(
+    if (/^(?:old mode|new mode|rename from|rename to|similarity index|new file mode 100755) /m.test(
       git(config.checkout, ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "HEAD"])))
       throw new Error("File metadata changes require separate integration");
     await verifyTaskReviewCheckout(config, manifest);
@@ -141,15 +146,21 @@ export async function integrateVerifiedTasks(options: TaskIntegrationOptions): P
       const target = await optionalEntry(join(checkout, file.path));
       if (target && (!baseEntry || !target.isFile() || target.isSymbolicLink()))
         throw new Error("Integration would overwrite an untracked or unsafe target");
+      if (!baseEntry && file.sha256 !== null && process.platform !== "win32" &&
+          ((await lstat(join(config.checkout, file.path))).mode & 0o111))
+        throw new Error("New executable files require a separate integration plan");
       files.push({ ...file, source, mode: baseEntry.startsWith("100755") ? 0o755 : 0o644 });
     }
   }
+  options.signal?.throwIfAborted();
   await options.scheduler.claim(options.id, `${options.id}:integration-dispatch`);
   let mutated = false;
   try {
+    await options.onPhase?.("capturing");
     await mkdir(options.outputDir);
     // Stage immutable copies before any checkout mutation. Each copy is hash checked.
     for (let i = 0; i < files.length; i++) {
+      options.signal?.throwIfAborted();
       const file = files[i];
       if (file.sha256 === null) continue;
       const bytes = await readFile(join(file.source.config.checkout, file.path));
@@ -168,7 +179,10 @@ export async function integrateVerifiedTasks(options: TaskIntegrationOptions): P
     }
     if (git(checkout, ["rev-parse", "HEAD"]).trim() !== options.baseSha || changedGitPaths(checkout).length)
       throw new Error("Integration checkout changed before apply");
+    options.signal?.throwIfAborted();
+    await options.onPhase?.("applying");
     for (let i = 0; i < files.length; i++) {
+      options.signal?.throwIfAborted();
       const file = files[i];
       // Any directory creation or file operation below may leave a partial result.
       mutated = true;
@@ -177,16 +191,35 @@ export async function integrateVerifiedTasks(options: TaskIntegrationOptions): P
       if (file.sha256 === null) await unlink(target);
       else { await copyFile(join(options.outputDir, `file-${i}.bin`), target); await chmod(target, file.mode); }
     }
-    const paths = changedGitPaths(checkout);
-    const expectedPaths = files.map((file) => file.path).sort();
-    const scopePassed = JSON.stringify([...paths].sort()) === JSON.stringify(expectedPaths);
-    let contentPassed = true;
-    for (const file of files) {
-      const target = await optionalEntry(join(checkout, file.path));
-      contentPassed &&= file.sha256 === null ? target === null :
-        Boolean(target?.isFile() && !target.isSymbolicLink() && hash(await readFile(join(checkout, file.path))) === file.sha256);
-    }
+    await options.onPhase?.("verifying");
     const verification = await options.verify();
+    await options.checkBeforePublish?.(); options.signal?.throwIfAborted();
+    // Verification may take time. Recheck the exact source versions before
+    // publishing a verified result; changing/revoked sources leave this copy held.
+    for (const [source, manifest] of manifests) {
+      const state=await source.readState();
+      if(!["ready_for_review","accepted"].includes(state.status)||state.verification?.outcome!=="passed")throw Error("Integration source changed during verification");
+      if(source.readManifest&&hash(Buffer.from(JSON.stringify(await source.readManifest())))!==hash(Buffer.from(JSON.stringify(manifest))))throw Error("Integration source revision changed during verification");
+      await verifyTaskReviewCheckout(source.config,manifest);
+    }
+    // Commands may modify the checkout even when they exit successfully. Bind
+    // the result to the final bytes, paths and modes, including safe parents.
+    const paths = changedGitPaths(checkout);
+    const expectedPaths = files.map(file => file.path).sort();
+    const scopePassed = JSON.stringify([...paths].sort()) === JSON.stringify(expectedPaths);
+    let contentPassed = !/^(?:old mode|new mode|new file mode 100755) /m.test(
+      git(checkout, ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "HEAD"]));
+    for (const file of files) {
+      let parent = checkout, safe = true;
+      for (const part of file.path.split("/").slice(0, -1)) {
+        parent = join(parent, part); const entry = await optionalEntry(parent);
+        if (!entry?.isDirectory() || entry.isSymbolicLink() || !inside(checkout, await realpath(parent))) { safe = false; break; }
+      }
+      const target = safe ? await optionalEntry(join(checkout, file.path)) : null;
+      contentPassed &&= safe && (file.sha256 === null ? target === null : Boolean(target?.isFile() &&
+        !target.isSymbolicLink() && (process.platform === "win32" || (target.mode & 0o111) === (file.mode & 0o111)) &&
+        hash(await readFile(join(checkout, file.path))) === file.sha256));
+    }
     const passed = scopePassed && contentPassed && git(checkout, ["rev-parse", "HEAD"]).trim() === options.baseSha &&
       verification.outcome === "passed" && Boolean(verification.evidenceRef);
     const evidenceRef = await writeEvidence(join(options.outputDir, "integration-verification.json"), {
@@ -194,8 +227,12 @@ export async function integrateVerifiedTasks(options: TaskIntegrationOptions): P
       sourceRuns: ids, files: files.map(({ source, ...file }) => ({ ...file, runId: source.config.runId })),
       changedPaths: paths, scopePassed, contentPassed, verification, mechanicalChecksPassed: passed,
       humanAcceptance: null, modelTurnStarted: false });
-    await options.scheduler.append({ key: `${options.id}:integration-settle`, at: new Date().toISOString(),
-      action: { type: "settle", workId: options.id, outcome: passed ? "verified" : "failed", evidenceRef, actualCostUsd: null } });
+    const settle = async () => {
+      await options.checkBeforePublish?.(); options.signal?.throwIfAborted();
+      await options.scheduler.append({ key: `${options.id}:integration-settle`, at: new Date().toISOString(),
+        action: { type: "settle", workId: options.id, outcome: passed ? "verified" : "failed", evidenceRef, actualCostUsd: null } });
+    };
+    if (options.publish) await options.publish(settle); else await settle();
     return { status: passed ? "ready_for_review" : "failed", evidenceRef, paths, acceptedBy: null };
   } catch (error) {
     const state = (await options.scheduler.read()).state?.entries.find((item) => item.work.id === options.id);

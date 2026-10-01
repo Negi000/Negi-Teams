@@ -1,19 +1,20 @@
 // Shared server/CLI execution. Browser input never supplies executable commands.
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdir, open, realpath, stat } from "node:fs/promises";
+import { mkdir, realpath, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { AppServerProcess, appServerChildEnv } from "../master/appServerProcess.ts";
+import { AppServerProcess } from "../master/appServerProcess.ts";
 import { boundedAppServerArgs, subscriptionChildEnv } from "../master/boundedAppServer.ts";
 import { FileScheduler } from "./scheduler.ts";
 import { FileTaskLedger, type ReconciliationVerifier, type TaskSnapshot, type TaskRole } from "./singleTask.ts";
 import type { CodexApprovalRequest } from "../master/appServerClient.ts";
 import { runScheduledVaultTask, type TaskAdmissionGuard } from "./scheduledVaultRun.ts";
-import { changedGitPaths, loadVaultTaskContract, pathsOutsideScope,
+import { loadVaultTaskContract,
   runSingleTaskFromVault, type VaultTaskContract } from "./vaultTaskContract.ts";
 import { assertVaultRunOutputPaths, assertVerificationCoverage, type VaultRunConfig } from "./vaultRunConfig.ts";
 import { loadApprovedTaskPlan, type ApprovedTaskPlan } from "./approvedTaskPlan.ts";
+import { verifyConfiguredCheckout } from "./checkoutVerification.ts";
 
 const exec = promisify(execFile);
 const hash = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
@@ -63,35 +64,8 @@ export async function submitVaultRun(prepared: PreparedVaultRun, scheduler: File
 export async function verifyVaultRun(prepared: PreparedVaultRun, signal?: AbortSignal, outputName = "verification.json") {
   if (!/^verification(?:-r[1-9][0-9]?)?\.json$/.test(outputName)) throw new Error("Verification output name invalid");
   const { config, contract } = prepared;
-  const checks = [];
-  for (const command of [...config.verification,
-    { requirement: "git diff --check", program: "git", args: ["diff", "--check"], timeoutMs: 30_000 }]) {
-    try {
-      const output = await exec(command.program, command.args, { cwd: config.checkout,
-        encoding: "utf8", windowsHide: true, timeout: command.timeoutMs, maxBuffer: 1_000_000,
-        env: appServerChildEnv(), signal });
-      checks.push({ requirement: command.requirement, program: command.program, args: command.args,
-        passed: true, outputSha256: hash(output.stdout), stderrSha256: hash(output.stderr) });
-    } catch {
-      checks.push({ requirement: command.requirement, program: command.program, args: command.args,
-        passed: false, outputSha256: null, stderrSha256: null });
-    }
-  }
-  const paths = changedGitPaths(config.checkout);
-  const foreign = pathsOutsideScope(paths, contract.scope.allowedPaths);
-  const head = (await exec("git", ["rev-parse", "HEAD"],
-    { cwd: config.checkout, windowsHide: true })).stdout.trim();
-  const baseMatches = head.toLowerCase() === contract.baseSha.toLowerCase();
-  const passed = !signal?.aborted && paths.length > 0 && foreign.length === 0 && baseMatches && checks.every((check) => check.passed);
-  const bytes = Buffer.from(JSON.stringify({ runId: config.runId, baseSha: contract.baseSha,
-    baseMatches, changedPaths: paths, outsideScope: foreign, requiredVerification: contract.verification,
-    checks, stoppedDuringVerification: signal?.aborted ?? false, mechanicalChecksPassed: passed, humanAcceptance: null,
-    note: "Command exit status and path scope only; human review must assess the Task acceptance criteria." }, null, 2) + "\n");
-  const path = join(config.outputDir, outputName);
-  const file = await open(path, "wx");
-  try { await file.writeFile(bytes); await file.sync(); } finally { await file.close(); }
-  return { outcome: passed ? "passed" as const : "failed" as const,
-    evidenceRef: `${path}#sha256=${hash(bytes)}` };
+  return verifyConfiguredCheckout({ ...config, baseSha: contract.baseSha, allowedPaths: contract.scope.allowedPaths,
+    requiredVerification: contract.verification, commands: config.verification }, signal, outputName);
 }
 
 export async function executeVaultRun(prepared: PreparedVaultRun, scheduler: FileScheduler,

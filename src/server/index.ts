@@ -68,6 +68,8 @@ import { LocalTaskService } from "./orchestration/taskService.ts";
 import { createTaskHttp } from "./orchestration/taskHttp.ts";
 import { LocalTaskAuthoringService } from "./orchestration/taskAuthoring.ts";
 import { createTaskAuthoringHttp } from "./orchestration/taskAuthoringHttp.ts";
+import { LocalIntegrationExecutionService } from "./orchestration/integrationExecution.ts";
+import { createIntegrationHttp } from "./orchestration/integrationHttp.ts";
 import { ChatAttachmentStore, MAX_ATTACHMENTS_PER_TURN } from "./chatAttachments.ts";
 import { shareChatImage } from "./chatImages.ts";
 import { configureFixedEbiLog, fixedEbiLogPath, logFixedEbi } from "./fixedEbiLog.ts";
@@ -138,7 +140,6 @@ if(process.env.NEGI_TASK_AUTHORING_CONFIG){
   taskAuthoringService=await LocalTaskAuthoringService.open(JSON.parse(bytes.toString("utf8")),taskService);
 }
 const taskAuthoringApi=createTaskAuthoringHttp(taskAuthoringService,authConfig);
-const taskApi=createTaskHttp(taskService,authConfig,taskAuthoringService!==null);
 const integrationConfigPath = process.env.NEGI_INTEGRATION_CONFIG;
 let integrationReviewService: LocalIntegrationReviewService | null = null;
 if (integrationConfigPath) {
@@ -149,6 +150,10 @@ if (integrationConfigPath) {
   integrationReviewService = await LocalIntegrationReviewService.open(JSON.parse(bytes.toString("utf8")), reviewService,taskAuthoringService);
 }
 const knowledgeConfigPath = process.env.NEGI_KNOWLEDGE_CONFIG;
+const integrationExecutionService=taskAuthoringService&&taskService&&reviewService?
+  await LocalIntegrationExecutionService.open(taskAuthoringService,taskService,reviewService):null;
+const integrationApi=createIntegrationHttp(integrationExecutionService,authConfig);
+const taskApi=createTaskHttp(taskService,authConfig,taskAuthoringService!==null,integrationExecutionService!==null);
 let knowledgeService: LocalKnowledgeService | null = null;
 if (knowledgeConfigPath) {
   if (!isAbsolute(knowledgeConfigPath) || !authConfig.token || !taskService || !reviewService)
@@ -850,6 +855,7 @@ const httpServer = createServer(async (req, res) => {
   if (await reviewApi(req, res, url)) return;
   if (await knowledgeApi(req, res, url)) return;
   if (await taskAuthoringApi(req, res, url)) return;
+  if (await integrationApi(req, res, url)) return;
   if (await taskApi(req, res, url)) return;
 
   // ---- 認証ゲート（loopback は常に素通り／非 loopback は token 必須）----
@@ -1948,9 +1954,12 @@ httpServer.listen(PORT, HOST, () => {
   void startFixedEbi();
 });
 
+let shuttingDown = false;
 function shutdown(): void {
-  void taskService?.close();
-  void integrationReviewService?.close();
+  if (shuttingDown) return;
+  shuttingDown = true;
+  const operationsClosed = Promise.allSettled([taskService?.close(),
+    integrationExecutionService?.close(), integrationReviewService?.close()]);
   console.log("\n[ebi-team] 終了処理: 全 agent を kill します");
   // 固定エビの監視を先に止め、kill による exit で再起動が走らないようにする。
   fixedEbi.stop();
@@ -1958,9 +1967,9 @@ function shutdown(): void {
   void masterSession?.stop().catch(() => {});
   registry.killAll();
   for (const ws of clients) ws.close();
-  httpServer.close(() => process.exit(0));
+  httpServer.close(() => { void operationsClosed.then(() => process.exit(0)); });
   // close が詰まる場合の保険。
-  setTimeout(() => process.exit(0), 1000);
+  setTimeout(() => process.exit(0), 5000);
 }
 
 process.on("SIGINT", shutdown);

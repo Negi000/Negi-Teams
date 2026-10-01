@@ -30,8 +30,9 @@ export interface TaskPlanFields {
   references: Array<{ id: string; version: number; sha256: string }>;
   maxAttempts: number; timeLimitMinutes: number;
 }
-interface Profile { id: string; title: string; project: string; repository: string; worktreeRoot: string;
+export interface TaskExecutionProfile { id: string; title: string; project: string; repository: string; worktreeRoot: string;
   allowedPaths: string[]; maxAttempts: number; timeLimitMinutes: number; config: VaultRunConfig; hash: string }
+type Profile = TaskExecutionProfile;
 interface Draft { schema: "negi-task-plan/1"; id: string; createdAt: string; profileId: string;
   profileHash: string; baseSha: string; sources: Source[]; fields: TaskPlanFields;
   origin: Exclude<TaskRequestOrigin, { kind: "browser" }> & { model: string; effort: string }; hash: string;
@@ -184,6 +185,8 @@ export class LocalTaskAuthoringService {
     verification:p.config.verification.map(c=>c.requirement), planner:p.config.astra, worker:p.config.sol,
     maxAttempts:p.maxAttempts, timeLimitMinutes:p.timeLimitMinutes, independentTasksOnly:true,
     decomposition:{maxTasks:8, executable:"independent_roots", successors:"new_plan_after_integration"} })); }
+  /** Trusted server composition only. No HTTP/tool endpoint exposes configuration mutation. */
+  integrationConfiguration() { return { storageRoot:join(this.root,"integrations"), profiles:structuredClone(this.profiles) }; }
   async bindIntegration(options:IntegrationReviewOptions,manifest:IntegrationReviewManifest,reviews:LocalReviewService):Promise<void> {
     for(const path of new Set([options.checkout,...reviews.modelWritableRoots(),...options.sources.flatMap(s=>[s.config.checkout,s.config.vault])])){
       const root=await realpath(path);
