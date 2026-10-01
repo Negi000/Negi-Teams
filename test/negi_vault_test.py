@@ -20,7 +20,7 @@ SPEC.loader.exec_module(vault)
 
 def note_text(note_id, kind="Spec", project="negi", scope="project", status="active",
               version=1, source_refs=("user:approved",), depends_on=(), roles=(), required=False,
-              sensitivity="local", approval_ref=None,
+              sensitivity="local", approval_ref=None, task_classes=(), source_versions=(),
               title="Example", summary="Short summary", body="Essential rule.\n"):
     lines = ["---", f"id: {note_id}", f"kind: {kind}", f"project: {project}",
              f"scope: {scope}", f"status: {status}", f"version: {version}",
@@ -32,6 +32,9 @@ def note_text(note_id, kind="Spec", project="negi", scope="project", status="act
     lines.extend(f"  - {item}" for item in depends_on)
     lines.append("roles:")
     lines.extend(f"  - {item}" for item in roles)
+    for name, values in [("task_classes", task_classes), ("source_versions", source_versions)]:
+        lines.append(f"{name}:")
+        lines.extend(f"  - {item}" for item in values)
     if approval_ref is not None:
         lines.append(f"approval_ref: {approval_ref}")
     lines.extend(["---", body])
@@ -106,6 +109,53 @@ class VaultTest(unittest.TestCase):
         self.assertNotIn("Other project secret", result)
         self.assertIn('"fidelity": "metadata"', result)
         self.assertIn('"sha256":', result)
+
+    def test_conditional_lesson_requires_class_and_current_source_versions(self):
+        source = self.add("10_Projects/negi/spec.md", note_text("SPEC-MAIN", required=True,
+                         body="Required condition remains.\n"))
+        pin = "SPEC-MAIN@1:" + vault.sha256(source.read_bytes())
+        lesson = self.add("40_Lessons/review.md", note_text("LESSON-REVIEW", kind="Lesson",
+                         title="Review lesson", task_classes=("code-attribution",), source_versions=(pin,),
+                         roles=("sol",), body="Applicability and counterexample remain visible.\n"))
+        def pack(task_class=None, role="sol", required=()):
+            return vault.build_pack(vault.load_notes(self.vault), "negi", role, "Review lesson",
+                                    list(required), 16000, task_class=task_class)
+        for task_class in [None, "other"]:
+            self.assertNotIn("LESSON-REVIEW", pack(task_class))
+        self.assertNotIn("LESSON-REVIEW", pack("code-attribution", "astra"))
+        included = pack("code-attribution")
+        self.assertIn("LESSON-REVIEW", included)
+        self.assertIn("Applicability and counterexample remain visible.", included)
+        self.assertIn("Required condition remains.", included)
+        with self.assertRaisesRegex(vault.VaultError, "適用条件"):
+            pack("other", required=["LESSON-REVIEW"])
+        original = source.read_bytes()
+        for change in [original + b"source edit", original.replace(b"version: 1", b"version: 2"),
+                       original.replace(b"status: active", b"status: deprecated")]:
+            source.write_bytes(change)
+            if b"status: deprecated" in change:
+                with self.assertRaisesRegex(vault.VaultError, "非active"):
+                    pack("code-attribution", required=["SPEC-MAIN"])
+            else:
+                self.assertNotIn("LESSON-REVIEW", pack("code-attribution"))
+        source.write_bytes(original)
+        for status in ["candidate", "deprecated"]:
+            lesson.write_text(note_text("LESSON-REVIEW", kind="Lesson", status=status,
+                              title="Review lesson", task_classes=("code-attribution",), source_versions=(pin,)),
+                              encoding="utf-8")
+            self.assertNotIn("LESSON-REVIEW", pack("code-attribution"))
+
+    def test_conditional_lesson_does_not_cross_source_scope_or_private_clearance(self):
+        self.add("10_Projects/negi/spec.md", note_text("SPEC-MAIN", required=True))
+        for project, sensitivity in [("other", "local"), ("negi", "private")]:
+            source = self.add("10_Projects/other/source.md", note_text("SPEC-SOURCE", project=project,
+                             sensitivity=sensitivity))
+            pin = "SPEC-SOURCE@1:" + vault.sha256(source.read_bytes())
+            self.add("40_Lessons/review.md", note_text("LESSON-REVIEW", kind="Lesson", title="Review",
+                     task_classes=("code-attribution",), source_versions=(pin,)))
+            result = vault.build_pack(vault.load_notes(self.vault), "negi", "sol", "Review", [], 16000,
+                                      task_class="code-attribution")
+            self.assertNotIn("LESSON-REVIEW", result)
 
     def test_missing_dependency_or_inactive_required_fails_closed(self):
         self.add("10_Projects/negi/spec.md", note_text("SPEC-MAIN", required=True,

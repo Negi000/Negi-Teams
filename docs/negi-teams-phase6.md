@@ -12,6 +12,12 @@ Phase 3の実モデル試行の統合マップについて、Solの原文A（SHA
 
 ## 残る境界
 
+### 条件付きLessonのContext Pack選択（2026-10-01）
+
+Vault compiler `phase2-2`に、project内のLessonへ明示的な`task_classes`と`source_versions`（`ID@version:sha256`）を指定する仕組みを追加した。`pack --task-class`が一致し、根拠ノートがactive・現在の版/hash・閲覧範囲に一致する場合だけ参照する。分類不明・別分類・根拠変更・失効・private権限不足では参照しない。明示的に必須指定した不適合Lessonはエラーにする。適用するLessonは本文の非適用例・反例も含め、必須Spec/Taskを削らない。candidateはactive扱いにしない。
+
+これはcompilerとCLIの限定実装である。Task Contractからの分類伝播、レビュー自由文からの候補作成、認証された人間の知識承認と次回Taskの通常参照は未接続。既存のCLI文字列`user:`を認証された承認として扱わない。追加2テストを含むPython36件で、分類・役割・版/hash・状態・project・privateの境界を確認した。
+
 - 自然な会話からのFeedback分類、対象不明時のUI確認、複数の発言への分割、実ユーザーによる受入、通常チャットからの自動接続は未確認。
 - Lesson候補を複数事例と照合し、矛盾・同義・寿命を管理する仕組みは未完成。既存Packの失効通知もない。
 - `negi_review_map.ts` の確認はBの内容に限定される。Bを隔離checkoutに再適用して全変更範囲を検証したものではない。

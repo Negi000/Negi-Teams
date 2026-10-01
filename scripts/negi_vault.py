@@ -19,7 +19,7 @@ import sys
 import tempfile
 
 
-COMPILER_VERSION = "phase2-1"
+COMPILER_VERSION = "phase2-2"
 DIRECTORIES = (
     "00_System", "10_Projects", "20_Decisions", "30_Patterns", "40_Lessons",
     "50_Policies", "60_Evaluations", "70_Feedback", "80_Tasks", "85_Derived", "90_Archive",
@@ -28,10 +28,10 @@ KINDS = {"Project", "Spec", "Task", "Lesson", "Decision", "Pattern", "Policy", "
 STATUSES = {"draft", "candidate", "active", "deprecated"}
 VERIFICATIONS = {"untested", "observed", "compared", "unknown"}
 SENSITIVITIES = {"local", "private"}
-LIST_FIELDS = {"source_refs", "depends_on", "supersedes", "tags", "roles"}
+LIST_FIELDS = {"source_refs", "depends_on", "supersedes", "tags", "roles", "task_classes", "source_versions"}
 SCALAR_FIELDS = {
     "id", "kind", "project", "scope", "status", "version", "updated", "title",
-    "summary", "sensitivity", "verification_status", "required", "approval_ref",
+    "summary", "sensitivity", "verification_status", "required", "approval_ref", "task_class",
 }
 ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{2,79}$")
 KEY_PATTERN = re.compile(r"^([a-z_]+):(?:[ \t]*(.*))?$")
@@ -161,6 +161,20 @@ def parse_note(data: bytes, path: Path, relative: str) -> Note:
             raise VaultError(f"{path}: ローカル出典が見つからない: {reference}")
     if any(role not in {"astra", "sol", "luna"} for role in props["roles"]):
         raise VaultError(f"{path}: rolesが不正")
+    if "task_class" in props and (props["kind"] != "Task" or not isinstance(props["task_class"], str) or
+                                  not re.fullmatch(r"[a-z][a-z0-9_.-]{0,79}", props["task_class"])):
+        raise VaultError(f"{path}: Taskのtask_classが不正")
+    if props["task_classes"] or props["source_versions"]:
+        if props["kind"] != "Lesson" or props["scope"] != "project" or not props["task_classes"] or \
+                not props["source_versions"] or not props["source_refs"]:
+            raise VaultError(f"{path}: 条件付きLessonにはproject範囲・task_classes・source_versions・出典が必要")
+        if any(not re.fullmatch(r"[a-z][a-z0-9_.-]{0,79}", item) for item in props["task_classes"]) or \
+                any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{2,79}@[1-9][0-9]*:[0-9a-f]{64}", item)
+                    for item in props["source_versions"]):
+            raise VaultError(f"{path}: Lessonの適用分類または根拠版が不正")
+        source_ids = [ref.split("@", 1)[0].casefold() for ref in props["source_versions"]]
+        if props["id"].casefold() in source_ids or len(source_ids) != len(set(source_ids)):
+            raise VaultError(f"{path}: Lessonの根拠IDが重複または自己参照")
     return Note(path, relative, props, "".join(lines[end + 1:]), sha256(data))
 
 
@@ -203,7 +217,7 @@ def _eligible(note: Note, project: str, allow_private: bool = False) -> bool:
 
 
 def _required_closure(notes: dict[str, Note], seeds: set[str], project: str,
-                      allow_private: bool = False) -> set[str]:
+                      allow_private: bool = False, task_class: str | None = None) -> set[str]:
     selected = set()
     pending = list(seeds)
     while pending:
@@ -213,9 +227,28 @@ def _required_closure(notes: dict[str, Note], seeds: set[str], project: str,
         note = notes.get(key)
         if note is None or not _eligible(note, project, allow_private):
             raise VaultError(f"必須または依存IDが未取得・非active・権限外: {key}")
+        if not lesson_applies(note, notes, task_class, project, allow_private):
+            raise VaultError(f"Lessonの適用条件または根拠版が一致しない: {key}")
         selected.add(key)
         pending.extend(ref.casefold() for ref in note.properties["depends_on"])
     return selected
+
+
+def lesson_applies(note: Note, notes: dict[str, Note], task_class: str | None,
+                   project: str, allow_private: bool = False) -> bool:
+    """A classified Lesson is withheld on unknown class, stale sources or revocation."""
+    if note.properties["kind"] != "Lesson" or not note.properties["task_classes"]:
+        return True
+    if task_class not in note.properties["task_classes"]:
+        return False
+    for ref in note.properties["source_versions"]:
+        source_id, version_hash = ref.split("@", 1)
+        version, digest = version_hash.split(":", 1)
+        source = notes.get(source_id.casefold())
+        if source is None or not _eligible(source, project, allow_private) or \
+                source.properties["version"] != version or source.sha256 != digest:
+            return False
+    return True
 
 
 def search_notes(notes: dict[str, Note], project: str, query: str,
@@ -240,12 +273,13 @@ def search_notes(notes: dict[str, Note], project: str, query: str,
 
 
 def _render_pack(notes: dict[str, Note], selected: set[str], mandatory: set[str],
-                 project: str, role: str, query: str) -> str:
+                 project: str, role: str, query: str, task_class: str | None = None) -> str:
     entries = []
     sections = []
     for key in sorted(selected, key=lambda item: (item not in mandatory, notes[item].id)):
         note = notes[key]
-        full = key in mandatory
+        full = key in mandatory or (note.properties["kind"] == "Lesson" and
+                                   bool(note.properties["task_classes"]))
         fidelity = "full" if full else "metadata"
         body = note.body.strip() if full else str(note.properties.get("summary", "")).strip()
         if not body:
@@ -258,8 +292,12 @@ def _render_pack(notes: dict[str, Note], selected: set[str], mandatory: set[str]
                         f"verification={note.properties.get('verification_status', 'unknown')} / "
                         f"version={note.properties['version']} / sha256={note.sha256}\n"
                         f"source_refs={json.dumps(note.properties['source_refs'], ensure_ascii=False)}\n\n{body}\n")
+        if note.properties["kind"] == "Lesson" and note.properties["task_classes"]:
+            sections[-1] += (f"\n適用分類: {', '.join(note.properties['task_classes'])}。"
+                             "必須Spec/Taskの条件・検証・権限を置き換えない。詳細の非適用条件と反例は正本を参照。\n")
     manifest = {"compiler_version": COMPILER_VERSION, "project": project, "role": role,
                 "query": query, "sources": entries,
+                "task_class": task_class,
                 "policy_versions": {entry["id"]: entry["version"] for entry in entries
                                     if entry["kind"] == "Policy"}}
     pack_id = sha256(json.dumps(manifest, ensure_ascii=False, sort_keys=True).encode())[:20]
@@ -273,7 +311,8 @@ def _render_pack(notes: dict[str, Note], selected: set[str], mandatory: set[str]
 
 
 def build_pack(notes: dict[str, Note], project: str, role: str, query: str,
-               required_ids: list[str], max_chars: int, allow_private: bool = False) -> str:
+               required_ids: list[str], max_chars: int, allow_private: bool = False,
+               task_class: str | None = None) -> str:
     if role not in {"astra", "sol", "luna"} or max_chars < 1000:
         raise VaultError("roleまたはmax-charsが不正")
     required_notes = [note for note in notes.values()
@@ -287,9 +326,11 @@ def build_pack(notes: dict[str, Note], project: str, role: str, query: str,
     seeds.update(item.casefold() for item in required_ids)
     if not seeds:
         raise VaultError("必須ノートがない。--requireかactive/requiredな仕様を指定する")
-    mandatory = _required_closure(notes, seeds, project, allow_private)
+    if task_class is not None and not re.fullmatch(r"[a-z][a-z0-9_.-]{0,79}", task_class):
+        raise VaultError("task-classが不正")
+    mandatory = _required_closure(notes, seeds, project, allow_private, task_class)
     selected = set(mandatory)
-    pack = _render_pack(notes, selected, mandatory, project, role, query)
+    pack = _render_pack(notes, selected, mandatory, project, role, query, task_class)
     if len(pack) > max_chars:
         raise VaultError("必須ノートだけで上限超過。必須条件を削らず、上限拡大かタスク分割を行う")
     for _score, note in search_notes(notes, project, query, allow_private=allow_private):
@@ -298,10 +339,12 @@ def build_pack(notes: dict[str, Note], project: str, role: str, query: str,
             continue
         if note.properties["roles"] and role not in note.properties["roles"]:
             continue
-        group = _required_closure(notes, {key}, project, allow_private)
+        if not lesson_applies(note, notes, task_class, project, allow_private):
+            continue
+        group = _required_closure(notes, {key}, project, allow_private, task_class)
         trial_selected = selected | group
         trial_mandatory = mandatory | (group - {key})
-        trial = _render_pack(notes, trial_selected, trial_mandatory, project, role, query)
+        trial = _render_pack(notes, trial_selected, trial_mandatory, project, role, query, task_class)
         if len(trial) <= max_chars:
             selected, mandatory, pack = trial_selected, trial_mandatory, trial
     return pack
@@ -486,6 +529,7 @@ def main(argv=None) -> int:
     packing.add_argument("--require", action="append", default=[])
     packing.add_argument("--max-chars", type=int, default=16000)
     packing.add_argument("--allow-private", action="store_true")
+    packing.add_argument("--task-class")
     pack_destination = packing.add_mutually_exclusive_group(required=True)
     pack_destination.add_argument("--out")
     pack_destination.add_argument("--stdout", action="store_true")
@@ -532,7 +576,7 @@ def main(argv=None) -> int:
             print(note.path.read_text(encoding="utf-8-sig"), end="")
         elif args.command == "pack":
             content = build_pack(notes, args.project, args.role, args.query,
-                                 args.require, args.max_chars, args.allow_private)
+                                 args.require, args.max_chars, args.allow_private, args.task_class)
             if args.stdout:
                 sys.stdout.write(content)
             else:
