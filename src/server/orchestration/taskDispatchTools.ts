@@ -21,19 +21,29 @@ const definitions = [
 ];
 const planText = { type:"string", minLength:1, maxLength:300 };
 const planList = { type:"array", minItems:1, maxItems:20, items:planText };
+const taskSchema = {type:"object",additionalProperties:false,properties:{
+  title:{type:"string",minLength:1,maxLength:160},objective:{type:"string",minLength:1,maxLength:2000},
+  inScope:planList,outOfScope:planList,allowedPaths:planList,invariants:planList,acceptance:planList,escalation:planList,
+  implementationPlan:{...planList,items:{type:"string",minLength:1,maxLength:500}},
+  references:{type:"array",minItems:1,maxItems:50,items:{type:"object",additionalProperties:false,properties:{id:runId,
+    version:{type:"integer",minimum:1},sha256:configHash},required:["id","version","sha256"]}},
+  maxAttempts:{type:"integer",minimum:1,maximum:3},timeLimitMinutes:{type:"integer",minimum:1,maximum:480}},
+  required:["title","objective","inScope","outOfScope","allowedPaths","invariants","acceptance","escalation","implementationPlan","references","maxAttempts","timeLimitMinutes"]};
 const authoringDefinitions = [
   definition("negi_list_projects", "新しい独立Taskを作れる、利用者設定済みプロジェクトと実行条件を読む。保存先・コマンド・モデル・権限は変更できない。", {}, []),
   definition("negi_read_project", "契約案を作る前に必須仕様と指定した参照の全文・版・hashを読む。未確認の仕様や依存Taskを推測せず、独立Taskだけを計画する。", {
     profile_id:runId, reference_ids:{type:"array",maxItems:50,items:runId} },["profile_id"]),
   definition("negi_propose_task", "利用者の新しい依頼について、読んだ仕様に基づく短い契約案とSolへの実行計画を保存する。実装・Vault active化・worktree作成・成果受入は行わない。契約画面URLを利用者に案内する。依存Taskが必要なら案を作らずその依存を解決する。", {
-    profile_id:runId, task:{type:"object",additionalProperties:false,properties:{
+    profile_id:runId, task:taskSchema },["profile_id","task"]),
+  definition("negi_propose_task_decomposition", "大きい依頼を2〜8件の契約案へ分解して一括保存する。独立Taskは変更範囲を分ける。依存は同じ案のnode keyで指定し、引継ぎ成果と共有条件を明記する。先行Taskがある後続は計画表示のみで確定・実行できず、先行成果の統合後に実際の基準SHAで新しい案が必要。小さい依頼はnegi_propose_taskを使う。", {
+    profile_id:runId, decomposition:{type:"object",additionalProperties:false,properties:{
       title:{type:"string",minLength:1,maxLength:160},objective:{type:"string",minLength:1,maxLength:2000},
-      inScope:planList,outOfScope:planList,allowedPaths:planList,invariants:planList,acceptance:planList,escalation:planList,
-      implementationPlan:{...planList,items:{type:"string",minLength:1,maxLength:500}},
-      references:{type:"array",minItems:1,maxItems:50,items:{type:"object",additionalProperties:false,properties:{id:runId,
-        version:{type:"integer",minimum:1},sha256:configHash},required:["id","version","sha256"]}},
-      maxAttempts:{type:"integer",minimum:1,maximum:3},timeLimitMinutes:{type:"integer",minimum:1,maximum:480}},
-      required:["title","objective","inScope","outOfScope","allowedPaths","invariants","acceptance","escalation","implementationPlan","references","maxAttempts","timeLimitMinutes"]} },["profile_id","task"]),
+      coordination:{type:"array",minItems:1,maxItems:8,items:{type:"string",minLength:1,maxLength:500}},
+      nodes:{type:"array",minItems:2,maxItems:8,items:{type:"object",additionalProperties:false,properties:{
+        key:{type:"string",pattern:"^[a-z][a-z0-9-]{0,39}$"},
+        dependsOn:{type:"array",maxItems:7,items:{type:"string",pattern:"^[a-z][a-z0-9-]{0,39}$"}},
+        handoff:{type:"string",minLength:1,maxLength:500},task:taskSchema},required:["key","dependsOn","handoff","task"]}}},
+      required:["title","objective","coordination","nodes"]} },["profile_id","decomposition"]),
 ];
 export interface RegisteredTaskTools {
   definitions: CodexDynamicToolDefinition[];
@@ -74,12 +84,20 @@ export function registeredTaskTools(service: LocalTaskService, masterId: string,
       let value: unknown;
       if (authoring && call.tool === "negi_list_projects") {
         argumentsObject(call.arguments,[]); value = { projects:authoring.service.listProfiles() };
-      } else if (authoring && ["negi_read_project","negi_propose_task"].includes(call.tool)) {
-        const args=argumentsObject(call.arguments,call.tool==="negi_read_project"?["profile_id","reference_ids"]:["profile_id","task"]);
+      } else if (authoring && ["negi_read_project","negi_propose_task","negi_propose_task_decomposition"].includes(call.tool)) {
+        const args=argumentsObject(call.arguments,call.tool==="negi_read_project"?["profile_id","reference_ids"]:
+          call.tool==="negi_propose_task_decomposition"?["profile_id","decomposition"]:["profile_id","task"]);
         if (typeof args.profile_id!=="string" || !/^[a-zA-Z0-9._-]{1,100}$/.test(args.profile_id)) throw new Error("Project profile identity invalid");
         if (call.tool==="negi_read_project") {
           if (args.reference_ids!==undefined && (!Array.isArray(args.reference_ids) || args.reference_ids.some(id=>typeof id!=="string"))) throw new Error("Project references invalid");
           value=await authoring.service.readProject(args.profile_id,args.reference_ids as string[]|undefined);
+        } else if(call.tool==="negi_propose_task_decomposition") {
+          const drafts=await authoring.service.proposeDecomposition(args.profile_id,args.decomposition,{...origin,...authoring.planner});
+          const group=drafts[0].decomposition!;
+          value={decompositionId:group.id,title:group.title,hash:group.hash,url:`/task-plans?draft=${drafts[0].id}`,
+            tasks:drafts.map(d=>({draftId:d.id,key:d.decomposition!.key,title:d.title,dependsOn:d.decomposition!.dependsOn,
+              status:d.status,canFinalize:d.canFinalize,url:`/task-plans?draft=${d.id}`})),
+            executionStarted:false,humanConfirmationRequired:true,successorsRequireNewPlanAfterIntegration:true};
         } else {
           const draft=await authoring.service.propose(args.profile_id,args.task,{...origin,...authoring.planner});
           value={draftId:draft.id,title:draft.title,hash:draft.hash,status:draft.status,
@@ -115,7 +133,7 @@ export function registeredTaskTools(service: LocalTaskService, masterId: string,
       return { success: true, text };
     } catch {
       return { success: false, text: JSON.stringify({ error: "Taskの契約・版・現在の状態を照合できません。再委任せずTask画面で確認してください。",
-        nextTool: call.tool.includes("project")||call.tool==="negi_propose_task" ? "negi_read_project" : "negi_read_task", noAutomaticRetry: true }) };
+        nextTool: call.tool.includes("project")||call.tool.startsWith("negi_propose_task") ? "negi_read_project" : "negi_read_task", noAutomaticRetry: true }) };
     }
   } };
 }

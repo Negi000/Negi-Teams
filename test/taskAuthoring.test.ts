@@ -20,6 +20,7 @@ import { runScheduledVaultTask } from "../src/server/orchestration/scheduledVaul
 import { FileTaskLedger, reduceTask } from "../src/server/orchestration/singleTask.ts";
 import type { VaultRunConfig } from "../src/server/orchestration/vaultRunConfig.ts";
 import type { SingleTaskClient } from "../src/server/orchestration/singleTaskRunner.ts";
+import { taskDecomposition, type TaskDecompositionFields } from "../src/server/orchestration/taskDecomposition.ts";
 
 const planner = { model:"gpt-6-astra",effort:"medium" };
 const origin = { kind:"master" as const,masterId:"native-master",threadId:"master-thread",turnId:"master-turn",callId:"plan-call",...planner };
@@ -53,7 +54,7 @@ async function setup() {
     const {config}=prepared;
     const client=(role:"astra"|"sol"):SingleTaskClient=>({async initialize(){},async discoverModels(){return[{model:config[role].model,efforts:["medium"],inputModalities:["text"]}]},
       async startThread(options){if(role==="astra")astraCalls++;else solCalls++;return{threadId:`thread-${role}`,requestedModel:options.model,resolvedModel:options.model,modelProvider:"fixture",rerouted:false}},
-      async startTurn(prompt){assert.match(prompt,/承認された文書を1件作る/);await writeFile(join(config.checkout,"docs","result.txt"),"approved fixture result\n");return`turn-${role}`},
+      async startTurn(prompt){assert.match(prompt,/承認された文書を1件作る/);await writeFile(join(config.checkout,prepared.contract.scope.allowedPaths[0]),"approved fixture result\n");return`turn-${role}`},
       async waitForTurn(turnId){return{turnId,status:"completed",finalText:"Fixture result",contextInputTokens:null,contextWindow:null,lastUsage:null}}});
     return runScheduledVaultTask({scheduler,dispatchKey:`${config.runId}:dispatch`,run:{runId:config.runId,cwd:config.checkout,
       vaultDirectory:config.vault,snapshotPath:config.snapshot,artifactDir:join(config.outputDir,"artifacts"),ledger:new FileTaskLedger(join(config.outputDir,"run.jsonl")),
@@ -199,6 +200,11 @@ test("approval API requires cookie, same origin and exact draft hash; response r
     assert.equal((await fetch(path,options)).status,200);assert.equal(f.tasks.list().length,2);assert.deepEqual(f.calls(),{astra:0,sol:0});
     assert.equal((await fetch(path,{headers:options.headers})).status,405);
     const page=await fetch(base+"/task-plans",{headers:{Cookie:"ebi_auth=fixture-token"}});assert.equal(page.status,200);assert.match(await page.text(),/この契約を確定/);
+    const group=await f.authoring.proposeDecomposition("docs-project",decomposition(f.fields),{...origin,callId:"api-graph"});
+    const successor=group.find(d=>d.status==="waiting_dependencies")!;
+    assert.equal((await fetch(base+`/api/task-plans/${successor.id}/finalize`,{...options,body:JSON.stringify({expectedHash:successor.hash,requestId:randomUUID()})})).status,409);
+    const catalog=await fetch(base+"/api/task-plans",{headers:options.headers});assert.equal(catalog.status,200);
+    assert.equal((await catalog.json()).find((d:{id:string})=>d.id===successor.id).canFinalize,false);assert.equal(f.tasks.list().length,2);
     for(const script of taskPlanPageHtml().matchAll(/<script>([\s\S]*?)<\/script>/g))new Script(script[1]);
   }finally{await new Promise<void>((r,e)=>server.close(err=>err?e(err):r()));await f.close()}
 });
@@ -207,4 +213,102 @@ test("unapproved plan adoption cannot bypass the ledger state machine",()=>{
   const contract={vaultId:"id",version:1,sha256:"a".repeat(64),project:"fixture",objective:"test",acceptance:["test"],baseSha:"b".repeat(40)};
   const state=reduceTask(null,{key:"create",at:new Date().toISOString(),action:{type:"create",runId:"test",contract}});
   assert.throws(()=>reduceTask(state,{key:"forged-plan",at:new Date().toISOString(),action:{type:"adopt_approved_plan",approvalRef:"user:http-task-plan:forged",outputRef:"plan#sha256="+"a".repeat(64)}}));
+});
+
+function decomposition(fields:TaskPlanFields):TaskDecompositionFields {
+  return {title:"案内と確認手順を用意する",objective:"二つの独立文書を準備してから統合した案内を作る",coordination:["既存文書を保ち、各文書の用語を揃える"],nodes:[
+    {key:"guide",dependsOn:[],handoff:"単独で読める案内文書",task:{...fields,title:"使い方の案内"}},
+    {key:"checks",dependsOn:[],handoff:"確認できる項目の一覧",task:{...fields,title:"確認手順",allowedPaths:["docs/checks.txt"]}},
+    {key:"combined",dependsOn:["guide","checks"],handoff:"二つの成果を統合した版で案内を更新する",task:{...fields,title:"統合後の案内"}},
+  ]};
+}
+
+test("decomposition validates cycles, missing edges, disjoint writers and bounded authority before publication",async()=>{
+  const f=await setup();try{
+    const good=decomposition(f.fields);
+    const bad=[
+      {...good,nodes:good.nodes.map(n=>n.key==="guide"?{...n,dependsOn:["combined"]}:n)},
+      {...good,nodes:good.nodes.map(n=>n.key==="combined"?{...n,dependsOn:["missing"]}:n)},
+      {...good,nodes:good.nodes.map(n=>n.key==="guide"?{...n,dependsOn:["guide"]}:n)},
+      {...good,nodes:good.nodes.map(n=>n.key==="checks"?{...n,task:{...n.task,allowedPaths:["docs/result.txt"]}}:n)},
+      {...good,nodes:good.nodes.map(n=>n.key==="checks"?{...n,task:{...n.task,allowedPaths:["docs/result.txt/sub"]}}:n)},
+      {...good,nodes:[...good.nodes,good.nodes[0]]},
+      {...good,nodes:[good.nodes[0]]},
+      {...good,nodes:good.nodes.map(n=>({...n,task:{...n.task,command:"publish"}}))},
+      {...good,nodes:good.nodes.map(n=>({...n,task:{...n.task,maxAttempts:2}}))},
+      {...good,execute:true},
+    ];
+    for(const raw of bad)await assert.rejects(f.authoring.proposeDecomposition("docs-project",raw,origin));
+    assert.throws(()=>taskDecomposition({...good,nodes:[good.nodes[0],{...good.nodes[1],task:{...f.fields,allowedPaths:["DOCS/RESULT.TXT"]}}]},raw=>raw as TaskPlanFields),/overlap/);
+    await assert.rejects(f.authoring.proposeDecomposition("docs-project",good,{...origin,model:"gpt-6.1-sol"}));
+    assert.equal((await f.authoring.list()).length,0);assert.equal((await readdir(join(f.root,"authoring","decompositions"))).length,0);
+    assert.equal(f.tasks.list().length,1);assert.deepEqual(f.calls(),{astra:0,sol:0});
+  }finally{await f.close()}
+});
+
+test("native decomposition publishes one graph, roots use the same direct Sol execution, successors never dispatch at the old base",async()=>{
+  const f=await setup();try{
+    const tools=registeredTaskTools(f.tasks,origin.masterId,{service:f.authoring,planner});
+    const call={threadId:origin.threadId,turnId:origin.turnId,callId:origin.callId,tool:"negi_propose_task_decomposition",arguments:{profile_id:"docs-project",decomposition:decomposition(f.fields)}};
+    const response=await tools.invoke(call);assert.equal(response.success,true);const result=JSON.parse(response.text);
+    assert.equal(result.tasks.length,3);assert.equal(result.executionStarted,false);assert.equal(result.successorsRequireNewPlanAfterIntegration,true);
+    assert.deepEqual(JSON.parse((await tools.invoke(call)).text),result);
+    assert.equal(registeredTaskTools(f.tasks,origin.masterId).definitions.some(d=>d.name===call.tool),false);
+    let rows=await f.authoring.list();const roots=rows.filter(d=>d.canFinalize),successor=rows.find(d=>d.decomposition?.key==="combined")!;
+    assert.equal(roots.length,2);assert.equal(successor.status,"waiting_dependencies");assert.equal(successor.canFinalize,false);
+    await assert.rejects(f.authoring.finalize(successor.id,successor.hash,randomUUID()),/Successor/);
+    assert.equal((await readdir(join(f.root,"authoring","approvals"))).filter(n=>n.endsWith(".json")).length,0);
+    const rootTasks=[];
+    for(const root of roots){
+      const view=await f.authoring.finalize(root.id,root.hash,randomUUID()),task=await f.tasks.snapshot(view.runId!);
+      const config=f.tasks.authoringTemplate(view.runId!).config;
+      assert.match(await readFile(join(f.vault,"80_Tasks",task.taskId+".md"),"utf8"),/元の依頼と分解/);
+      assert.equal(config.schedulerPath,f.config.schedulerPath);assert.equal(task.baseSha,git(f.repo,["rev-parse","HEAD"]));
+      if(!rootTasks.length){assert.equal(task.canStart,false);assert.match(task.error!,/すべて確定/);
+        await assert.rejects(f.tasks.start(task.id,task.configSha256,randomUUID(),requestOrigin),/cannot be dispatched/);
+        assert.equal((await f.tasks.snapshot(task.id)).status,"not_started");}
+      rootTasks.push(task);
+    }
+    for(const task of rootTasks)await f.tasks.start(task.id,task.configSha256,randomUUID(),requestOrigin);
+    const deadline=Date.now()+20000;let tasks;
+    do{tasks=await Promise.all(f.tasks.list().map(t=>f.tasks.snapshot(t.id)));if(tasks.filter(t=>t.id!=="template").every(t=>t.status==="ready_for_review"))break;await new Promise(r=>setTimeout(r,50))}while(Date.now()<deadline);
+    assert.equal(tasks!.filter(t=>t.id!=="template").length,2);
+    assert.deepEqual(tasks!.filter(t=>t.id!=="template").map(t=>[t.status,t.acceptedBy]),[["ready_for_review",null],["ready_for_review",null]],"Both isolated roots must reach review without human acceptance");
+    assert.deepEqual(f.calls(),{astra:0,sol:2});assert.equal(git(f.repo,["status","--porcelain"]),"");
+    // Successful predecessors alone do not supply their code into the successor checkout.
+    await assert.rejects(f.authoring.finalize(successor.id,successor.hash,randomUUID()),/Successor/);
+    await f.tasks.close();const tasks2=await LocalTaskService.open(f.catalog,f.runtime);try{
+      const recovered=await LocalTaskAuthoringService.open(f.authoringConfig,tasks2);rows=await recovered.list();
+      assert.equal(rows.filter(r=>r.status==="registered").length,2);assert.equal(rows.find(r=>r.id===successor.id)?.status,"waiting_dependencies");
+      assert.equal(tasks2.list().length,3);assert.deepEqual(f.calls(),{astra:0,sol:2});
+    }finally{await tasks2.close()}
+  }finally{await f.close()}
+});
+
+test("separate graph publishers deduplicate the actual call and reject single/graph reuse and changed approval sources",async()=>{
+  const f=await setup();try{
+    const second=await LocalTaskAuthoringService.open(f.authoringConfig,f.tasks),input=decomposition(f.fields);
+    const [a,b]=await Promise.all([f.authoring.proposeDecomposition("docs-project",input,origin),second.proposeDecomposition("docs-project",input,origin)]);
+    assert.deepEqual(a,b);assert.equal((await readdir(join(f.root,"authoring","decompositions"))).length,1);assert.equal((await f.authoring.list()).length,3);
+    await assert.rejects(f.authoring.propose("docs-project",f.fields,origin));
+    await assert.rejects(f.authoring.proposeDecomposition("docs-project",{...input,title:"different"},origin));
+    const root=a.find(d=>d.canFinalize)!;
+    await writeFile(f.spec,(await readFile(f.spec,"utf8"))+"\nNew requirement.\n");
+    assert.equal((await f.authoring.list()).find(d=>d.id===root.id)?.status,"attention");
+    await assert.rejects(f.authoring.finalize(root.id,root.hash,randomUUID()));
+    assert.equal(f.tasks.list().length,1);assert.deepEqual(f.calls(),{astra:0,sol:0});
+  }finally{await f.close()}
+});
+
+test("new repository base and graph tampering hold all unapproved children without partial contracts",async()=>{
+  const f=await setup();try{
+    const drafts=await f.authoring.proposeDecomposition("docs-project",decomposition(f.fields),origin),root=drafts.find(d=>d.canFinalize)!;
+    await writeFile(join(f.repo,"docs","base.txt"),"integrated base\n");git(f.repo,["add","docs/base.txt"]);
+    git(f.repo,["-c","user.name=Fixture","-c","user.email=fixture@example.invalid","commit","-m","integrated fixture"]);
+    assert.equal((await f.authoring.list()).filter(d=>d.status==="attention").length,3);
+    await assert.rejects(f.authoring.finalize(root.id,root.hash,randomUUID()));
+    const path=join(f.root,"authoring","decompositions",root.decomposition!.id+".json"),raw=JSON.parse(await readFile(path,"utf8"));
+    raw.fields.nodes[2].dependsOn=[];await writeFile(path,JSON.stringify(raw));await assert.rejects(f.authoring.list(),/integrity/);
+    assert.equal((await readdir(join(f.vault,"80_Tasks"))).length,1);assert.equal((await readdir(join(f.root,"worktrees"))).length,0);assert.deepEqual(f.calls(),{astra:0,sol:0});
+  }finally{await f.close()}
 });

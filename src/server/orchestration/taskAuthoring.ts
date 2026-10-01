@@ -12,6 +12,7 @@ import { HumanReviewProofStore, isReviewRequestId } from "./humanReviewProof.ts"
 import type { LocalTaskService, TaskRequestOrigin } from "./taskService.ts";
 import type { VaultRunConfig } from "./vaultRunConfig.ts";
 import { loadVaultTaskContract, type VaultTaskContract } from "./vaultTaskContract.ts";
+import { taskDecomposition, type TaskDecompositionFields, type TaskDecompositionNode } from "./taskDecomposition.ts";
 
 const exec = promisify(execFile), sha = (text: string) => createHash("sha256").update(text).digest("hex");
 const label = /^[a-zA-Z0-9._-]{1,100}$/, digest = /^[0-9a-f]{64}$/;
@@ -30,16 +31,20 @@ interface Profile { id: string; title: string; project: string; repository: stri
   allowedPaths: string[]; maxAttempts: number; timeLimitMinutes: number; config: VaultRunConfig; hash: string }
 interface Draft { schema: "negi-task-plan/1"; id: string; createdAt: string; profileId: string;
   profileHash: string; baseSha: string; sources: Source[]; fields: TaskPlanFields;
-  origin: Exclude<TaskRequestOrigin, { kind: "browser" }> & { model: string; effort: string }; hash: string }
-function planIdentity(origin:Draft["origin"]):string {
-  const bytes=createHash("sha256").update("negi-task-plan/1\n"+JSON.stringify(origin)).digest().subarray(0,16);
+  origin: Exclude<TaskRequestOrigin, { kind: "browser" }> & { model: string; effort: string }; hash: string;
+  decomposition?: TaskDecompositionNode }
+interface DecompositionDraft { schema: "negi-task-decomposition/1"; id: string; createdAt: string; profileId: string;
+  profileHash: string; baseSha: string; sources: Source[]; fields: TaskDecompositionFields; origin: Draft["origin"]; hash: string }
+function planIdentity(origin:Draft["origin"], suffix=""):string {
+  const bytes=createHash("sha256").update("negi-task-plan/1\n"+JSON.stringify(origin)+suffix).digest().subarray(0,16);
   bytes[6]=(bytes[6]&15)|64;bytes[8]=(bytes[8]&63)|128;
   const h=bytes.toString("hex");return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;
 }
 export interface TaskPlanView { id: string; createdAt: string; title: string; project: string; profileId: string;
   hash: string; baseSha: string; fields: TaskPlanFields; sources: Source[]; verification: string[];
   planner: VaultRunConfig["astra"]; worker: VaultRunConfig["sol"]; origin: Draft["origin"];
-  status: "draft" | "registered" | "attention"; canFinalize: boolean; runId: string | null; error: string | null }
+  status: "draft" | "registered" | "attention" | "waiting_dependencies"; canFinalize: boolean; runId: string | null; error: string | null;
+  decomposition?: TaskDecompositionNode }
 
 function text(value: unknown, maximum: number): string {
   if (typeof value !== "string" || !value.trim() || value.length > maximum || value.includes("\0") || value.includes("```")) throw new Error("Task plan text invalid");
@@ -110,7 +115,8 @@ function markdown(draft: Draft, profile: Profile, requestId: string): string {
     .map(([k,v]) => scalar(k,v)).join("") + "source_refs:\n" + [`master:${draft.origin.masterId}:${draft.origin.threadId}:${draft.origin.turnId}:${draft.origin.callId}`]
     .map(v => "  - " + JSON.stringify(v) + "\n").join("") + "depends_on:\n" + draft.sources.map(s => "  - " + JSON.stringify(s.id) + "\n").join("") +
     "---\n# " + f.title.replace(/[\r\n]/g, " ") + "\n\n```negi-task-contract\n" + JSON.stringify(body, null, 2) + "\n```\n\n## 実行計画\n" +
-    f.implementationPlan.map(v => "- " + v).join("\n") + "\n\n## 依存Task\nなし。この契約は独立して実行する。\n";
+    f.implementationPlan.map(v => "- " + v).join("\n") + "\n\n## 依存Task\nなし。この契約は独立して実行する。\n" +
+    (draft.decomposition ? "\n## 元の依頼と分解\n" + JSON.stringify(draft.decomposition, null, 2) + "\n" : "");
 }
 function snapshot(draft: Draft, profile: Profile, content: string): VaultTaskContract {
   const f = draft.fields, taskId = `NT-TASK-${draft.id}`, hash = sha(content);
@@ -155,6 +161,7 @@ export class LocalTaskAuthoringService {
       if (inside(a.repository,b.worktreeRoot) || inside(a.config.vault,b.worktreeRoot) ||
           inside(a.worktreeRoot,b.repository) || inside(a.worktreeRoot,b.config.vault)) throw new Error("Project worktree roots overlap source/Vault roots");
     await mkdir(join(root,"drafts"), { recursive:true }); await mkdir(join(root,"runs"), { recursive:true });
+    await mkdir(join(root,"decompositions"), { recursive:true });
     const proofs = await HumanReviewProofStore.open(join(root,"approvals"));
     const service = new LocalTaskAuthoringService(root,profiles,proofs,tasks);
     await service.restoreRegistrations(); return service;
@@ -168,7 +175,8 @@ export class LocalTaskAuthoringService {
   }
   listProfiles() { return this.profiles.map(p => ({ id:p.id, title:p.title, project:p.project, allowedPaths:p.allowedPaths,
     verification:p.config.verification.map(c=>c.requirement), planner:p.config.astra, worker:p.config.sol,
-    maxAttempts:p.maxAttempts, timeLimitMinutes:p.timeLimitMinutes, independentTasksOnly:true })); }
+    maxAttempts:p.maxAttempts, timeLimitMinutes:p.timeLimitMinutes, independentTasksOnly:true,
+    decomposition:{maxTasks:8, executable:"independent_roots", successors:"new_plan_after_integration"} })); }
   private async python(profile: Profile, args: string[]): Promise<unknown> {
     const script = ["../../../scripts/negi_task_authoring.py", "../../../../scripts/negi_task_authoring.py"]
       .map(p => fileURLToPath(new URL(p,import.meta.url))).find(existsSync);
@@ -198,7 +206,7 @@ export class LocalTaskAuthoringService {
       try {
         const drafts=await this.drafts(), previous=drafts.find(d=>isDeepStrictEqual(d.origin,origin));
         if(previous){
-          if(previous.profileHash!==p.hash||!isDeepStrictEqual(previous.fields,f))throw new Error("Planner call reused for a different Task draft");
+          if(previous.decomposition||previous.profileHash!==p.hash||!isDeepStrictEqual(previous.fields,f))throw new Error("Planner call reused for a different Task draft");
           selected=previous;
         }else{
           if(drafts.length>=100)throw new Error("Task draft catalog limit reached");
@@ -206,6 +214,45 @@ export class LocalTaskAuthoringService {
         }
       }finally{await lock.close();await unlink(join(this.root,"draft-writer.lock"))}
       return this.view(selected);
+    });
+  }
+  async proposeDecomposition(profileId: string, raw: unknown, origin: Draft["origin"]): Promise<TaskPlanView[]> {
+    return this.serial(async () => {
+      const p=this.profile(profileId), f=taskDecomposition(raw,raw=>fields(raw,p));
+      if(origin.kind!=="master"||origin.model!==p.config.astra.model||origin.effort!==p.config.astra.effort||
+        ![origin.masterId,origin.threadId,origin.turnId,origin.callId].every(id=>typeof id==="string"&&id.length>0&&id.length<=200&&!/[\r\n\0]/.test(id)))
+        throw new Error("Task decompositions require the configured resident Astra");
+      const source=await this.readProject(profileId,[...new Set(f.nodes.flatMap(n=>n.task.references.map(r=>r.id)))]);
+      for(const n of f.nodes)for(const r of n.task.references)
+        if(!source.sources.some(s=>s.id===r.id&&s.version===r.version&&s.sha256===r.sha256))throw new Error("Task decomposition reference is stale");
+      const baseSha=(await exec("git",["rev-parse","HEAD"],{cwd:p.repository,windowsHide:true})).stdout.trim().toLowerCase();
+      if(!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(baseSha))throw new Error("Project base SHA invalid");
+      const core={schema:"negi-task-decomposition/1" as const,id:planIdentity(origin,"\ndecomposition"),createdAt:new Date().toISOString(),
+        profileId,profileHash:p.hash,baseSha,sources:source.sources,fields:f,origin:structuredClone(origin)};
+      let group:DecompositionDraft={...core,hash:sha(JSON.stringify(core))};const lock=await this.draftWriter();
+      try{
+        const drafts=await this.drafts(), previous=drafts.filter(d=>isDeepStrictEqual(d.origin,origin));
+        if(previous.length){
+          const prior=await json(join(this.root,"decompositions",`${group.id}.json`)) as DecompositionDraft;
+          if(!previous.every(d=>d.decomposition?.id===group.id)||prior.profileHash!==p.hash||!isDeepStrictEqual(prior.fields,f))
+            throw new Error("Planner call reused for a different decomposition");
+          group=prior;
+        }else{
+          if(drafts.length+f.nodes.length>100)throw new Error("Task draft catalog limit reached");
+          // One immutable file publishes the entire graph; no partially visible child catalog.
+          await save(join(this.root,"decompositions",`${group.id}.json`),group);
+        }
+      }finally{await lock.close();await unlink(join(this.root,"draft-writer.lock"))}
+      return Promise.all(this.expand(group).map(d=>this.view(d)));
+    });
+  }
+  private expand(group:DecompositionDraft):Draft[] {
+    return group.fields.nodes.map((n,position)=>{
+      const core={schema:"negi-task-plan/1" as const,id:planIdentity(group.origin,`\n${group.id}\n${n.key}`),createdAt:group.createdAt,
+        profileId:group.profileId,profileHash:group.profileHash,baseSha:group.baseSha,sources:group.sources,fields:n.task,origin:group.origin,
+        decomposition:{id:group.id,hash:group.hash,title:group.fields.title,objective:group.fields.objective,
+          coordination:group.fields.coordination,key:n.key,position,dependsOn:n.dependsOn,handoff:n.handoff}};
+      return {...core,hash:sha(JSON.stringify(core))};
     });
   }
   private async drafts(): Promise<Draft[]> {
@@ -217,6 +264,18 @@ export class LocalTaskAuthoringService {
       if (d.schema!=="negi-task-plan/1" || !isReviewRequestId(d.id) || file!==d.id+".json" || hash!==sha(JSON.stringify(core))) throw new Error("Task draft integrity invalid");
       result.push(d);
     }
+    const groups=await readdir(join(this.root,"decompositions"));
+    if(groups.length>50)throw new Error("Task decomposition catalog limit reached");
+    for(const file of groups){
+      if(!/^[0-9a-f-]{36}\.json$/.test(file))throw new Error("Task decomposition file identity invalid");
+      const d=await json(join(this.root,"decompositions",file)) as DecompositionDraft,{hash,...core}=d;
+      if(d.schema!=="negi-task-decomposition/1"||!isReviewRequestId(d.id)||file!==d.id+".json"||hash!==sha(JSON.stringify(core))||
+        d.id!==planIdentity(d.origin,"\ndecomposition"))throw new Error("Task decomposition integrity invalid");
+      // Verify graph structure even when a changed profile leaves its contracts on hold.
+      taskDecomposition(d.fields,raw=>raw as TaskPlanFields);
+      result.push(...this.expand(d));
+    }
+    if(result.length>100||new Set(result.map(d=>d.id)).size!==result.length)throw new Error("Task draft catalog identity/limit invalid");
     return result;
   }
   private async approval(draft: Draft) {
@@ -257,12 +316,15 @@ export class LocalTaskAuthoringService {
     if(!registered&&!error)try{await lstat(join(this.root,"writer.lock"));error="契約の確定処理が進行中、または停止後の照合を待っています。状態を更新して確認してください。"}
     catch(e){if((e as NodeJS.ErrnoException).code!=="ENOENT")throw e}
     if (approval && !registered && !error) error="契約の確定処理を照合してください。実行はまだ開始していません。";
+    const waiting=Boolean(d.decomposition?.dependsOn.length);
     return { id:d.id,createdAt:d.createdAt,title:d.fields.title,project:p.project,profileId:p.id,hash:d.hash,baseSha:d.baseSha,
       fields:d.fields,sources:d.sources,verification:p.config.verification.map(v=>v.requirement),planner:p.config.astra,worker:p.config.sol,
-      origin:d.origin,status:registered?"registered":error?"attention":"draft",canFinalize:!approval&&!error,runId,error };
+      origin:d.origin,status:registered?"registered":error?"attention":waiting?"waiting_dependencies":"draft",canFinalize:!approval&&!error&&!waiting,runId,error,
+      ...(d.decomposition?{decomposition:structuredClone(d.decomposition)}:{}) };
   }
   async list(): Promise<TaskPlanView[]> {
-    const drafts=(await this.drafts()).sort((a,b)=>b.createdAt.localeCompare(a.createdAt)||a.id.localeCompare(b.id)), result:TaskPlanView[]=[];
+    const drafts=(await this.drafts()).sort((a,b)=>b.createdAt.localeCompare(a.createdAt)||
+      (a.decomposition?.id===b.decomposition?.id&&a.decomposition&&b.decomposition?a.decomposition.position-b.decomposition.position:a.id.localeCompare(b.id))), result:TaskPlanView[]=[];
     // Bounded compiler/Git processes even with a full draft catalog.
     for(let i=0;i<drafts.length;i+=4)result.push(...await Promise.all(drafts.slice(i,i+4).map(d=>this.view(d))));
     return result;
@@ -271,6 +333,7 @@ export class LocalTaskAuthoringService {
     return this.serial(async () => {
       if (!isReviewRequestId(id) || !digest.test(expectedHash) || !isReviewRequestId(requestId)) throw new Error("Task approval identity invalid");
       const d = (await this.drafts()).find(d=>d.id===id); if (!d || d.hash!==expectedHash) throw new Error("Task plan version differs");
+      if(d.decomposition?.dependsOn.length)throw new Error("Successor requires integrated upstream results and a new plan at the actual base");
       const p=this.profile(d.profileId),lock=await open(join(this.root,"writer.lock"),"wx",0o600);
       try {
       const prior=await this.approval(d);
@@ -304,8 +367,23 @@ export class LocalTaskAuthoringService {
         await save(join(out,"worktree-created.json"),{configHash:sha(JSON.stringify(config)),baseSha:d.baseSha});
         await loadVaultTaskContract(config.vault,config.snapshot,config.checkout);
         await this.tasks.registerAuthoredRun(d.fields.title,config);
+        this.bindDecompositionAdmission(d,config.runId);
       return this.view(d);
       } finally { await lock.close(); await unlink(join(this.root,"writer.lock")); }
+    });
+  }
+  private bindDecompositionAdmission(d:Draft,runId:string):void {
+    if(!d.decomposition)return;
+    const group=d.decomposition;
+    this.tasks.bindStartCheck(runId,async()=>{
+      const members=(await this.drafts()).filter(row=>row.decomposition?.id===group.id);
+      if(!members.length||members.some(row=>row.decomposition?.hash!==group.hash))throw new Error("Task decomposition changed before admission");
+      for(const root of members.filter(row=>!row.decomposition!.dependsOn.length)){
+        const receipt=await this.approval(root);
+        if(!receipt||!this.tasks.list().some(task=>task.id===receipt.runId))
+          return "同じ依頼の独立Taskの契約をすべて確定してから開始できます。契約案の画面で残りの作業を確認してください。";
+      }
+      return null;
     });
   }
   private async assertWorktree(config:VaultRunConfig,p:Profile,baseSha:string,clean:boolean):Promise<void> {
@@ -326,6 +404,7 @@ export class LocalTaskAuthoringService {
         if (created.configHash!==sha(JSON.stringify(config)) || created.baseSha!==d.baseSha) throw new Error("Authored worktree creation record differs");
         await this.assertWorktree(config,p,d.baseSha,false);
         await this.tasks.registerAuthoredRun(d.fields.title,config);
+        this.bindDecompositionAdmission(d,config.runId);
       } catch { /* signed approval remains visible; no automatic mutation or dispatch */ }
     }
   }

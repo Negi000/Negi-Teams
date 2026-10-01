@@ -89,6 +89,7 @@ interface Runtime {
 }
 
 export class LocalTaskService {
+  private readonly startChecks = new Map<string, () => Promise<string | null>>();
   private readonly prepared = new Map<string, PreparedVaultRun>();
   private readonly active = new Map<string, { controller: AbortController; promise: Promise<void> }>();
   private readonly starts = new Map<string, Promise<TaskRunView>>();
@@ -217,6 +218,10 @@ export class LocalTaskService {
   }
   /** Complete pinned Task Contract; provider launch and verification commands stay server-owned. */
   dispatchContract(id: string): Record<string, unknown> { return structuredClone(this.registered(id).contract); }
+  /** Server-owned admission conditions; model/HTTP callers cannot supply or replace them. */
+  bindStartCheck(id: string, check: () => Promise<string | null>): void {
+    this.registered(id); this.startChecks.set(id, check);
+  }
   /** Trusted server authoring configuration only. Never exposed as an HTTP/model tool. */
   authoringTemplate(id: string): { config: VaultRunConfig; contract: Record<string, unknown> } {
     const run = this.registered(id);
@@ -593,6 +598,9 @@ export class LocalTaskService {
     } else if (state?.status === "ready_for_review" && this.reviews)
       reviewError = "Webレビュー用の固定差分を生成できませんでした。ローカルの成果と検証証拠を確認してください。";
     const scope = run.contract.scope as { allowedPaths?: string[]; out?: string[] } | undefined;
+    let startError:string|null=null;
+    if(!request&&!entry&&!state&&!this.closing)try{startError=await this.startChecks.get(id)?.()??null}
+    catch{startError="開始条件を照合できません。契約案の状態を確認してください。"}
     return { id, title: run.title, configSha256: run.configSha256,
       project: run.contract.project as string, objective: run.contract.objective as string,
       taskId: run.contract.vaultId as string, version: run.contract.version as number,
@@ -600,10 +608,10 @@ export class LocalTaskService {
       acceptance: run.contract.acceptance as string[], allowedPaths: scope?.allowedPaths ?? [],
       outOfScope: scope?.out ?? [], invariants: run.contract.invariants as string[] ?? [],
       verification: run.contract.verification as string[], astra: run.config.astra, sol: run.config.sol,
-      status, executionPhase: entry?.phase ?? null, canStart: !request && !entry && !state && !this.closing,
+      status, executionPhase: entry?.phase ?? null, canStart: !request && !entry && !state && !this.closing && !startError,
       canStop: Boolean(active || entry?.status === "queued"), live: Boolean(active),
       stopRequested: active?.controller.signal.aborted ?? false,
-      error: error?.error ?? reviewError ?? state?.stopReason ?? entry?.reason ?? null,
+      error: error?.error ?? reviewError ?? state?.stopReason ?? entry?.reason ?? startError,
       verificationOutcome: state?.verification?.outcome ?? null, acceptedBy: state?.acceptedBy ?? null,
       attempts: state?.attempts.map((attempt) => ({ role: attempt.role,
         model: attempt.resolvedModel ?? attempt.requestedModel, state: attempt.state, usage: attempt.usage })) ?? [],

@@ -40,7 +40,9 @@ const taskInstructions = "\n登録済みTaskの委任はnegi_list_tasks、negi_r
   "実行許可、成果受入、契約変更はこのツールの権限外。";
 const authoringInstructions = "\n新しい依頼は、negi_list_projectsで設定済みプロジェクトを選び、negi_read_projectで必須仕様と参照の版を読む。" +
   "Astraとして目的・対象内外・許可パス・不変条件・受入・差戻し・制限・短い実行計画を作りnegi_propose_taskへ渡す。" +
-  "未確認の仕様、未知のコマンド、未設定の権限や依存Taskを捏造しない。依存Taskが必要なら先に解決する。" +
+  "大きい依頼で分解が有益なときだけnegi_propose_task_decompositionで2〜8件に分け、依存・共有条件・引継ぎ成果を明記する。" +
+  "独立Taskの変更可能パスを分離する。先行Taskのある後続は計画だけで、先行成果の統合後に実際の基準SHAを読んで新しい案を作る。" +
+  "未確認の仕様、未知のコマンド、未設定の権限や先行成果を捏造しない。案の保存で実装を開始しない。" +
   "返された契約画面URLを利用者に案内する。案の保存と実行開始を区別する。確定済み計画はSolに直接渡される。";
 
 export const CODEX_READ_ONLY_BRAIN_CAPABILITIES: MasterBrainCapabilities = {
