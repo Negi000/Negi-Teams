@@ -9,7 +9,9 @@ import { HumanReviewProofStore, isReviewRequestId } from "./humanReviewProof.ts"
 import { assertVaultRunOutputPaths, parseVaultRunConfig, type VaultRunConfig } from "./vaultRunConfig.ts";
 import { executeVaultRun, prepareVaultRun, submitVaultRun, verifyVaultRun, type PreparedVaultRun, type TaskOperationApproval } from "./vaultTaskExecution.ts";
 import { captureTaskReview, verifyTaskReviewCheckout, type TaskReviewManifest } from "./taskReviewArtifact.ts";
-import type { LocalReviewService } from "./reviewService.ts";
+import { ReviewDecisionBusyError, type LocalReviewService } from "./reviewService.ts";
+import { setTimeout as wait } from "node:timers/promises";
+import type { TaskAdmissionGuard } from "./scheduledVaultRun.ts";
 import { loadVaultTaskContract } from "./vaultTaskContract.ts";
 import { assertVerificationCoverage } from "./vaultRunConfig.ts";
 import type { IntegrationSource } from "./taskIntegration.ts";
@@ -89,6 +91,8 @@ interface Runtime {
 }
 
 export class LocalTaskService {
+  private readonly admissionGuards=new Map<string,TaskAdmissionGuard>();
+  bindAdmissionGuard(id:string,guard:TaskAdmissionGuard):void{this.registered(id);this.admissionGuards.set(id,guard)}
   private readonly startChecks = new Map<string, () => Promise<string | null>>();
   private readonly prepared = new Map<string, PreparedVaultRun>();
   private readonly active = new Map<string, { controller: AbortController; promise: Promise<void> }>();
@@ -642,6 +646,11 @@ export class LocalTaskService {
     try { return await operation; } finally { this.starts.delete(id); }
   }
   private async startNew(run: CatalogRun, requestId: string, requestedBy: TaskRequestOrigin): Promise<TaskRunView> {
+    const guard=this.admissionGuards.get(run.config.runId),operation=()=>this.startNewOnce(run,requestId,requestedBy);
+    const result=guard?await guard(operation):await operation();
+    void this.pump().catch(()=>{});return result;
+  }
+  private async startNewOnce(run: CatalogRun, requestId: string, requestedBy: TaskRequestOrigin): Promise<TaskRunView> {
     const id = run.config.runId;
     if (!(await this.snapshot(id)).canStart) throw new Error("Task cannot be dispatched again");
     await writeNew(this.requestPath(id), { runId: id, requestId, configSha256: run.configSha256,
@@ -652,7 +661,6 @@ export class LocalTaskService {
       if (this.closing) throw new Error("Server stopped before Task submission");
       await this.runtime.submit(prepared, this.scheduler);
       this.prepared.set(id, prepared);
-      void this.pump().catch(() => {});
     } catch {
       await writeNew(join(this.root, `${id}.error.json`), { error: "実行前の確認に失敗しました。契約・認証・checkout・台帳を確認してください。" });
       await this.publishResult(id);
@@ -671,6 +679,8 @@ export class LocalTaskService {
         if (this.active.has(id) || !entry || !schedulerWorkEligible(state, entry)) continue;
         const controller = new AbortController();
         const promise = Promise.resolve().then(() => this.runtime.execute(prepared, this.scheduler, controller.signal, {
+          admit:this.admissionGuards.has(id)?operation=>this.admitWhenAvailable(id,operation,controller.signal,
+            Date.now()+prepared.contract.limits.timeLimitMinutes*60_000):undefined,
           onCapacityReleased: () => this.pump(),
           knowledgeProofDirectory: this.knowledgeProofDirectory,
           verifyApproval: ({ event, state }) => this.verifyOperationDecision(this.registered(id), event, state),
@@ -689,6 +699,10 @@ export class LocalTaskService {
           })
           .catch(async () => {
             const current = (await this.scheduler.read()).state?.entries.find((item) => item.work.id === id);
+            if(current?.status==="queued"&&this.admissionGuards.has(id)){
+              await writeNew(join(this.root,`${id}.error.json`),{error:"先行成果の受入・版または実行前の照合を確認してください。モデルは開始していません。"});
+              await this.scheduler.append({key:`${id}:admission-held`,at:new Date().toISOString(),action:{type:"cancel_queued",workId:id,reason:"Integration baseline admission was not confirmed before provider startup"}});
+            }
             if (current?.status === "running") await this.scheduler.append({ key: `${id}:ui-unknown`, at: new Date().toISOString(),
               action: { type: "unknown", workId: id, reason: "UI runner stopped without a confirmed terminal outcome" } });
           }).finally(async () => {
@@ -705,6 +719,13 @@ export class LocalTaskService {
     } finally {
       this.pumping = false;
       if (this.pumpAgain) { this.pumpAgain = false; void this.pump().catch(() => {}); }
+    }
+  }
+  private async admitWhenAvailable<T>(id:string,operation:()=>Promise<T>,signal:AbortSignal,deadline:number):Promise<T> {
+    for(;;){
+      if(signal.aborted||this.closing||Date.now()>=deadline)throw Error("Task stopped before integration admission");
+      try{return await this.admissionGuards.get(id)!(operation)}
+      catch(error){if(!(error instanceof ReviewDecisionBusyError))throw error;await wait(100,undefined,{signal})}
     }
   }
   async stop(id: string, configSha256: string): Promise<TaskRunView> {

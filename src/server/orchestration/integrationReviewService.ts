@@ -4,6 +4,7 @@ import { isAbsolute, join } from "node:path";
 import { LocalTaskService } from "./taskService.ts";
 import { LocalReviewService } from "./reviewService.ts";
 import { FileScheduler } from "./scheduler.ts";
+import type { LocalTaskAuthoringService } from "./taskAuthoring.ts";
 import { captureIntegrationReview, verifyIntegrationReview,
   type IntegrationReviewOptions, type IntegrationReviewManifest } from "./integrationReview.ts";
 
@@ -20,7 +21,7 @@ async function json(path: unknown): Promise<Record<string, unknown>> {
 /** Startup-only registry; the browser never supplies checkouts, commands or source catalogs. */
 export class LocalIntegrationReviewService {
   private constructor(private readonly contexts: LocalTaskService[]) {}
-  static async open(raw: unknown, reviews: LocalReviewService): Promise<LocalIntegrationReviewService> {
+  static async open(raw: unknown, reviews: LocalReviewService, authoring?:LocalTaskAuthoringService|null): Promise<LocalIntegrationReviewService> {
     const row = raw as { integrations?: unknown } | null;
     if (!row || !Array.isArray(row.integrations) || !row.integrations.length || row.integrations.length > 20)
       throw new Error("Integration review registry invalid");
@@ -56,12 +57,12 @@ export class LocalIntegrationReviewService {
           evidenceSha256: item.evidenceSha256 as string, limits: item.limits as string,
           checkout, outputDir, sources, scheduler: new FileScheduler(sources[0].config.schedulerPath) });
       }
-      await this.register(options, reviews);
+      await this.register(options, reviews,authoring);
       return new LocalIntegrationReviewService([...contexts.values()]);
     } catch (error) { await Promise.all([...contexts.values()].map(context => context.close())); throw error; }
   }
   /** Trusted callers can supply authenticated source readers without a second catalog. */
-  static async register(options: IntegrationReviewOptions[], reviews: LocalReviewService): Promise<void> {
+  static async register(options: IntegrationReviewOptions[], reviews: LocalReviewService, authoring?:LocalTaskAuthoringService|null): Promise<void> {
     for (const item of options) {
       await reviews.registerWritableRoots([item.checkout, ...item.sources.flatMap(source => [source.config.checkout, source.config.vault])]);
       const path = join(item.outputDir, "integration-review-manifest.json");
@@ -95,6 +96,7 @@ export class LocalIntegrationReviewService {
       reviews.bindIntegrationDetails(manifest.review.id, { id: item.id, baseSha: item.baseSha,
         sources: manifest.sourcePins.map(({ runId, taskId, taskVersion, revision, artifactSha256, evidenceSha256 }) =>
           ({ runId, taskId, taskVersion, revision, artifactSha256, evidenceSha256 })) });
+      await authoring?.bindIntegration(item,manifest,reviews);
     }
   }
   async close(): Promise<void> { await Promise.all(this.contexts.map(context => context.close())); }

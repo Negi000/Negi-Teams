@@ -1,10 +1,14 @@
 // Explicitly registered local review cases; no arbitrary file paths come from HTTP.
 import { createHash } from "node:crypto";
-import { lstat, mkdir, open, readFile, realpath } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, realpath, unlink } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { HumanReviewProofStore, type HumanReviewReceipt } from "./humanReviewProof.ts";
 import { FileReviewChain, type ReviewEvent, type ReviewFeedback, type ReviewState } from "./reviewChain.ts";
 import { taskReviewPresentation, type TaskReviewPresentation } from "./reviewPresentation.ts";
+import type { IntegrationBaseChoice } from "./integrationBaseline.ts";
+export class ReviewDecisionBusyError extends Error {
+  constructor(){super("レビューに関連する操作が進行中です。状態を更新して確認してください。");this.name="ReviewDecisionBusyError"}
+}
 
 export interface RegisteredReviewCase {
   id: string;
@@ -39,7 +43,7 @@ export interface ReviewCaseView {
   qualityIssue: boolean;
   knowledge?: { candidates: Array<{ id: string; title: string; status: string }>; error: string | null };
   integration?: { id: string; baseSha: string; sources: Array<{ runId: string; taskId: string; taskVersion: number;
-    revision: number; artifactSha256: string; evidenceSha256: string }> };
+    revision: number; artifactSha256: string; evidenceSha256: string }>; baselines?:IntegrationBaseChoice[] };
   feedback: Array<{ id: string; kind: ReviewFeedback["kind"]; scope: ReviewFeedback["scope"];
     targetSha256: string | null; text: string | null; authenticated: boolean; source: ReviewFeedback["source"] }>;
 }
@@ -108,6 +112,22 @@ function pendingAgentCorrection(state: ReviewState): boolean {
 }
 
 export class LocalReviewService {
+  private async decisionLock<T>(id:string,operation:()=>Promise<T>):Promise<T> {
+    this.registered(id);
+    const path=join(this.proofs.root,`decision-${createHash("sha256").update(id).digest("hex")}.lock`);
+    let file:Awaited<ReturnType<typeof open>>;
+    try{file=await open(path,"wx",0o600)}catch(e){if((e as NodeJS.ErrnoException).code==="EEXIST")throw new ReviewDecisionBusyError();throw e}
+    try{return await operation()}finally{await file.close();await unlink(path)}
+  }
+  async withCurrentAcceptance<T>(id:string,artifactSha256:string,operation:()=>Promise<T>):Promise<T> {
+    return this.decisionLock(id,async()=>{
+      const view=await this.snapshot(id);
+      if(view.status!=="accepted"||view.integrityError||view.artifactSha256!==artifactSha256)throw Error("先行成果の受入または固定版が変わっています。");
+      return operation();
+    });
+  }
+  private readonly integrationBaselines=new Map<string,()=>Promise<IntegrationBaseChoice[]>>();
+  bindIntegrationBaselines(id:string,read:()=>Promise<IntegrationBaseChoice[]>):void {this.registered(id);this.integrationBaselines.set(id,read)}
   private readonly integrationDetails = new Map<string, NonNullable<ReviewCaseView["integration"]>>();
   bindIntegrationDetails(id: string, details: NonNullable<ReviewCaseView["integration"]>): void {
     this.registered(id);
@@ -182,6 +202,7 @@ export class LocalReviewService {
   knowledgeWritableRoots(): string[] {
     return [...this.config.writableRoots, ...this.config.cases.map(item => item.artifactRoot)];
   }
+  modelWritableRoots():string[]{return [...this.config.writableRoots]}
   /** Trusted local result registration. Recovery uses this server's receipt verifier. */
   async registerPinnedResult(item: RegisteredReviewCase, runId: string, artifactRef: string): Promise<void> {
     if (![item.ledgerPath, item.artifactRoot, item.evidencePath, artifactRef].every(isAbsolute))
@@ -361,13 +382,17 @@ export class LocalReviewService {
       status: state.revoked ? "revoked" : state.acceptance ? "accepted" : "awaiting_review",
       canAccept: !integrityError && state.acceptance === null && state.revoked === null,
       qualityIssue: pendingAgentCorrection(state),
-      ...(this.integrationDetails.has(id) ? { integration: structuredClone(this.integrationDetails.get(id)!) } : {}),
+      ...(this.integrationDetails.has(id) ? { integration: { ...structuredClone(this.integrationDetails.get(id)!),
+        ...(this.integrationBaselines.has(id)?{baselines:await this.integrationBaselines.get(id)!()}:{} ) } } : {}),
       ...(this.knowledgeBridge && !this.integrationDetails.has(id) ? { knowledge: await this.knowledgeBridge.links(id).catch(() => ({
         candidates: [], error: "知識候補を読み取れません。知識画面で状態を確認してください。" })) } : {}),
       feedback: await Promise.all(state.feedback.map((feedback) => this.feedbackView(feedback, item, state.runId))) };
   }
 
   async accept(id: string, artifactSha256: string, requestId: string): Promise<ReviewCaseView> {
+    return this.decisionLock(id,()=>this.acceptOnce(id,artifactSha256,requestId));
+  }
+  private async acceptOnce(id: string, artifactSha256: string, requestId: string): Promise<ReviewCaseView> {
     const item = this.registered(id);
     const ledger = this.chain(item);
     const state = (await ledger.read()).state;
@@ -410,6 +435,9 @@ export class LocalReviewService {
   }
 
   async revoke(id: string, artifactSha256: string, requestId: string, reason: string): Promise<ReviewCaseView> {
+    return this.decisionLock(id,()=>this.revokeOnce(id,artifactSha256,requestId,reason));
+  }
+  private async revokeOnce(id: string, artifactSha256: string, requestId: string, reason: string): Promise<ReviewCaseView> {
     const item = this.registered(id);
     const ledger = this.chain(item);
     const state = (await ledger.read()).state;

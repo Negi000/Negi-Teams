@@ -146,7 +146,7 @@ if (integrationConfigPath) {
     throw new Error("NEGI_INTEGRATION_CONFIG requires an absolute config path and authenticated reviews");
   const bytes = await readFile(integrationConfigPath);
   if (bytes.length > 256_000) throw new Error("Integration review config exceeds local size limit");
-  integrationReviewService = await LocalIntegrationReviewService.open(JSON.parse(bytes.toString("utf8")), reviewService);
+  integrationReviewService = await LocalIntegrationReviewService.open(JSON.parse(bytes.toString("utf8")), reviewService,taskAuthoringService);
 }
 const knowledgeConfigPath = process.env.NEGI_KNOWLEDGE_CONFIG;
 let knowledgeService: LocalKnowledgeService | null = null;

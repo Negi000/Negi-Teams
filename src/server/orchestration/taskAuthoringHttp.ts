@@ -22,16 +22,22 @@ export function createTaskAuthoringHttp(service:LocalTaskAuthoringService|null,a
       if(url.pathname==="/api/task-plans"&&req.method==="GET"){json(res,200,await service.list());return true}
       if(url.pathname==="/api/task-plans/profiles"&&req.method==="GET"){json(res,200,service.listProfiles());return true}
       const match=url.pathname.match(/^\/api\/task-plans\/([0-9a-f-]{36})\/finalize$/);
-      if(!match){json(res,404,{error:"契約案がありません。"});return true}
+      const baseline=url.pathname.match(/^\/api\/task-plans\/baselines\/(base-[0-9a-f]{24})$/);
+      if(!match&&!baseline){json(res,404,{error:"契約案がありません。"});return true}
+      if(baseline&&req.method==="GET"){json(res,200,await service.integrationBase(url.searchParams.get("profile")??"",baseline[1]));return true}
       if(req.method!=="POST"){json(res,405,{error:"Method not allowed"});return true}
       let same=false;try{const origin=new URL(String(req.headers.origin));same=["http:","https:"].includes(origin.protocol)&&origin.host===req.headers.host}catch{/* absent/invalid origin */}
-      if(!same){json(res,403,{error:"同じ画面から契約を確定してください。"});return true}
+      if(!same){json(res,403,{error:"同じ画面から操作してください。"});return true}
       if(!req.headers["content-type"]?.startsWith("application/json"))throw Error("JSON required");
       const chunks:Buffer[]=[];let size=0;for await(const chunk of req){size+=chunk.length;if(size>4000)throw Error("Request too large");chunks.push(Buffer.from(chunk))}
       const input=JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string,unknown>;
+      if(baseline){
+        if(!input||Array.isArray(input)||Object.keys(input).length!==3||typeof input.profileId!=="string"||typeof input.artifactSha256!=="string"||typeof input.requestId!=="string")throw Error("Baseline approval target invalid");
+        json(res,200,await service.publishIntegrationBase(input.profileId,baseline[1],input.artifactSha256,input.requestId));return true;
+      }
       if(!input||Array.isArray(input)||Object.keys(input).length!==2||typeof input.expectedHash!=="string"||typeof input.requestId!=="string")throw Error("Approval target invalid");
-      json(res,200,await service.finalize(match[1],input.expectedHash,input.requestId));
-    }catch{json(res,409,{error:"契約を確定できませんでした。操作を繰り返さず、状態を更新して現在の契約と作業を確認してください。"})}
+      json(res,200,await service.finalize(match![1],input.expectedHash,input.requestId));
+    }catch{json(res,409,{error:url.pathname.includes("/baselines/")?"先行成果の受入・版・保存状態を確認できません。操作を繰り返さず、レビューと現在の作業を更新してください。":"契約を確定できませんでした。操作を繰り返さず、状態を更新して現在の契約と作業を確認してください。"})}
     return true;
   };
 }

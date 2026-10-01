@@ -20,6 +20,12 @@ import { runScheduledVaultTask } from "../src/server/orchestration/scheduledVaul
 import { FileTaskLedger, reduceTask } from "../src/server/orchestration/singleTask.ts";
 import type { VaultRunConfig } from "../src/server/orchestration/vaultRunConfig.ts";
 import type { SingleTaskClient } from "../src/server/orchestration/singleTaskRunner.ts";
+import { LocalReviewService } from "../src/server/orchestration/reviewService.ts";
+import { LocalIntegrationReviewService } from "../src/server/orchestration/integrationReviewService.ts";
+import { integrateVerifiedTasks } from "../src/server/orchestration/taskIntegration.ts";
+import type { IntegrationReviewOptions } from "../src/server/orchestration/integrationReview.ts";
+import { FileScheduler } from "../src/server/orchestration/scheduler.ts";
+import { createHash } from "node:crypto";
 import { taskDecomposition, type TaskDecompositionFields } from "../src/server/orchestration/taskDecomposition.ts";
 
 const planner = { model:"gpt-6-astra",effort:"medium" };
@@ -50,13 +56,13 @@ async function setup() {
   let astraCalls=0,solCalls=0;
   const prepare=async(config:VaultRunConfig)=>{const contract=await loadVaultTaskContract(config.vault,config.snapshot,config.checkout);
     return {config,contract,approvedPlan:await loadApprovedTaskPlan(config,contract)};};
-  const runtime={prepare,submit:submitVaultRun,execute:async(prepared:PreparedVaultRun,scheduler:Parameters<typeof submitVaultRun>[1])=>{
+  const runtime={prepare,submit:submitVaultRun,execute:async(prepared:PreparedVaultRun,scheduler:Parameters<typeof submitVaultRun>[1],_signal?:AbortSignal,hooks?:import("../src/server/orchestration/vaultTaskExecution.ts").TaskExecutionHooks)=>{
     const {config}=prepared;
     const client=(role:"astra"|"sol"):SingleTaskClient=>({async initialize(){},async discoverModels(){return[{model:config[role].model,efforts:["medium"],inputModalities:["text"]}]},
       async startThread(options){if(role==="astra")astraCalls++;else solCalls++;return{threadId:`thread-${role}`,requestedModel:options.model,resolvedModel:options.model,modelProvider:"fixture",rerouted:false}},
       async startTurn(prompt){assert.match(prompt,/承認された文書を1件作る/);await writeFile(join(config.checkout,prepared.contract.scope.allowedPaths[0]),"approved fixture result\n");return`turn-${role}`},
       async waitForTurn(turnId){return{turnId,status:"completed",finalText:"Fixture result",contextInputTokens:null,contextWindow:null,lastUsage:null}}});
-    return runScheduledVaultTask({scheduler,dispatchKey:`${config.runId}:dispatch`,run:{runId:config.runId,cwd:config.checkout,
+    return runScheduledVaultTask({scheduler,admit:hooks?.admit,dispatchKey:`${config.runId}:dispatch`,run:{runId:config.runId,cwd:config.checkout,
       vaultDirectory:config.vault,snapshotPath:config.snapshot,artifactDir:join(config.outputDir,"artifacts"),ledger:new FileTaskLedger(join(config.outputDir,"run.jsonl")),
       astra:{...config.astra,client:client("astra")},sol:{...config.sol,client:client("sol")},approvedPlan:prepared.approvedPlan,
       turnTimeoutMs:5000,verify:()=>verifyVaultRun(prepared)},execute:runSingleTaskFromVault});
@@ -311,4 +317,59 @@ test("new repository base and graph tampering hold all unapproved children witho
     raw.fields.nodes[2].dependsOn=[];await writeFile(path,JSON.stringify(raw));await assert.rejects(f.authoring.list(),/integrity/);
     assert.equal((await readdir(join(f.vault,"80_Tasks"))).length,1);assert.equal((await readdir(join(f.root,"worktrees"))).length,0);assert.deepEqual(f.calls(),{astra:0,sol:0});
   }finally{await f.close()}
+});
+
+
+test("reviewed integration becomes the pinned new base for native successor authoring and one Sol execution",async()=>{
+ const f=await setup();try{
+  const reviews=await LocalReviewService.open({storageRoot:join(f.root,"reviews"),writableRoots:[],cases:[]});await f.tasks.connectReviews(reviews);
+  const drafts=await f.authoring.proposeDecomposition("docs-project",{title:"Two predecessors",objective:"Prepare two documents",coordination:["Preserve the original base"],nodes:[
+   {key:"a",dependsOn:[],handoff:"First document",task:{...f.fields,allowedPaths:["docs/a.txt"]}},
+   {key:"b",dependsOn:[],handoff:"Second document",task:{...f.fields,allowedPaths:["docs/b.txt"]}}
+  ]},{...origin,callId:"predecessors"});
+  const approved=[];for(const d of drafts)approved.push(await f.authoring.finalize(d.id,d.hash,randomUUID()));
+  for(const d of approved){const initial=await f.tasks.snapshot(d.runId!);await f.tasks.start(initial.id,initial.configSha256,randomUUID());}
+  const until=Date.now()+60000;for(const d of approved){let v=await f.tasks.snapshot(d.runId!);while(v.live||v.status==="queued"){assert.ok(Date.now()<until);await new Promise(r=>setTimeout(r,20));v=await f.tasks.snapshot(d.runId!)}assert.equal(v.status,"ready_for_review")}
+  const checkout=join(f.root,"integration-checkout"),baseSha=git(f.repo,["rev-parse","HEAD"]);git(f.repo,["worktree","add","--detach",checkout,baseSha]);
+  const scheduler=new FileScheduler(f.config.schedulerPath),sourceIds=approved.map(d=>d.runId!);
+  await scheduler.append({key:"integration-submit",at:new Date().toISOString(),action:{type:"submit",work:{id:"combined",parentId:null,dependencies:sourceIds,role:"sol",checkout,checkoutMode:"write",resources:[],reserveUsd:0}}});
+  const outputDir=join(f.root,"integration-output"),sources=await Promise.all(sourceIds.map(id=>f.tasks.integrationSource(id)));
+  const options={id:"combined",checkout,baseSha,outputDir,scheduler,sources,verify:async()=>{const path=join(outputDir,"command-verification.json"),bytes=Buffer.from(JSON.stringify({mechanicalChecksPassed:true,checks:[{requirement:"Both documents exist",passed:true}]}));await writeFile(path,bytes);return{outcome:"passed" as const,evidenceRef:path+"#sha256="+createHash("sha256").update(bytes).digest("hex")}}};
+  const result=await integrateVerifiedTasks(options);
+  const reviewOptions:IntegrationReviewOptions={...options,title:"Combined predecessor result",limits:"Synthetic only",evidenceSha256:result.evidenceRef.split("#sha256=")[1]};
+  await LocalIntegrationReviewService.register([reviewOptions],reviews,f.authoring);
+  const manifest=JSON.parse(await readFile(join(outputDir,"integration-review-manifest.json"),"utf8"));
+  await assert.rejects(f.authoring.bindIntegration({...reviewOptions,sources:[{...sources[0],config:{...sources[0].config,vault:f.root}},sources[1]]},manifest,reviews),/protected authoring storage/);
+  const id=reviews.list().find(r=>r.id.startsWith("integration-"))!.id,initial=await reviews.snapshot(id),choice=initial.integration!.baselines![0];
+  await assert.rejects(f.authoring.publishIntegrationBase("docs-project",choice.id,initial.artifactSha256,randomUUID()));
+  await reviews.accept(id,initial.artifactSha256,randomUUID());
+  const before=git(checkout,["status","--porcelain"]),index=git(checkout,["diff","--cached"]),request=randomUUID();
+  const base=await f.authoring.publishIntegrationBase("docs-project",choice.id,initial.artifactSha256,request);
+  assert.notEqual(base.baseSha,baseSha);assert.equal(git(f.repo,["rev-parse","HEAD"]),baseSha);assert.equal(git(checkout,["status","--porcelain"]),before);assert.equal(git(checkout,["diff","--cached"]),index);
+  assert.equal(git(f.repo,["show",base.baseSha+":docs/a.txt"]),"approved fixture result");assert.equal(git(f.repo,["show",base.baseSha+":docs/b.txt"]),"approved fixture result");
+  assert.deepEqual(await f.authoring.publishIntegrationBase("docs-project",choice.id,initial.artifactSha256,request),base);
+  const authoringHttp=createTaskAuthoringHttp(f.authoring,{token:"fixture-auth"}),http=createServer(async(req,res)=>{if(!await authoringHttp(req,res,new URL(req.url!,"http://localhost"))){res.writeHead(404);res.end()}});await new Promise<void>(r=>http.listen(0,"127.0.0.1",r));
+  try{
+   const url=`http://127.0.0.1:${(http.address() as import("node:net").AddressInfo).port}`,path=`/api/task-plans/baselines/${base.id}`,body=JSON.stringify({profileId:"docs-project",artifactSha256:initial.artifactSha256,requestId:request});
+   assert.equal((await fetch(url+path+"?profile=docs-project")).status,401);
+   assert.equal((await fetch(url+path,{method:"POST",headers:{Cookie:"ebi_auth=fixture-auth","Content-Type":"application/json"},body})).status,403);
+   const readable=await fetch(url+path+"?profile=docs-project",{headers:{Cookie:"ebi_auth=fixture-auth"}});assert.equal(readable.status,200);assert.equal((await readable.json()).baseSha,base.baseSha);
+   assert.equal((await fetch(url+path,{method:"POST",headers:{Cookie:"ebi_auth=fixture-auth",Origin:url,"Content-Type":"application/json"},body:JSON.stringify({profileId:"docs-project",artifactSha256:"f".repeat(64),requestId:randomUUID()})})).status,409);
+  }finally{await new Promise<void>((r,j)=>http.close(e=>e?j(e):r()))}
+  const tools=registeredTaskTools(f.tasks,origin.masterId,{service:f.authoring,planner});
+  const read=await tools.invoke({threadId:origin.threadId,turnId:origin.turnId,callId:"read-base",tool:"negi_read_project",arguments:{profile_id:"docs-project",baseline_id:base.id}});assert.equal(read.success,true);assert.equal(JSON.parse(read.text).integrationBase.baseSha,base.baseSha);
+  const proposal=await tools.invoke({threadId:origin.threadId,turnId:origin.turnId,callId:"successor",tool:"negi_propose_task",arguments:{profile_id:"docs-project",baseline_id:base.id,task:f.fields}});assert.equal(proposal.success,true);
+  const d=(await f.authoring.list()).find(d=>d.id===JSON.parse(proposal.text).draftId)!;assert.equal(d.baseSha,base.baseSha);assert.equal(d.integrationBase?.reviewId,id);
+  await assert.rejects(f.authoring.propose("docs-project",f.fields,{...origin,callId:"successor"}));
+  const successor=await f.authoring.finalize(d.id,d.hash,randomUUID()),v=await f.tasks.snapshot(successor.runId!);
+  assert.equal(git(v.checkout,["rev-parse","HEAD"]),base.baseSha);assert.equal(git(v.checkout,["status","--porcelain"]),"");assert.equal((await readFile(join(v.checkout,"docs/a.txt"),"utf8")).trim(),"approved fixture result");
+  await f.tasks.start(v.id,v.configSha256,randomUUID());const successorUntil=Date.now()+60000;let settled=await f.tasks.snapshot(v.id);while(settled.live||settled.status==="queued"){assert.ok(Date.now()<successorUntil);await new Promise(r=>setTimeout(r,20));settled=await f.tasks.snapshot(v.id)}assert.equal(settled.status,"ready_for_review");assert.equal(settled.acceptedBy,null);assert.deepEqual(f.calls(),{astra:0,sol:3});
+  const held=await f.authoring.propose("docs-project",{...f.fields,allowedPaths:["docs/held.txt"]},{...origin,callId:"held"},base.id);const heldRun=await f.authoring.finalize(held.id,held.hash,randomUUID());
+  await f.tasks.close();const restoredTasks=await LocalTaskService.open(f.catalog,f.runtime);try{
+   const restored=await LocalTaskAuthoringService.open(f.authoringConfig,restoredTasks);assert.equal((await restoredTasks.snapshot(heldRun.runId!)).canStart,false);
+   await LocalIntegrationReviewService.register([reviewOptions],reviews,restored);assert.equal((await restoredTasks.snapshot(heldRun.runId!)).canStart,true);
+   await reviews.revoke(id,initial.artifactSha256,randomUUID(),"Withdraw predecessor acceptance");const blocked=await restoredTasks.snapshot(heldRun.runId!);assert.equal(blocked.canStart,false);await assert.rejects(restoredTasks.start(blocked.id,blocked.configSha256,randomUUID()));assert.deepEqual(f.calls(),{astra:0,sol:3});
+   assert.equal((await restoredTasks.snapshot(v.id)).status,"ready_for_review");assert.equal(git(checkout,["status","--porcelain"]),before);
+  }finally{await restoredTasks.close()}
+ }finally{await f.close()}
 });

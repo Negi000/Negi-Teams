@@ -50,6 +50,19 @@ test("verified run frees the slot, while repeated dispatch key cannot call provi
   });
 });
 
+test("trusted admission guard runs before claim and provider; changed acceptance leaves the work unstarted",async()=>{
+ await fixture(async({scheduler,options})=>{
+  let calls=0,admitted=false;
+  await assert.rejects(runScheduledVaultTask({scheduler,dispatchKey:"guarded",run:options,
+   admit:async()=>{throw Error("Predecessor acceptance revoked")},execute:async()=>{calls++;return result("run-a","ready_for_review")}}),/revoked/);
+  assert.equal(calls,0);assert.equal((await scheduler.read()).state?.entries[0].status,"queued");
+  await runScheduledVaultTask({scheduler,dispatchKey:"guarded",run:options,admit:async operation=>{
+   assert.equal((await scheduler.read()).state?.entries[0].status,"queued");const value=await operation();admitted=true;return value;
+  },execute:async()=>{assert.equal(admitted,true);assert.equal((await scheduler.read()).state?.entries[0].status,"running");calls++;return result("run-a","ready_for_review")}});
+  assert.equal(calls,1);assert.equal((await scheduler.read()).state?.entries[0].status,"verified");
+ });
+});
+
 test("unknown provider result keeps the checkout and global slot reserved", async () => {
   await fixture(async ({ scheduler, checkout, options }) => {
     await scheduler.append(event("submit-b", { type: "submit", work: {

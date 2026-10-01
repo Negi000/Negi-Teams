@@ -7,6 +7,7 @@ import type { TaskResultContext } from "./taskResults.ts";
 import type { LocalTaskAuthoringService } from "./taskAuthoring.ts";
 
 const runId = { type: "string", pattern: "^[a-zA-Z0-9._-]{1,100}$" };
+const baselineId = { type: "string", pattern: "^base-[a-f0-9]{24}$" };
 const configHash = { type: "string", pattern: "^[a-f0-9]{64}$" };
 function definition(name: string, description: string, properties: Record<string, unknown>, required: string[]): CodexDynamicToolDefinition {
   return { type: "function", name, description, inputSchema: { type: "object", properties, required, additionalProperties: false } };
@@ -32,11 +33,11 @@ const taskSchema = {type:"object",additionalProperties:false,properties:{
 const authoringDefinitions = [
   definition("negi_list_projects", "新しい独立Taskを作れる、利用者設定済みプロジェクトと実行条件を読む。保存先・コマンド・モデル・権限は変更できない。", {}, []),
   definition("negi_read_project", "契約案を作る前に必須仕様と指定した参照の全文・版・hashを読む。未確認の仕様や依存Taskを推測せず、独立Taskだけを計画する。", {
-    profile_id:runId, reference_ids:{type:"array",maxItems:50,items:runId} },["profile_id"]),
+    profile_id:runId, baseline_id:baselineId, reference_ids:{type:"array",maxItems:50,items:runId} },["profile_id"]),
   definition("negi_propose_task", "利用者の新しい依頼について、読んだ仕様に基づく短い契約案とSolへの実行計画を保存する。実装・Vault active化・worktree作成・成果受入は行わない。契約画面URLを利用者に案内する。依存Taskが必要なら案を作らずその依存を解決する。", {
-    profile_id:runId, task:taskSchema },["profile_id","task"]),
+    profile_id:runId, baseline_id:baselineId, task:taskSchema },["profile_id","task"]),
   definition("negi_propose_task_decomposition", "大きい依頼を2〜8件の契約案へ分解して一括保存する。独立Taskは変更範囲を分ける。依存は同じ案のnode keyで指定し、引継ぎ成果と共有条件を明記する。先行Taskがある後続は計画表示のみで確定・実行できず、先行成果の統合後に実際の基準SHAで新しい案が必要。小さい依頼はnegi_propose_taskを使う。", {
-    profile_id:runId, decomposition:{type:"object",additionalProperties:false,properties:{
+    profile_id:runId, baseline_id:baselineId, decomposition:{type:"object",additionalProperties:false,properties:{
       title:{type:"string",minLength:1,maxLength:160},objective:{type:"string",minLength:1,maxLength:2000},
       coordination:{type:"array",minItems:1,maxItems:8,items:{type:"string",minLength:1,maxLength:500}},
       nodes:{type:"array",minItems:2,maxItems:8,items:{type:"object",additionalProperties:false,properties:{
@@ -85,21 +86,22 @@ export function registeredTaskTools(service: LocalTaskService, masterId: string,
       if (authoring && call.tool === "negi_list_projects") {
         argumentsObject(call.arguments,[]); value = { projects:authoring.service.listProfiles() };
       } else if (authoring && ["negi_read_project","negi_propose_task","negi_propose_task_decomposition"].includes(call.tool)) {
-        const args=argumentsObject(call.arguments,call.tool==="negi_read_project"?["profile_id","reference_ids"]:
-          call.tool==="negi_propose_task_decomposition"?["profile_id","decomposition"]:["profile_id","task"]);
+        const args=argumentsObject(call.arguments,call.tool==="negi_read_project"?["profile_id","reference_ids","baseline_id"]:
+          call.tool==="negi_propose_task_decomposition"?["profile_id","decomposition","baseline_id"]:["profile_id","task","baseline_id"]);
         if (typeof args.profile_id!=="string" || !/^[a-zA-Z0-9._-]{1,100}$/.test(args.profile_id)) throw new Error("Project profile identity invalid");
+        if(args.baseline_id!==undefined&&(typeof args.baseline_id!=="string"||!/^base-[a-f0-9]{24}$/.test(args.baseline_id)))throw Error("Integration baseline identity invalid");
         if (call.tool==="negi_read_project") {
           if (args.reference_ids!==undefined && (!Array.isArray(args.reference_ids) || args.reference_ids.some(id=>typeof id!=="string"))) throw new Error("Project references invalid");
-          value=await authoring.service.readProject(args.profile_id,args.reference_ids as string[]|undefined);
+          value=await authoring.service.readProject(args.profile_id,args.reference_ids as string[]|undefined,args.baseline_id as string|undefined);
         } else if(call.tool==="negi_propose_task_decomposition") {
-          const drafts=await authoring.service.proposeDecomposition(args.profile_id,args.decomposition,{...origin,...authoring.planner});
+          const drafts=await authoring.service.proposeDecomposition(args.profile_id,args.decomposition,{...origin,...authoring.planner},args.baseline_id as string|undefined);
           const group=drafts[0].decomposition!;
           value={decompositionId:group.id,title:group.title,hash:group.hash,url:`/task-plans?draft=${drafts[0].id}`,
             tasks:drafts.map(d=>({draftId:d.id,key:d.decomposition!.key,title:d.title,dependsOn:d.decomposition!.dependsOn,
               status:d.status,canFinalize:d.canFinalize,url:`/task-plans?draft=${d.id}`})),
             executionStarted:false,humanConfirmationRequired:true,successorsRequireNewPlanAfterIntegration:true};
         } else {
-          const draft=await authoring.service.propose(args.profile_id,args.task,{...origin,...authoring.planner});
+          const draft=await authoring.service.propose(args.profile_id,args.task,{...origin,...authoring.planner},args.baseline_id as string|undefined);
           value={draftId:draft.id,title:draft.title,hash:draft.hash,status:draft.status,
             url:`/task-plans?draft=${draft.id}`,executionStarted:false,humanConfirmationRequired:true};
         }

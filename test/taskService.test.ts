@@ -15,7 +15,7 @@ import { FileTaskLedger, type TaskAction } from "../src/server/orchestration/sin
 import { submitVaultRun, type PreparedVaultRun, type TaskExecutionHooks, type TaskOperationApproval } from "../src/server/orchestration/vaultTaskExecution.ts";
 import type { VaultRunConfig } from "../src/server/orchestration/vaultRunConfig.ts";
 import type { VaultTaskContract } from "../src/server/orchestration/vaultTaskContract.ts";
-import { LocalReviewService } from "../src/server/orchestration/reviewService.ts";
+import { LocalReviewService, ReviewDecisionBusyError } from "../src/server/orchestration/reviewService.ts";
 import { FileReviewChain } from "../src/server/orchestration/reviewChain.ts";
 import { registeredTaskTools } from "../src/server/orchestration/taskDispatchTools.ts";
 
@@ -75,6 +75,22 @@ async function until(predicate: () => Promise<boolean>, timeoutMs = 5000) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }
+
+test("busy review decision keeps queued work until the lock is released, then dispatches once",async()=>{
+ await fixture(async({catalog,config,prepare})=>{
+  let busy=true,checks=0,calls=0;
+  const service=await LocalTaskService.open(catalog,{prepare,submit:submitVaultRun,execute:async(prepared,scheduler,_signal,hooks)=>{
+   const run=async()=>{calls++;return completed(prepared,scheduler)};return hooks?.admit?hooks.admit(run):run();
+  }});
+  try{
+   service.bindAdmissionGuard(config.runId,async operation=>{checks++;if(checks>1&&busy)throw new ReviewDecisionBusyError();return operation()});
+   const initial=await service.snapshot(config.runId);await service.start(initial.id,initial.configSha256,randomUUID());
+   await until(async()=>checks>1);assert.equal(calls,0);assert.equal((await service.snapshot(initial.id)).status,"queued");
+   busy=false;await until(async()=>(await service.snapshot(initial.id)).status==="ready_for_review");assert.equal(calls,1);assert.equal((await service.snapshot(initial.id)).error,null);
+   const events=(await new FileScheduler(config.schedulerPath).read()).events;assert.equal(events.filter(e=>e.action.type==="claim").length,1);assert.equal(events.filter(e=>e.action.type==="cancel_queued").length,0);
+  }finally{busy=false;await service.close()}
+ });
+});
 
 test("native planner uses the UI scheduler once and persists its origin without human acceptance", async () => {
   await fixture(async ({ catalog, prepare, config, dir }) => {

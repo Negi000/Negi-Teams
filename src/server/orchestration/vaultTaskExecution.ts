@@ -9,7 +9,7 @@ import { boundedAppServerArgs, subscriptionChildEnv } from "../master/boundedApp
 import { FileScheduler } from "./scheduler.ts";
 import { FileTaskLedger, type ReconciliationVerifier, type TaskSnapshot, type TaskRole } from "./singleTask.ts";
 import type { CodexApprovalRequest } from "../master/appServerClient.ts";
-import { runScheduledVaultTask } from "./scheduledVaultRun.ts";
+import { runScheduledVaultTask, type TaskAdmissionGuard } from "./scheduledVaultRun.ts";
 import { changedGitPaths, loadVaultTaskContract, pathsOutsideScope,
   runSingleTaskFromVault, type VaultTaskContract } from "./vaultTaskContract.ts";
 import { assertVaultRunOutputPaths, assertVerificationCoverage, type VaultRunConfig } from "./vaultRunConfig.ts";
@@ -24,6 +24,7 @@ export interface TaskOperationApproval {
   targetKnown?: boolean;
 }
 export interface TaskExecutionHooks {
+  admit?:TaskAdmissionGuard;
   knowledgeProofDirectory?: string;
   onApproval: (approval: TaskOperationApproval,
     decide: (allow: boolean, approvalRef: string, at: string, requestId: string) => Promise<void>) => void;
@@ -103,6 +104,7 @@ export async function executeVaultRun(prepared: PreparedVaultRun, scheduler: Fil
   const ledger = new FileTaskLedger(join(config.outputDir, "run.jsonl"), Date.now, undefined, undefined, hooks?.verifyApproval);
   // Admission occurs before opening either provider process.
   return runScheduledVaultTask({ scheduler, dispatchKey: `${config.runId}:dispatch`, signal,
+    admit:hooks?.admit,
     onCapacityReleased: hooks?.onCapacityReleased,
     run: { runId: config.runId, cwd: config.checkout, vaultDirectory: config.vault,
       snapshotPath: config.snapshot, ledger, artifactDir: join(config.outputDir, "artifacts"),

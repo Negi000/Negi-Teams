@@ -10,6 +10,7 @@ import type { TaskSnapshot } from "./singleTask.ts";
 import { FileScheduler, type SchedulerAction, type SchedulerEvent } from "./scheduler.ts";
 
 type VaultRunOptions = Parameters<typeof runSingleTaskFromVault>[0];
+export type TaskAdmissionGuard = <T>(operation:()=>Promise<T>)=>Promise<T>;
 export interface ScheduledVaultRunOptions {
   scheduler: FileScheduler;
   dispatchKey: string;
@@ -17,6 +18,7 @@ export interface ScheduledVaultRunOptions {
   execute?: (options: VaultRunOptions) => Promise<TaskSnapshot>;
   signal?: AbortSignal;
   onCapacityReleased?: () => Promise<void>;
+  admit?:TaskAdmissionGuard;
 }
 
 function actualApiCost(state: TaskSnapshot): number | null {
@@ -35,7 +37,8 @@ export async function runScheduledVaultTask(options: ScheduledVaultRunOptions): 
       resolve(registered.work.checkout).toLowerCase() !== resolve(run.cwd).toLowerCase()) {
     throw new Error("scheduled run does not match registered Sol checkout");
   }
-  await scheduler.claim(run.runId, dispatchKey);
+  const claim=()=>scheduler.claim(run.runId,dispatchKey);
+  if(options.admit)await options.admit(claim);else await claim();
   const record = async (keySuffix: string, action: SchedulerAction) => {
     const event: SchedulerEvent = { key: `${dispatchKey}:${keySuffix}`,
       at: new Date().toISOString(), action };
