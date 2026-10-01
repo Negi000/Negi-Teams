@@ -442,6 +442,14 @@ function observeContextGuard(ebiId: string): void {
 // MasterSession で動く。ui 未指定/terminal のときはこの変数が null のままで、
 // 既存の PTY 経路と**完全に同一**の外形になる（設計書 §6.1）。
 let masterSession: MasterSession | null = null;
+taskService?.subscribeResults(results => {
+  broadcast({ type: "taskResults", results: results.slice(-20).reverse() });
+  for (const result of results) masterSession?.notifyTaskResult(result);
+});
+if (taskService) {
+  try { await taskService.recoverResultNotifications(); }
+  catch { broadcast({ type: "notice", id: "task-results", text: "Taskの結果通知を復元できません。Task画面で現在の状態を確認してください。" }); }
+}
 
 /** MasterSession を作って起動し、registry へ chat 配送先として登録する。 */
 async function startMasterChatSession(spec: FixedEbiSpec): Promise<void> {
@@ -508,6 +516,13 @@ async function startMasterChatSession(spec: FixedEbiSpec): Promise<void> {
     args: spec.extraArgs,
   });
   await session.start();
+  if (taskService) {
+    try {
+      for (const result of await taskService.resultNotifications()) session.notifyTaskResult(result);
+    } catch {
+      broadcast({ type: "notice", id: session.id, text: "Taskの結果通知を復元できません。Task画面で現在の状態を確認してください。" });
+    }
+  }
 }
 
 /** 接続直後の chat 復元（state ＋ 直近の会話）。chat master が居ないときは何もしない。 */
@@ -892,6 +907,7 @@ wss.on("connection", (ws) => {
   // クライアントは「chatState を受けた id＝chat モードの master」と判定して xterm ペインを
   // 作らない分岐に入るので、registry を先に送ると一瞬だけ PTY ペインが生えてしまう。
   sendChatSnapshot(ws);
+  if (taskService) void taskService.resultNotifications().then(results => send(ws, { type: "taskResults", results: results.slice(0, 20) })).catch(() => {});
   // 接続直後に現在の registry を送る。
   send(ws, { type: "registry", agents: registry.list() });
   // 接続直後に現在の使用状況スナップショットも送る（ダッシュボードの初期表示用）。

@@ -6,6 +6,7 @@ import { unsupportedOf, type MasterBrain, type MasterBrainCapabilities,
   type MasterUsage } from "./brain.ts";
 import type { CodexTurnObservation } from "./appServerClient.ts";
 import type { RegisteredTaskTools } from "../orchestration/taskDispatchTools.ts";
+import type { TaskResultContext } from "../orchestration/taskResults.ts";
 import { subscriptionChildEnv } from "./boundedAppServer.ts";
 import { MasterInputNotSentError, type MasterTurnAdmission,
   type MasterTurnLease } from "../orchestration/masterTurnAdmission.ts";
@@ -35,6 +36,7 @@ const taskInstructions = "\n登録済みTaskの委任はnegi_list_tasks、negi_r
   "委任前に固定契約と現在の状態を読み、カタログのconfigSha256を使う。" +
   "自由文のPTY起動やshellによる委任は行わない。未登録の依頼はTask Contractの確定が必要と伝える。" +
   "操作結果が不明な場合は再委任せずnegi_read_taskで照合する。検証済みと人間受入済みを区別する。" +
+  "Taskの固定結果通知と伝達状態はnegi_list_task_resultsで確認できる。" +
   "実行許可、成果受入、契約変更はこのツールの権限外。";
 
 export const CODEX_READ_ONLY_BRAIN_CAPABILITIES: MasterBrainCapabilities = {
@@ -148,35 +150,44 @@ export class CodexAppServerBrain implements MasterBrain {
     if (!process || this.closed || this.stopping || !this.startOptions || (input.images?.length ?? 0) > 0) {
       throw new Error("Codex read-only brain is stopped or image input is unsupported");
     }
+    let resultContext: TaskResultContext | null = null;
+    try { resultContext = await this.options.taskTools?.prepareResultContext?.(this.sessionId()!, input.text) ?? null; }
+    catch { throw new MasterInputNotSentError("Taskの結果通知を照合できません。今回の入力は未送信です。"); }
+    const text = resultContext?.text ?? input.text;
     let lease: MasterTurnLease | undefined;
     try {
-      lease = await this.options.admission?.reserve({ ...this.startOptions, text: input.text,
+      lease = await this.options.admission?.reserve({ ...this.startOptions, text,
         effort: this.options.effort, threadId: this.sessionId()! });
     } catch (error) {
+      await resultContext?.notSent();
       if (error instanceof MasterInputNotSentError) throw error;
       throw new MasterInputNotSentError(`実行枠の確認に失敗しました。今回の入力は未送信です: ${(error as Error).message}`);
     }
     if (this.closed || this.stopping) {
       await lease?.cancelBeforeDispatch();
+      await resultContext?.notSent();
       throw new MasterInputNotSentError("送信前に統括が停止しました。今回の入力は未送信です。");
     }
-    try { await lease?.dispatching(); }
+    try { await lease?.dispatching(); await resultContext?.dispatching(); }
     catch (error) {
       try { await lease?.cancelBeforeDispatch(); }
       catch { await this.holdUnknown(lease, "Master dispatch record failed before provider call; inspect scheduler evidence"); }
+      try { await resultContext?.notSent(); } catch { /* prepared receipt remains blocked for inspection */ }
       throw new MasterInputNotSentError(`送信記録を保存できませんでした。今回の入力は未送信です: ${(error as Error).message}`);
     }
     let turnId: string;
     try {
-      turnId = await process.client.startTurn(input.text, this.options.effort);
+      turnId = await process.client.startTurn(text, this.options.effort);
       await lease?.bind(turnId);
+      await resultContext?.bind(turnId);
     }
     catch (error) {
       await this.holdUnknown(lease, "Master turn/start or durable provider binding was not confirmed");
+      try { await resultContext?.unknown(); } catch { /* incomplete receipt must not replay */ }
       await process.stop();
       throw error;
     }
-    const settlement = this.settleTurn(process, turnId, lease);
+    const settlement = this.settleTurn(process, turnId, lease, resultContext);
     this.settlement = settlement;
     void settlement.finally(() => { if (this.settlement === settlement) this.settlement = null; }).catch(() => {});
     return { acked: true };
@@ -190,13 +201,15 @@ export class CodexAppServerBrain implements MasterBrain {
     }
   }
 
-  private async settleTurn(process: AppServerProcess, turnId: string, lease?: MasterTurnLease): Promise<void> {
+  private async settleTurn(process: AppServerProcess, turnId: string, lease?: MasterTurnLease,
+    resultContext?: TaskResultContext | null): Promise<void> {
     try {
       const observation = await process.client.waitForTurn(turnId, this.options.turnTimeoutMs);
       if (observation.status === "unknown" ||
           (observation.status === "completed" && observation.finalText === null)) {
         throw new Error("turn outcome or final answer is unknown");
       }
+      await resultContext?.terminal(observation);
       await lease?.complete(observation);
       if (observation.status === "completed") {
         this.emit({ kind: "text", text: observation.finalText!, partial: false });
@@ -206,6 +219,7 @@ export class CodexAppServerBrain implements MasterBrain {
         costUsd: null, errorText: observation.status === "failed" ? "Codex turn failed" : null });
     } catch (error) {
       await this.holdUnknown(lease, "Master provider result or durable terminal evidence unknown; inspect before release");
+      try { await resultContext?.unknown(); } catch { /* terminal or incomplete receipt remains non-replayable */ }
       this.emit({ kind: "notice", level: "error",
         text: `Codex turn ${turnId} の結果は未確定です。再送前に照合してください: ${(error as Error).message}` });
       await process.stop();

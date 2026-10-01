@@ -12,6 +12,8 @@ import { join } from "node:path";
 import { FileScheduler } from "../src/server/orchestration/scheduler.ts";
 import { scheduledMasterTurns, MasterInputNotSentError, type MasterTurnAdmission } from
   "../src/server/orchestration/masterTurnAdmission.ts";
+import { TaskResultStore } from "../src/server/orchestration/taskResults.ts";
+import { createHash } from "node:crypto";
 
 // Only Node speaks this synthetic protocol. No Codex binary or model is used.
 const fixture = String.raw`
@@ -25,6 +27,7 @@ process.stdin.on("data", (chunk) => {
   while ((end = data.indexOf("\n")) >= 0) {
     const message = JSON.parse(data.slice(0, end));
     data = data.slice(end + 1);
+    if (message.method === "turn/start" && process.argv[2]) require("node:fs").appendFileSync(process.argv[2], JSON.stringify(message) + "\n");
     if (message.id === undefined) continue;
     let result;
     if (message.method === "initialize") result = { userAgent: "synthetic-brain-fixture" };
@@ -58,6 +61,98 @@ process.stdin.on("data", (chunk) => {
   }
 });
 `;
+
+const notice = { id: "a".repeat(64), createdAt: "2026-10-01T00:00:00Z", runId: "result-run",
+  title: "Completed delegated task", project: "synthetic", taskId: "TASK", version: 1,
+  configSha256: "b".repeat(64), sourceSha256: "c".repeat(64), status: "ready_for_review",
+  verificationOutcome: "passed", acceptedBy: null, reviewId: null, reason: null,
+  origin: { kind: "master" as const, masterId: "master", threadId: "synthetic-thread", turnId: "delegation", callId: "call" } };
+
+test("next user turn sends pinned Task results once and binds the same provider input to scheduler and terminal receipts", async () => {
+  await scheduledBrainFixture(async ({ root, scheduler, options, admission }) => {
+    const results = await TaskResultStore.open(join(root, "results")); await results.publish(notice);
+    const wire = join(root, "provider-input.jsonl"); let preparedText = "";
+    const tools: RegisteredTaskTools = { definitions: [], invoke: async () => { throw Error("unexpected tool"); },
+      prepareResultContext: async (thread, input) => {
+        const context = await results.prepareContext("master", thread, input, async () => true);
+        preparedText = context?.text ?? input; return context;
+      } };
+    const brain = new CodexAppServerBrain({ executable: process.execPath, args: ["-e", fixture, "ok", wire],
+      effort: "medium", turnTimeoutMs: 5000, admission, taskTools: tools });
+    try {
+      await brain.start(options);
+      assert.equal((await results.list())[0].delivery.state, "pending");
+      await brain.send({ text: "Review my delegated result" });
+      const events = await collectUntil(brain, "turnEnd");
+      assert.equal(events.at(-1)?.kind, "turnEnd");
+      const requests = (await readFile(wire, "utf8")).trim().split("\n").map(JSON.parse);
+      assert.equal(requests.length, 1); assert.equal(requests[0].params.input[0].text, preparedText);
+      assert.match(preparedText, /Completed delegated task/);
+      const entry = (await scheduler.read()).state!.entries[0];
+      assert.equal(entry.status, "verified");
+      const intent = JSON.parse(await readFile(join(root, entry.work.id, "request.json"), "utf8"));
+      assert.equal(intent.inputSha256, createHash("sha256").update(preparedText).digest("hex"));
+      const result = (await results.list())[0]; assert.equal(result.delivery.state, "completed");
+      assert.equal(result.delivery.turnId, "synthetic-turn"); assert.equal(result.acceptedBy, null);
+      assert.equal(await (await TaskResultStore.open(results.root)).prepareContext("master", "synthetic-thread", "later", async () => true), null);
+    } finally { await brain.stop(); }
+  });
+});
+
+test("capacity rejection keeps result known unsent until a later authorized send", async () => {
+  await scheduledBrainFixture(async ({ root, scheduler, options, admission }) => {
+    const results = await TaskResultStore.open(join(root, "results")); await results.publish(notice);
+    const held = await admission.reserve({ cwd: options.cwd, model: options.model!, effort: "medium", threadId: "held", text: "occupied" });
+    const wire = join(root, "provider-input.jsonl");
+    const tools: RegisteredTaskTools = { definitions: [], invoke: async () => { throw Error("unexpected tool"); },
+      prepareResultContext: (thread, input) => results.prepareContext("master", thread, input, async () => true) };
+    const brain = new CodexAppServerBrain({ executable: process.execPath, args: ["-e", fixture, "ok", wire],
+      effort: "medium", turnTimeoutMs: 5000, admission, taskTools: tools });
+    try {
+      await brain.start(options);
+      await assert.rejects(brain.send({ text: "read result" }), MasterInputNotSentError);
+      assert.equal((await results.list())[0].delivery.state, "not_sent");
+      await assert.rejects(readFile(wire), /ENOENT/);
+      await held.cancelBeforeDispatch(); await brain.send({ text: "read result now" });
+      await collectUntil(brain, "turnEnd");
+      assert.equal((await results.list())[0].delivery.state, "completed");
+      assert.equal((await readFile(wire, "utf8")).trim().split("\n").length, 1);
+      assert.equal((await scheduler.read()).state!.entries.at(-1)?.status, "verified");
+    } finally { await brain.stop(); }
+  });
+});
+
+test("lost acknowledgement, provider loss and result persistence failure hold the claim and never replay the result", async () => {
+  for (const fault of ["before_ack", "after_ack", "binding", "terminal"] as const) {
+    await scheduledBrainFixture(async ({ root, scheduler, options, admission }) => {
+      const results = await TaskResultStore.open(join(root, "results")); await results.publish(notice);
+      const wire = join(root, "provider-input.jsonl");
+      const tools: RegisteredTaskTools = { definitions: [], invoke: async () => { throw Error("unexpected tool"); },
+        prepareResultContext: async (thread, input) => {
+          const context = (await results.prepareContext("master", thread, input, async () => true))!;
+          return { ...context,
+            bind: async turn => { if (fault === "binding") throw Error("injected bind failure"); await context.bind(turn); },
+            terminal: async observation => { if (fault === "terminal") throw Error("injected artifact failure"); await context.terminal(observation); } };
+        } };
+      const script = fault === "before_ack" ? fixture.replace('else if (message.method === "turn/start") result = { turn: { id: "synthetic-turn" } };',
+        'else if (message.method === "turn/start") { process.exit(8); }') : fixture;
+      const brain = new CodexAppServerBrain({ executable: process.execPath, args: ["-e", script, fault === "after_ack" ? "fail" : "ok", wire],
+        effort: "medium", turnTimeoutMs: 5000, admission, taskTools: tools });
+      try {
+        await brain.start(options);
+        if (fault === "before_ack" || fault === "binding") await assert.rejects(brain.send({ text: "read result" }));
+        else await brain.send({ text: "read result" });
+        const events = await collectUntil(brain, "exit"); await brain.stop();
+        assert.equal(events.some(e => e.kind === "turnEnd"), false, fault);
+        assert.equal((await scheduler.read()).state!.entries[0].status, "needs_reconciliation", fault);
+        const restored = await TaskResultStore.open(results.root);
+        assert.equal((await restored.list())[0].delivery.state, "unknown", fault);
+        assert.equal(await restored.prepareContext("master", "synthetic-thread", "later", async () => true), null, fault);
+        assert.equal((await readFile(wire, "utf8")).trim().split("\n").length, 1, fault);
+      } finally { await brain.stop(); }
+    });
+  }
+});
 
 const start: MasterBrainStartOptions = {
   cwd: process.cwd(), model: "synthetic-astra", permissionMode: "plan",

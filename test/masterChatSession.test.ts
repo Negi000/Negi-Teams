@@ -5,6 +5,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import type { TaskResultSummary } from "../src/shared/taskResults.ts";
 import {
   MasterSession,
   replyQuoteLine,
@@ -183,6 +184,26 @@ function makeSession(opts: { snapshotLimit?: number; brainId?: MasterBrainId;
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+test("Task notification belongs to its Master, updates its card, and never sends a user or provider turn", async () => {
+  const h = makeSession();
+  try {
+    await h.session.start();
+    const result: TaskResultSummary = { id: "a".repeat(64), createdAt: "2026-10-01T00:00:00Z", runId: "run",
+      title: "Task result", project: "synthetic", taskId: "TASK", version: 1, configSha256: "b".repeat(64),
+      sourceSha256: "c".repeat(64), status: "ready_for_review", verificationOutcome: "passed", acceptedBy: null,
+      reviewId: null, reason: null, origin: { kind: "master", masterId: "master", threadId: "origin-thread", turnId: "turn", callId: "call" },
+      delivery: { state: "pending", threadId: null, turnId: null } };
+    h.session.notifyTaskResult({ ...result, origin: { kind: "browser" } });
+    h.session.notifyTaskResult({ ...result, origin: { ...result.origin, kind: "master", masterId: "other", threadId: "other", turnId: "turn", callId: "call" } });
+    assert.equal(h.events.length, 0);
+    h.session.notifyTaskResult(result); h.session.notifyTaskResult(result);
+    assert.equal(h.events.length, 1); assert.equal(h.events[0].event.kind, "taskResult");
+    assert.equal(h.session.state, "idle"); assert.deepEqual(h.brains[0].sent, []);
+    h.session.notifyTaskResult({ ...result, delivery: { state: "completed", threadId: "origin-thread", turnId: "response" } });
+    assert.equal(h.events.length, 2); assert.equal(h.events.some(e => e.event.kind === "user"), false);
+    assert.equal(h.session.snapshot().events.length, 2); assert.deepEqual(h.brains[0].sent, []);
+  } finally { await h.session.stop(); }
+});
 /** イベントが n 件たまるまで待つ（タイムアウトしたらそのまま返す）。 */
 async function waitEvents(h: Harness, n: number, ms = 1000): Promise<void> {
   const until = Date.now() + ms;

@@ -23,6 +23,7 @@ import type {
 
 /** 画面に並べる 1 アイテム。 */
 export type ChatItem =
+  | { kind: "taskResult"; seq: number; ts: number; result: import("../shared/taskResults.ts").TaskResultSummary }
   | {
       kind: "user";
       seq: number;
@@ -262,6 +263,11 @@ export class ChatTranscript {
       case "notice":
         this.closeStream();
         return this.push({ kind: "notice", seq, ts, level: ev.level, text: ev.text });
+      case "taskResult": {
+        const index = this.items.findIndex(item => item.kind === "taskResult" && item.result.id === ev.result.id);
+        if (index >= 0) { this.items[index] = { kind: "taskResult", seq, ts, result: ev.result }; return { touched: [index], appendedFrom: -1 }; }
+        return this.push({ kind: "taskResult", seq, ts, result: ev.result });
+      }
       case "cleared": {
         // 「新しい会話」の区切り。これより前の表示は捨てる（JSONL には残っている）。
         this.closeStream();

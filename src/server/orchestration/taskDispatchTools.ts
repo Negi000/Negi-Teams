@@ -3,6 +3,7 @@
 import { createHash } from "node:crypto";
 import type { CodexDynamicToolCall, CodexDynamicToolDefinition, CodexDynamicToolResult } from "../master/appServerClient.ts";
 import type { LocalTaskService, TaskRunView, TaskRequestOrigin } from "./taskService.ts";
+import type { TaskResultContext } from "./taskResults.ts";
 
 const runId = { type: "string", pattern: "^[a-zA-Z0-9._-]{1,100}$" };
 const configHash = { type: "string", pattern: "^[a-f0-9]{64}$" };
@@ -10,6 +11,7 @@ function definition(name: string, description: string, properties: Record<string
   return { type: "function", name, description, inputSchema: { type: "object", properties, required, additionalProperties: false } };
 }
 const definitions = [
+  definition("negi_list_task_results", "この統括の会話から委任したTaskの固定結果通知と伝達状態を確認する。通知時点の状態と現在のTask、人間受入を区別する。", {}, []),
   definition("negi_list_tasks", "登録済みTaskの固定カタログを検索する。未登録の依頼は先にTask Contractの確定が必要。", {
     project: { type: "string", minLength: 1, maxLength: 100 }, offset: { type: "integer", minimum: 0, maximum: 100 } }, []),
   definition("negi_read_task", "Taskの固定契約、担当、現在の実行・検証・人間受入状態を確認する。再委任前に使う。", { run_id: runId }, ["run_id"]),
@@ -19,6 +21,7 @@ const definitions = [
 export interface RegisteredTaskTools {
   definitions: CodexDynamicToolDefinition[];
   invoke(call: CodexDynamicToolCall): Promise<CodexDynamicToolResult>;
+  prepareResultContext?: (threadId: string, input: string) => Promise<TaskResultContext | null>;
 }
 function argumentsObject(value: unknown, allowed: string[]): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value) ||
@@ -43,13 +46,18 @@ function requestUuid(origin: TaskRequestOrigin): string {
 }
 export function registeredTaskTools(service: LocalTaskService, masterId: string): RegisteredTaskTools {
   if (!/^[a-zA-Z0-9._-]{1,100}$/.test(masterId)) throw new Error("Task planner identity invalid");
-  return { definitions: structuredClone(definitions), async invoke(call) {
+  return { definitions: structuredClone(definitions),
+    prepareResultContext: (threadId, input) => service.prepareResultContext(masterId, threadId, input), async invoke(call) {
     try {
       const origin: TaskRequestOrigin = { kind: "master", masterId, threadId: call.threadId, turnId: call.turnId, callId: call.callId };
       if (![call.threadId, call.turnId, call.callId].every(id => typeof id === "string" && id.length > 0 && id.length <= 200 && !/[\r\n\0]/.test(id)))
         throw new Error("Planner call identity invalid");
       let value: unknown;
-      if (call.tool === "negi_list_tasks") {
+      if (call.tool === "negi_list_task_results") {
+        argumentsObject(call.arguments, []);
+        value = { notifications: (await service.resultNotifications()).filter(n => n.origin.kind === "master" &&
+          n.origin.masterId === masterId && n.origin.threadId === call.threadId).slice(0, 8), frozenAtNotification: true };
+      } else if (call.tool === "negi_list_tasks") {
         const args = argumentsObject(call.arguments, ["project", "offset"]), offset = args.offset ?? 0;
         if (!Number.isSafeInteger(offset) || Number(offset) < 0 || Number(offset) > 100 ||
             (args.project !== undefined && (typeof args.project !== "string" || !args.project.trim() || args.project.length > 100)))

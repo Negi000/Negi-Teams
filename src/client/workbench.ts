@@ -1,6 +1,8 @@
 import { materialIcon } from "../shared/material3.ts";
 import { taskNeedsAttention, taskStatusLabels, type TaskOverview, type ReviewOverview } from "../shared/workspace.ts";
-import type { AgentRecord } from "../shared/protocol.ts";
+import type { AgentRecord, MasterChatState } from "../shared/protocol.ts";
+import { stateLabel } from "./chatModel.ts";
+import { taskResultDeliveryLabel, type TaskResultSummary } from "../shared/taskResults.ts";
 
 export class Workbench {
   private capabilities: { tasks: boolean; reviews: boolean } | null = null;
@@ -8,7 +10,11 @@ export class Workbench {
   private reviews: ReviewOverview[] | null = null;
   private taskError: string | null = null;
   private reviewError: string | null = null;
+  private results: TaskResultSummary[] | null = null;
+  private resultError: string | null = null;
+  private resultRevision = 0;
   private agents: AgentRecord[] = [];
+  private masterState: { id: string; state: MasterChatState | null } | null = null;
   private timer: number | null = null;
   private visible = false;
   private loading = false;
@@ -23,6 +29,7 @@ export class Workbench {
 <p id="wb-error" class="md-message" role="status" aria-live="polite"></p>
 <div class="wb-content"><div>
 <section class="md-section" id="wb-attention-section"><div class="md-section-heading"><h2>確認が必要</h2></div><div id="wb-attention" class="md-list"></div></section>
+<section class="md-section"><div class="md-section-heading"><h2>作業からの結果</h2></div><p id="wb-result-error" class="md-message" role="status"></p><div id="wb-results" class="md-list"></div><small class="muted">通知時点の状態です。現在のTaskと成果は詳細で確認できます。</small></section>
 <section class="md-section"><div class="md-section-heading"><h2>Task</h2><a id="wb-all-tasks" href="/tasks" hidden>すべて開く</a></div>
 <div class="wb-filters"><label>プロジェクト<select id="wb-project"><option value="">すべて</option></select></label><label>作業を検索<input id="wb-search" type="search" placeholder="作業名・プロジェクト"></label></div><div id="wb-tasks" class="md-list"></div></section></div>
 <aside class="wb-team md-section"><div class="md-section-heading"><h2>チーム</h2><button id="wb-open-team" class="md-text">開く</button></div><div id="wb-team-list" class="md-list"></div><p class="muted">会話と端末はチーム画面で確認できます。</p></aside></div>`;
@@ -55,6 +62,12 @@ export class Workbench {
     this.agents = agents;
     this.renderTeam();
   }
+  updateMasterState(id: string, state: MasterChatState): void {
+    this.masterState = { id, state }; this.renderTeam();
+  }
+  markDisconnected(): void {
+    if (this.masterState) { this.masterState.state = null; this.renderTeam(); }
+  }
   private node(id: string): HTMLElement { return this.el.querySelector(`#${id}`)!; }
   private text(id: string, value: string): void { this.node(id).textContent = value; }
   private async get<T>(path: string): Promise<T> {
@@ -63,18 +76,25 @@ export class Workbench {
     if (!response.ok) throw new Error("状態を取得できません。更新して再確認してください。");
     return response.json() as Promise<T>;
   }
+  updateResults(results: TaskResultSummary[]): void { this.resultRevision++; this.results = results; this.resultError = null; this.render(); }
   private async load(): Promise<void> {
     if (this.loading || !this.capabilities) return;
     this.loading = true;
     (this.node("wb-refresh") as HTMLButtonElement).disabled = true;
+    const resultRevision = this.resultRevision;
     const results = await Promise.allSettled([
       this.capabilities.tasks ? this.get<TaskOverview[]>("/api/tasks?summary=1") : Promise.resolve(null),
       this.capabilities.reviews ? this.get<ReviewOverview[]>("/api/reviews?summary=1") : Promise.resolve(null),
+      this.capabilities.tasks ? this.get<TaskResultSummary[]>("/api/tasks/results/summary") : Promise.resolve(null),
     ]);
     this.tasks = results[0].status === "fulfilled" ? results[0].value : null;
     this.reviews = results[1].status === "fulfilled" ? results[1].value : null;
     this.taskError = results[0].status === "rejected" ? String(results[0].reason.message) : null;
     this.reviewError = results[1].status === "rejected" ? String(results[1].reason.message) : null;
+    if (resultRevision === this.resultRevision) {
+      this.results = results[2].status === "fulfilled" ? results[2].value : null;
+      this.resultError = results[2].status === "rejected" ? "結果通知を確認できません。Taskの現在の状態を確認してください。" : null;
+    }
     this.loading = false;
     (this.node("wb-refresh") as HTMLButtonElement).disabled = false;
     this.text("wb-freshness", this.taskError || this.reviewError ? "状態の取得に失敗しました。更新して再確認してください。" : `最終確認 ${new Date().toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })} · 15秒ごとに更新`);
@@ -102,9 +122,17 @@ export class Workbench {
     this.text("wb-task-count", this.tasks ? String(this.tasks.length) : "—");
     this.node("wb-all-tasks").hidden = !this.capabilities?.tasks;
     this.text("wb-error", [this.taskError, this.reviewError].filter(Boolean).filter((v,i,a) => a.indexOf(v) === i).join(" "));
-    const signature = JSON.stringify({ tasks: this.tasks, reviews: this.reviews, capabilities: this.capabilities, taskError: this.taskError, reviewError: this.reviewError });
+    const signature = JSON.stringify({ tasks: this.tasks, reviews: this.reviews, results: this.results, capabilities: this.capabilities, taskError: this.taskError, reviewError: this.reviewError, resultError: this.resultError });
     if (signature === this.fingerprint) return;
     this.fingerprint = signature;
+    this.text("wb-result-error", this.resultError ?? "");
+    const resultList = this.node("wb-results"); resultList.replaceChildren();
+    for (const result of this.results?.slice(0, 8) ?? []) {
+      resultList.append(this.row(result.title, [result.project, taskResultDeliveryLabel(result)].join(" · "),
+        `/tasks?run=${encodeURIComponent(result.runId)}`, "task", taskStatusLabels[result.status] ?? result.status,
+        ["unknown", "dispatching", "prepared", "failed"].includes(result.delivery.state)));
+    }
+    if (!resultList.children.length) this.empty(resultList, this.resultError ? "結果通知を確認できません" : this.capabilities && !this.capabilities.tasks ? "Taskが未設定です" : this.results ? "新しい結果通知はありません" : "結果通知を確認しています", "完了・停止・照合が必要なTaskの結果をここに表示します。");
     const attention = this.node("wb-attention"); attention.replaceChildren();
     for (const r of pending ?? []) {
       const warning = r.qualityIssue || Boolean(r.integrityError) || r.status === "revoked";
@@ -139,8 +167,12 @@ export class Workbench {
   private renderTeam(): void {
     const container = this.node("wb-team-list"); container.replaceChildren();
     for (const a of this.agents) {
+      const master = this.masterState?.id === a.id && a.kind === "master" ? this.masterState : null;
+      const status = master ? master.state ? stateLabel(master.state) : "接続を確認" :
+        ({ idle: "待機", busy: "実行中", stopped: "停止", exited: "終了" } as Record<string,string>)[a.status] ?? a.status;
       const row = this.row(a.kind === "master" ? "統括" : a.kind === "supervisor" ? "監督" : a.id,
-        [a.backend, a.model, a.mode === "isolated" ? "単独" : "接続"].filter(Boolean).join(" · "), "/?view=workspace", "workspace", ({ idle: "待機", busy: "実行中", stopped: "停止", exited: "終了" } as Record<string,string>)[a.status] ?? a.status);
+        [a.backend, a.model, a.mode === "isolated" ? "単独" : "接続"].filter(Boolean).join(" · "), "/?view=workspace", "workspace", status,
+        Boolean(master && (master.state === "stopped" || master.state === null)));
       row.addEventListener("click", event => { event.preventDefault(); this.openTeam(); }); container.append(row);
     }
     if (!this.agents.length) this.empty(container, "接続した担当はいません", "チーム画面で接続を確認できます。");

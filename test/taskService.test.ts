@@ -101,6 +101,18 @@ test("native planner uses the UI scheduler once and persists its origin without 
       const view = await service.snapshot(row.id);
       assert.deepEqual(view.requestedBy, { kind: "master", masterId: "planner", ...context });
       assert.equal(view.acceptedBy, null); assert.equal(view.verificationOutcome, "passed");
+      await until(async () => (await service.resultNotifications()).length === 1);
+      const notices = await tools.invoke({ ...context, tool: "negi_list_task_results", arguments: {} });
+      const notice = JSON.parse(notices.text).notifications[0];
+      assert.equal(notices.success, true); assert.equal(notice.status, "ready_for_review");
+      assert.equal(notice.acceptedBy, null); assert.equal(notice.delivery.state, "pending");
+      assert.equal(notices.text.includes(config.checkout), false);
+      assert.equal(JSON.parse((await tools.invoke({ ...context, threadId: "other-thread", tool: "negi_list_task_results", arguments: {} })).text).notifications.length, 0);
+      assert.equal(JSON.parse((await registeredTaskTools(service, "other-master").invoke({ ...context, tool: "negi_list_task_results", arguments: {} })).text).notifications.length, 0);
+      assert.equal(await service.prepareResultContext("planner", "other-thread", "input"), null);
+      const packed = await tools.prepareResultContext!(context.threadId, "Describe this result");
+      assert.ok(packed); assert.match(packed.text, /same|固定結果/);
+      await packed.notSent();
       assert.equal((await tools.invoke(call)).success, true); assert.equal(count, 1);
       assert.equal((await tools.invoke({ ...call, callId: "another-dispatch" })).success, false);
       const requestPath = join(dir, "task-state", row.id + ".request.json");
@@ -110,10 +122,23 @@ test("native planner uses the UI scheduler once and persists its origin without 
     } finally { await service.close(); }
     const restarted = await LocalTaskService.open(catalog, runtime);
     try {
+      await restarted.recoverResultNotifications();
+      assert.equal((await restarted.resultNotifications()).length, 1);
+      assert.equal((await restarted.resultNotifications())[0].delivery.state, "not_sent");
+      const retried = await restarted.prepareResultContext("planner", context.threadId, "Later authorized send");
+      assert.ok(retried); await retried.notSent();
       const view = await restarted.snapshot(config.runId);
       assert.deepEqual(view.requestedBy, { kind: "master", masterId: "planner", ...context });
       assert.equal(view.acceptedBy, null); assert.equal(count, 1);
     } finally { await restarted.close(); }
+    const replacement = await LocalTaskService.open({ stateRoot: join(dir, "task-state"), runs: [
+      { title: "Replacement catalog", config: { ...config, runId: "replacement", outputDir: join(dir, "replacement-output") } }] }, runtime);
+    try {
+      assert.equal((await replacement.resultNotifications()).length, 0);
+      assert.equal(await replacement.prepareResultContext("planner", context.threadId, "New catalog input"), null);
+      assert.equal(count, 1);
+      assert.match(await readFile(join(dir, "task-state", "task-results", "results.jsonl"), "utf8"), /synthetic-run/);
+    } finally { await replacement.close(); }
   });
 });
 
@@ -344,7 +369,7 @@ test("catalog requires one scheduler and keeps state outside every registered wr
 });
 
 test("Task HTTP requires cookie authentication and same-origin, pinned mutations", async () => {
-  await fixture(async ({ catalog, prepare }) => {
+  await fixture(async ({ catalog, prepare, config }) => {
     let count = 0;
     const service = await LocalTaskService.open(catalog, { prepare, submit: submitVaultRun,
       execute: async (...args) => { count++; return completed(args[0], args[1]); } });
@@ -359,6 +384,8 @@ test("Task HTTP requires cookie authentication and same-origin, pinned mutations
       assert.equal((await fetch(`${url}/api/tasks`)).status, 401);
       assert.equal((await fetch(`${url}/api/tasks?summary=1`)).status, 401);
       assert.equal((await fetch(`${url}/api/tasks/capacity/summary`)).status, 401);
+      assert.equal((await fetch(`${url}/api/tasks/results/summary`)).status, 401);
+      assert.equal((await fetch(`${url}/api/tasks/results/summary`, { method: "POST", headers: cookie })).status, 405);
       const capacityResponse = await fetch(`${url}/api/tasks/capacity/summary`, { headers: cookie });
       assert.equal(capacityResponse.headers.get("cache-control"), "no-store");
       const capacity = await capacityResponse.json();
@@ -386,6 +413,13 @@ test("Task HTTP requires cookie authentication and same-origin, pinned mutations
       const completedSummary = await (await fetch(`${url}/api/tasks?summary=1`, { headers: cookie })).json();
       assert.equal(completedSummary[0].status, "ready_for_review");
       assert.equal(completedSummary[0].canStart, false); assert.equal(completedSummary[0].live, false);
+      await until(async () => (await service.resultNotifications()).length === 1);
+      const resultResponse = await fetch(`${url}/api/tasks/results/summary`, { headers: cookie });
+      assert.equal(resultResponse.headers.get("cache-control"), "no-store");
+      const notices = await resultResponse.json(); assert.equal(notices.length, 1);
+      assert.equal(notices[0].origin.kind, "browser"); assert.equal(notices[0].acceptedBy, null);
+      assert.equal(JSON.stringify(notices).includes(config.checkout), false);
+      assert.equal(await service.prepareResultContext("master", "thread", "input"), null);
     } finally { await service.close(); await new Promise<void>((resolve) => server.close(() => resolve())); }
   });
 });
@@ -427,9 +461,11 @@ test("a frozen Git review binds signed acceptance and revocation to the correspo
     const service = await LocalTaskService.open(catalog, runtime);
     await service.connectReviews(reviews);
     const view = await service.snapshot(config.runId);
-    await service.start(view.id, view.configSha256, randomUUID());
+    await service.start(view.id, view.configSha256, randomUUID(), { kind: "master", masterId: "master",
+      threadId: "review-thread", turnId: "delegation-turn", callId: "review-call" });
     await until(async () => (await service.snapshot(view.id)).reviewId !== null, 30_000);
     try {
+      await until(async () => (await service.resultNotifications()).length === 1);
       const result = await service.snapshot(view.id);
       assert.equal(result.status, "ready_for_review"); assert.ok(result.reviewId);
       const review = await reviews.snapshot(result.reviewId);
@@ -437,12 +473,17 @@ test("a frozen Git review binds signed acceptance and revocation to the correspo
       assert.equal(review.canAccept, true);
       await writeFile(join(config.checkout, "docs", "result.md"), "Changed after verification\n");
       assert.equal((await service.snapshot(view.id)).status, "artifact_changed");
+      assert.equal(await service.prepareResultContext("master", "review-thread", "Read the result"), null);
       await assert.rejects(reviews.accept(review.id, review.artifactSha256, randomUUID()), /changed/);
       await writeFile(join(config.checkout, "docs", "result.md"), "# Synthetic result\nVerified fixture only.\n");
+      const restoredContext = await service.prepareResultContext("master", "review-thread", "Read the restored result");
+      assert.ok(restoredContext); await restoredContext.notSent();
       const id = randomUUID();
       await reviews.accept(review.id, review.artifactSha256, id);
       assert.equal((await service.snapshot(view.id)).status, "accepted");
       assert.equal((await service.snapshot(view.id)).acceptedBy, `user:http-review:${id}`);
+      assert.equal((await service.resultNotifications())[0].acceptedBy, null);
+      assert.equal(await service.prepareResultContext("master", "review-thread", "Read the accepted result"), null);
       // Forward slashes from a Windows CLI identify the same physical output root.
       const manifestPath = join(config.outputDir, "review-manifest.json");
       const manifest = JSON.parse(await readFile(manifestPath, "utf8"));

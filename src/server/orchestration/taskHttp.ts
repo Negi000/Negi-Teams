@@ -50,6 +50,12 @@ export function createTaskHttp(service: LocalTaskService | null, auth: AuthConfi
       catch { json(res, 503, { error: "実行枠の状態を読み取れません。" }); }
       return true;
     }
+    if (url.pathname === "/api/tasks/results/summary") {
+      if (req.method !== "GET") { json(res, 405, { error: "Method not allowed" }); return true; }
+      try { json(res, 200, (await service.resultNotifications()).slice(0, 20)); }
+      catch { json(res, 503, { error: "結果通知を読み取れません。Taskの現在の状態を確認してください。" }); }
+      return true;
+    }
     if (url.pathname === "/api/tasks" && req.method === "GET") {
       if (url.searchParams.get("summary") !== "1") { json(res, 200, service.list()); return true; }
       const items = service.list(), views: TaskOverview[] = [];

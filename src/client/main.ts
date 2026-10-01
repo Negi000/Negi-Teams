@@ -180,6 +180,7 @@ function connect(): void {
     connStatus.className = "conn ng";
     // 再接続時はサーバから chatSnapshot が再送されて会話が戻る。
     chatPanel.markDisconnected();
+    workbench.markDisconnected();
     if (reconnectTimer === null) {
       reconnectTimer = window.setTimeout(() => {
         reconnectTimer = null;
@@ -210,6 +211,9 @@ function sendMsg(msg: ClientMessage): boolean {
 // ===== サーバメッセージ処理 =====
 function handleServerMessage(msg: ServerMessage): void {
   switch (msg.type) {
+    case "taskResults":
+      workbench.updateResults(msg.results);
+      break;
     case "registry":
       registry = sortAgents(msg.agents);
       workbench.updateAgents(registry);
@@ -305,6 +309,7 @@ function handleServerMessage(msg: ServerMessage): void {
       break;
     }
     case "chatState":
+      workbench.updateMasterState(msg.id, msg.state);
       // chat モードの master が居ることの判定材料も兼ねる（registry には情報が無い）。
       chatPanel.applyState(msg.id, msg.state, msg.pending);
       chatPanel.setCodexReadOnly(registry.some((a) => a.id === msg.id &&

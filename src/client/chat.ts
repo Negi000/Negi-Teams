@@ -5,6 +5,8 @@ import type {
   MasterChatState,
   UsageMessage,
 } from "../shared/protocol.ts";
+import { taskResultDeliveryLabels } from "../shared/taskResults.ts";
+import { taskStatusLabels } from "../shared/workspace.ts";
 import {
   ChatTranscript,
   collectImages,
@@ -134,7 +136,7 @@ export class ChatPanel {
     this.statsEl = span("chat-stats", "");
     this.newBtn = document.createElement("button");
     this.newBtn.className = "chat-new";
-    this.newBtn.textContent = "🆕 新しい会話";
+    this.newBtn.textContent = "新しい会話";
     this.newBtn.title =
       "頭脳プロセスを resume 無しで起動し直し、文脈をリセットします（これまでの表示は残ります）";
     this.newBtn.addEventListener("click", () => {
@@ -546,16 +548,16 @@ export class ChatPanel {
       ? this.pendingCodexSend
         ? "送信結果を確認しています（入力は保持されます）"
         : this.codexReadOnly && this.state === "busy"
-        ? "Codex master の turn が終了するまでお待ちください"
-        : "master（chat）が起動していません…"
+        ? "統括の応答が終わるまでお待ちください"
+        : "統括が起動していません…"
       : this.state === "busy"
         ? "実行中でも送れます（Enter で送信 / 中断は ⏹）"
-        : "master に話しかける（Enter で送信 / Shift+Enter で改行）";
+        : "依頼や相談を入力（Enter で送信 / Shift+Enter で改行）";
     this.newBtn.disabled = this.codexReadOnly || this.state === "starting";
     if (this.pending > 0) {
       this.pendingBar.hidden = false;
       this.pendingBar.textContent =
-        `⏸ 未応答の承認/質問が ${this.pending} 件あります（応答するまで master は止まったままです）`;
+        `未応答の承認/質問が ${this.pending} 件あります（応答するまで統括は待機します）`;
     } else {
       this.pendingBar.hidden = true;
     }
@@ -925,7 +927,7 @@ function buildItem(
     case "user": {
       const row = bubbleRow("user");
       const bubble = div("chat-bubble user");
-      bubble.append(meta("ボス", item.ts));
+      bubble.append(meta("あなた", item.ts));
       // どの発言への返答かを本文の上に出す（PR-M11）。
       if (item.replyTo) bubble.appendChild(quoteChip(item.replyTo, reply));
       if (item.text) bubble.appendChild(plain(item.text));
@@ -940,7 +942,7 @@ function buildItem(
       const bubble = div("chat-bubble assistant" + (item.streaming ? " streaming" : ""));
       const body = div("chat-md");
       renderMarkdownInto(body, item.text);
-      bubble.append(meta("master", item.ts), body);
+      bubble.append(meta("統括", item.ts), body);
       if (item.streaming) bubble.appendChild(span("chat-caret", "▍"));
       if (replyable(item)) bubble.appendChild(replyButton(item, reply));
       row.appendChild(bubble);
@@ -950,7 +952,7 @@ function buildItem(
       // master がチャットへ共有した画像（PR-M10）。assistant 側のカードとして出す。
       const row = bubbleRow("assistant");
       const bubble = div("chat-bubble assistant image");
-      bubble.append(meta("master", item.ts));
+      bubble.append(meta("統括", item.ts));
       item.images.forEach((img, i) => {
         bubble.appendChild(imageCard(img, `${item.seq}:${i}`, onOpenImage));
       });
@@ -993,7 +995,7 @@ function buildItem(
       det.className = `chat-tool state-${item.state}`;
       const sum = document.createElement("summary");
       const icon = item.state === "running" ? "⏳" : item.state === "ok" ? "✅" : "❌";
-      const taskLabel = ({ negi_list_tasks: "Task一覧を取得", negi_read_task: "Task契約を確認",
+      const taskLabel = ({ negi_list_task_results: "Task結果を確認", negi_list_tasks: "Task一覧を取得", negi_read_task: "Task契約を確認",
         negi_dispatch_task: "Taskを委任" } as Record<string, string>)[item.name];
       sum.textContent = taskLabel ? `${taskLabel} ${icon}` : `🔧 ${item.name} ${icon} ${summarizeToolInput(item.input)}`.trimEnd();
       det.appendChild(sum);
@@ -1044,6 +1046,30 @@ function buildItem(
       const el = div(`chat-system level-${item.level}`);
       el.textContent = item.text;
       return el;
+    }
+    case "taskResult": {
+      const result = item.result, row = div("chat-system task-result-card md-surface"), heading = document.createElement("strong");
+      heading.textContent = result.title;
+      const state = div("md-chip"); state.textContent = taskStatusLabels[result.status] ?? result.status;
+      const copy = document.createElement("p");
+      copy.textContent = taskResultDeliveryLabels[result.delivery.state];
+      if (["unknown", "prepared", "dispatching", "failed"].includes(result.delivery.state)) copy.className = "task-result-attention";
+      const note = document.createElement("small");
+      note.textContent = ["pending", "not_sent"].includes(result.delivery.state)
+        ? "通知時点の結果です。委任元と同じ会話の次の依頼で現在を照合し、有効な結果を添付します。現在のTaskと人間受入は詳細で確認できます。"
+        : result.delivery.state === "completed"
+        ? "通知時点の結果への統括の応答を記録しました。成果の人間受入は別に確認してください。"
+        : result.delivery.state === "bound"
+        ? "統括の応答を待っています。成果の人間受入は別に確認してください。"
+        : "伝達記録と現在のTaskを照合してください。自動では再送しません。成果の人間受入は別に確認してください。";
+      const actions = div("md-actions"), task = document.createElement("a");
+      task.className = "md-button md-tonal"; task.href = "/tasks?run=" + encodeURIComponent(result.runId); task.textContent = "Taskを確認";
+      actions.append(task);
+      if (result.reviewId) {
+        const review = document.createElement("a"); review.className = "md-button md-primary";
+        review.href = "/reviews?case=" + encodeURIComponent(result.reviewId); review.textContent = "成果をレビュー"; actions.append(review);
+      }
+      row.append(heading, state, copy, note, actions); return row;
     }
     case "session": {
       const el = div("chat-system level-info");

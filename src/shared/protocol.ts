@@ -436,6 +436,7 @@ export interface DirListingMessage {
 }
 
 export type ServerMessage =
+  | { type: "taskResults"; results: import("./taskResults.ts").TaskResultSummary[] }
   | RegistryMessage
   | OutputMessage
   | ScrollbackMessage
@@ -542,6 +543,7 @@ export interface MasterChatUsage {
 
 /** チャット 1 イベント（サーバ内部 MasterEvent ＋ user / inbound）。 */
 export type MasterChatEvent =
+  | { kind: "taskResult"; result: import("./taskResults.ts").TaskResultSummary }
   | {
       kind: "session";
       sessionId: string;

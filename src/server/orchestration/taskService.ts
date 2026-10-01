@@ -15,6 +15,8 @@ import { assertVerificationCoverage } from "./vaultRunConfig.ts";
 import type { IntegrationSource } from "./taskIntegration.ts";
 import { readTaskRevision, replayRevisionReview, revisionMatchesTask, taskManifestName,
   taskRevisionHash, writeTaskRevisionPointer, type PinnedTaskRevision, type TaskRevisionJournal } from "./taskRevision.ts";
+import { TaskResultStore, type TaskResultContext } from "./taskResults.ts";
+import type { TaskResultNotice, TaskResultSummary } from "../../shared/taskResults.ts";
 
 const hash = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
 function inside(root: string, path: string): boolean {
@@ -101,9 +103,14 @@ export class LocalTaskService {
   private readonly revisions = new Map<string, { fingerprint: string; promise: Promise<TaskRunView> }>();
   private readonly approvals = new Map<string, Map<string, { approval: TaskOperationApproval;
     decide: (allow: boolean, approvalRef: string, at: string, requestId: string) => Promise<void> }>>();
+  private resultListener: ((results: TaskResultSummary[]) => void) | null = null;
+  private readonly settlements = new Set<Promise<void>>();
   private constructor(private readonly root: string, private readonly runs: CatalogRun[],
     private readonly scheduler: FileScheduler, private readonly runtime: Runtime,
-    private readonly operationProofs: HumanReviewProofStore) {}
+    private readonly operationProofs: HumanReviewProofStore, private readonly resultStore: TaskResultStore) {
+    resultStore.subscribe(results => this.resultListener?.(results.filter(n =>
+      runs.some(run => run.config.runId === n.runId && run.configSha256 === n.configSha256))));
+  }
 
   static async open(raw: unknown, runtime: Runtime = { prepare: prepareVaultRun,
     submit: submitVaultRun, execute: executeVaultRun }): Promise<LocalTaskService> {
@@ -152,9 +159,45 @@ export class LocalTaskService {
     const operationProofs = await HumanReviewProofStore.open(join(root, "operation-proofs"));
     const scheduler = new FileScheduler(schedulerPath!);
     await scheduler.ensureSubscriptionConfiguration(capacity);
-    return new LocalTaskService(root, runs, scheduler, runtime, operationProofs);
+    const results = await TaskResultStore.open(join(root, "task-results"));
+    return new LocalTaskService(root, runs, scheduler, runtime, operationProofs, results);
   }
   list(): Array<{ id: string; title: string }> { return this.runs.map((run) => ({ id: run.config.runId, title: run.title })); }
+  subscribeResults(listener: (results: TaskResultSummary[]) => void): void { this.resultListener = listener; }
+  async resultNotifications(): Promise<TaskResultSummary[]> {
+    return (await this.resultStore.list()).filter(n => this.runs.some(run =>
+      run.config.runId === n.runId && run.configSha256 === n.configSha256)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+  private async resultSource(id: string) {
+    const run = this.registered(id), request = await this.request(run), view = await this.snapshot(id);
+    if (!request || ["not_started", "queued", "planning", "ready_for_worker", "working", "verifying"].includes(view.status)) return null;
+    const ledger = (await this.ledger(run).read()).state;
+    const entry = (await this.scheduler.read()).state?.entries.find(e => e.work.id === id) ?? null;
+    const core = { runId: view.id, title: view.title.replace(/[\r\n\0]/g, " "), project: view.project,
+      taskId: view.taskId, version: view.version, configSha256: view.configSha256,
+      status: view.status, verificationOutcome: view.verificationOutcome, acceptedBy: view.acceptedBy,
+      reviewId: view.reviewId, reason: view.error ? "詳細な状態をTask画面で確認してください。" : null, origin: request.requestedBy ?? { kind: "browser" as const } };
+    return { core, sourceSha256: hash(JSON.stringify({ core, requestId: request.requestId, ledger, entry })) };
+  }
+  private async publishResult(id: string): Promise<void> {
+    const source = await this.resultSource(id); if (!source) return;
+    const notice: TaskResultNotice = { ...source.core, sourceSha256: source.sourceSha256,
+      id: hash("negi-task-result/1\n" + id + "\n" + source.core.configSha256), createdAt: new Date().toISOString() };
+    await this.resultStore.publish(notice);
+  }
+  /** Restores notices from durable Task facts; never resumes a model or Task. */
+  async recoverResultNotifications(): Promise<void> {
+    const failures: unknown[] = [];
+    for (const run of this.runs) try { await this.publishResult(run.config.runId); } catch (error) { failures.push(error); }
+    if (failures.length) throw new AggregateError(failures, "Task result recovery requires inspection");
+  }
+  prepareResultContext(masterId: string, threadId: string, input: string): Promise<TaskResultContext | null> {
+    return this.resultStore.prepareContext(masterId, threadId, input, async notice => {
+      if (!this.runs.some(run => run.config.runId === notice.runId && run.configSha256 === notice.configSha256)) return false;
+      const source = await this.resultSource(notice.runId);
+      return Boolean(source && source.sourceSha256 === notice.sourceSha256 && source.core.configSha256 === notice.configSha256);
+    });
+  }
   async capacitySnapshot() {
     const state = (await this.scheduler.read()).state;
     if (!state || !state.roleLimits) throw new Error("Task role capacity not configured");
@@ -559,6 +602,7 @@ export class LocalTaskService {
       void this.pump().catch(() => {});
     } catch {
       await writeNew(join(this.root, `${id}.error.json`), { error: "実行前の確認に失敗しました。契約・認証・checkout・台帳を確認してください。" });
+      await this.publishResult(id);
     }
     return this.snapshot(id);
   }
@@ -594,10 +638,14 @@ export class LocalTaskService {
             const current = (await this.scheduler.read()).state?.entries.find((item) => item.work.id === id);
             if (current?.status === "running") await this.scheduler.append({ key: `${id}:ui-unknown`, at: new Date().toISOString(),
               action: { type: "unknown", workId: id, reason: "UI runner stopped without a confirmed terminal outcome" } });
-          }).finally(() => {
-            this.active.delete(id); this.prepared.delete(id); this.approvals.delete(id); void this.pump().catch(() => {});
+          }).finally(async () => {
+            this.active.delete(id); this.prepared.delete(id); this.approvals.delete(id);
+            try { await this.publishResult(id); } catch { /* durable Task facts remain available for recovery */ }
+            void this.pump().catch(() => {});
           }).catch(() => {});
         this.active.set(id, { controller, promise });
+        this.settlements.add(promise);
+        void promise.then(() => this.settlements.delete(promise));
         // Read fresh capacity after the next dispatch claim rather than using this snapshot again.
         break;
       }
@@ -617,6 +665,7 @@ export class LocalTaskService {
         this.prepared.delete(id);
         await this.scheduler.append({ key: `${id}:ui-cancel`, at: new Date().toISOString(),
           action: { type: "cancel_queued", workId: id, reason: "Authenticated browser requested cancellation" } });
+        await this.publishResult(id);
       } else throw new Error("No live process handle; inspect provider and checkout before reconciliation");
     }
     return this.snapshot(id);
@@ -642,6 +691,6 @@ export class LocalTaskService {
   async close(): Promise<void> {
     this.closing = true;
     for (const entry of this.active.values()) entry.controller.abort();
-    await Promise.allSettled([...this.active.values()].map((entry) => entry.promise));
+    await Promise.allSettled([...this.settlements]);
   }
 }

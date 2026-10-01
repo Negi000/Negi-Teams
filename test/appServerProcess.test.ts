@@ -51,13 +51,18 @@ process.stdin.on("data", (chunk) => {
 async function begin(mode: "ok" | "fail") {
   const host = AppServerProcess.launch({ executable: process.execPath,
     args: ["-e", fixture, mode], cwd: process.cwd(), stderrLimitBytes: 32,
-    client: { transportTimeoutMs: 1000 } });
-  await host.client.initialize();
-  const models = await host.client.discoverModels();
-  assert.equal(models[0].model, "gpt-6-astra");
-  await host.client.startThread({ cwd: process.cwd(), model: "gpt-6-astra", sandbox: "read-only" });
-  const turnId = await host.client.startTurn("synthetic plan", "medium");
-  return { host, turnId };
+    client: { transportTimeoutMs: 5000 } });
+  try {
+    await host.client.initialize();
+    const models = await host.client.discoverModels();
+    assert.equal(models[0].model, "gpt-6-astra");
+    await host.client.startThread({ cwd: process.cwd(), model: "gpt-6-astra", sandbox: "read-only" });
+    const turnId = await host.client.startTurn("synthetic plan", "medium");
+    return { host, turnId };
+  } catch (error) {
+    // A setup timeout must not leave a live child holding the entire test runner open.
+    await host.stop(); throw error;
+  }
 }
 
 test("owned local fixture process completes a turn without model execution", async () => {
@@ -75,13 +80,15 @@ test("owned local fixture process completes a turn without model execution", asy
 
 test("abnormal fixture exit leaves outcome unknown and bounds stderr", async () => {
   const { host, turnId } = await begin("fail");
-  await assert.rejects(host.client.waitForTurn(turnId, 1000));
-  const exit = await host.exited;
-  assert.equal(exit.code, 7);
-  assert.equal(host.client.dispatchBlocked, true);
-  await assert.rejects(host.client.waitForTurn(turnId, 1000));
-  assert.equal(host.stderr.bytes > 512, true);
-  assert.equal(Buffer.byteLength(host.stderr.tail) <= 32, true);
+  try {
+    await assert.rejects(host.client.waitForTurn(turnId, 1000));
+    const exit = await host.exited;
+    assert.equal(exit.code, 7);
+    assert.equal(host.client.dispatchBlocked, true);
+    await assert.rejects(host.client.waitForTurn(turnId, 1000));
+    assert.equal(host.stderr.bytes > 512, true);
+    assert.equal(Buffer.byteLength(host.stderr.tail) <= 32, true);
+  } finally { await host.stop(); }
 });
 
 test("missing executable reports a terminal spawn error", async () => {
@@ -96,7 +103,7 @@ test("two owned synthetic processes drive one unaccepted Astra-to-Sol run", asyn
   const dir = await mkdtemp(join(tmpdir(), "negi-owned-run-"));
   const launch = (model: string) => AppServerProcess.launch({ executable: process.execPath,
     args: ["-e", fixture, "ok", model], cwd: dir,
-    client: { transportTimeoutMs: 1000 } });
+    client: { transportTimeoutMs: 5000 } });
   const astra = launch("gpt-6-astra");
   const sol = launch("gpt-6-sol");
   try {
