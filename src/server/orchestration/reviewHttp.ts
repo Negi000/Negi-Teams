@@ -4,6 +4,7 @@ import type { ReviewFeedback } from "./reviewChain.ts";
 import type { LocalReviewService } from "./reviewService.ts";
 import { isReviewRequestId } from "./humanReviewProof.ts";
 import { reviewPageHtml } from "./reviewPage.ts";
+import type { ReviewOverview } from "../../shared/workspace.ts";
 
 function json(res: ServerResponse, code: number, value: unknown): void {
   res.writeHead(code, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
@@ -47,7 +48,23 @@ export function createReviewHttp(service: LocalReviewService | null, auth: AuthC
         "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY" });
       res.end(reviewPageHtml()); return true;
     }
-    if (url.pathname === "/api/reviews" && req.method === "GET") { json(res, 200, service.list()); return true; }
+    if (url.pathname === "/api/reviews" && req.method === "GET") {
+      if (url.searchParams.get("summary") !== "1") { json(res, 200, service.list()); return true; }
+      const items = service.list(), views: ReviewOverview[] = [];
+      for (let offset = 0; offset < items.length; offset += 6) {
+        views.push(...await Promise.all(items.slice(offset, offset + 6).map(async (item): Promise<ReviewOverview> => {
+          try {
+            const v = await service.snapshot(item.id);
+            return { id: v.id, title: v.title, status: v.status, canAccept: v.canAccept,
+              qualityIssue: v.qualityIssue, integrityError: v.integrityError };
+          } catch {
+            return { ...item, status: "unknown", canAccept: false, qualityIssue: false,
+              integrityError: "現在の版を読み取れません。詳細を確認してください。" };
+          }
+        })));
+      }
+      json(res, 200, views); return true;
+    }
     const match = url.pathname.match(/^\/api\/reviews\/([a-zA-Z0-9._-]+)(?:\/(accept|feedback|revoke))?$/);
     if (!match) { json(res, 404, { error: "レビュー対象がありません。" }); return true; }
     try {

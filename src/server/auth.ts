@@ -11,6 +11,7 @@
 // - トークン照合は定数時間比較（timingSafeEqual）。失敗には軽いレート制限＋固定ディレイ。
 
 import type { IncomingMessage } from "node:http";
+import { material3Styles, negiBrand } from "../shared/material3.ts";
 import { timingSafeEqual } from "node:crypto";
 
 /** 認証設定。token=null は「EBI_AUTH_TOKEN 未設定」を表す。 */
@@ -178,52 +179,9 @@ export function delay(ms: number): Promise<void> {
 export function loginPageHtml(returnTo = "/"): string {
   const destination = ["/reviews", "/tasks"].includes(returnTo) ? returnTo : "/";
   return `<!doctype html>
-<html lang="ja">
-<head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-<title>ebi-team 🦐 ログイン</title>
-<style>
-  * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; }
-  body {
-    background: #0f1115; color: #e6e8ee;
-    font-family: "Hiragino Sans", "Noto Sans JP", system-ui, sans-serif;
-    display: flex; align-items: center; justify-content: center;
-    padding: 24px;
-    padding-top: max(24px, env(safe-area-inset-top));
-    padding-bottom: max(24px, env(safe-area-inset-bottom));
-  }
-  .card {
-    width: 100%; max-width: 360px;
-    background: #171a21; border: 1px solid #2a2f3a; border-radius: 12px;
-    padding: 28px 24px;
-  }
-  h1 { font-size: 20px; margin: 0 0 4px; }
-  .sub { font-size: 12px; color: #8b93a7; margin: 0 0 20px; }
-  label { display: block; font-size: 12px; color: #8b93a7; margin: 0 0 6px; }
-  input[type="password"] {
-    width: 100%; background: #1f2330; border: 1px solid #2a2f3a; color: #e6e8ee;
-    border-radius: 8px; padding: 12px; font-size: 16px; /* iOS 自動ズーム抑止のため 16px */
-  }
-  button {
-    width: 100%; margin-top: 16px; background: #ff8a5b; color: #21130c;
-    border: none; border-radius: 8px; padding: 13px; font-weight: 700; font-size: 15px;
-    cursor: pointer;
-  }
-  button:disabled { opacity: 0.6; cursor: default; }
-  .err { color: #e05b5b; font-size: 13px; margin-top: 14px; min-height: 18px; }
-</style>
-</head>
-<body>
-  <form class="card" id="f">
-    <h1>🦐 ebi-team</h1>
-    <p class="sub">アクセストークンを入力してください</p>
-    <label for="t">EBI_AUTH_TOKEN</label>
-    <input id="t" type="password" autocomplete="current-password" autofocus inputmode="text" />
-    <button id="b" type="submit">ログイン</button>
-    <div class="err" id="e"></div>
-  </form>
+<html lang="ja"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>ログイン · Negi-Teams</title><link rel="icon" type="image/svg+xml" href="/negi-icon.svg"><style>${material3Styles}
+html,body{min-height:100%;}.negi-ui{min-height:100svh;display:grid;place-items:center;padding:24px max(16px,env(safe-area-inset-right)) max(24px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left));}.login-panel{width:100%;max-width:440px}.login-brand{margin-bottom:40px}.login-panel h1{font-size:32px;margin-bottom:12px}.login-panel .md-surface{padding:32px}.login-panel label{margin-top:24px}.login-panel input{font-size:16px}.login-panel button{width:100%;margin-top:20px}.login-panel #e{min-height:24px;margin-top:14px}
+</style></head><body class="negi-ui"><main class="login-panel"><div class="login-brand">${negiBrand()}</div><form class="md-surface" id="f"><div class="md-eyebrow">WORKSPACE ACCESS</div><h1>ログイン</h1><p class="muted">アクセストークンでワークスペースを開きます。</p><label for="t">アクセストークン<input id="t" type="password" autocomplete="current-password" autofocus inputmode="text" required></label><button id="b" type="submit" class="md-primary">ワークスペースを開く</button><div id="e" class="md-message" role="alert"></div></form></main>
 <script>
   var f = document.getElementById("f");
   var t = document.getElementById("t");

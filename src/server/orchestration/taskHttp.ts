@@ -3,6 +3,7 @@ import { parseCookie, tokenMatches, type AuthConfig } from "../auth.ts";
 import type { LocalTaskService } from "./taskService.ts";
 import { isReviewRequestId } from "./humanReviewProof.ts";
 import { taskPageHtml } from "./taskPage.ts";
+import type { TaskOverview } from "../../shared/workspace.ts";
 
 function json(res: ServerResponse, code: number, value: unknown) {
   res.writeHead(code, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
@@ -43,7 +44,25 @@ export function createTaskHttp(service: LocalTaskService | null, auth: AuthConfi
         "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY" });
       res.end(taskPageHtml()); return true;
     }
-    if (url.pathname === "/api/tasks" && req.method === "GET") { json(res, 200, service.list()); return true; }
+    if (url.pathname === "/api/tasks" && req.method === "GET") {
+      if (url.searchParams.get("summary") !== "1") { json(res, 200, service.list()); return true; }
+      const items = service.list(), views: TaskOverview[] = [];
+      // Keep read/check concurrency bounded even for a full 100-run catalog.
+      for (let offset = 0; offset < items.length; offset += 6) {
+        views.push(...await Promise.all(items.slice(offset, offset + 6).map(async (item): Promise<TaskOverview> => {
+          try {
+            const v = await service.snapshot(item.id);
+            return { id: v.id, title: v.title, project: v.project, status: v.status, canStart: v.canStart,
+              live: v.live, reviewId: v.reviewId, approvalCount: v.approvals.length,
+              resultRevisionCount: v.resultRevisionCount, error: v.error };
+          } catch {
+            return { ...item, project: null, status: "unknown", canStart: false, live: false, reviewId: null,
+              approvalCount: 0, resultRevisionCount: 0, error: "現在の状態を読み取れません。詳細を確認してください。" };
+          }
+        })));
+      }
+      json(res, 200, views); return true;
+    }
     const match = url.pathname.match(/^\/api\/tasks\/([a-zA-Z0-9._-]+)(?:\/(start|stop|approval))?$/);
     if (!match) { json(res, 404, { error: "Taskがありません。" }); return true; }
     try {

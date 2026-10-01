@@ -1,6 +1,8 @@
-# 🦐 ebi-team
+# Negi-Teams
 
 Negi-Teamsの[Phase 0〜8実装・受入の現在地](docs/negi-teams-implementation-status.md)に、実証済みの範囲と残る判断をまとめています。
+
+UIは[Material 3 Expressiveに再設計](docs/negi-teams/material3-expressive-ui.md)しました。作業一覧を入口に、Taskの実行と成果レビューへ移動します。PCのナビゲーションrail・一覧/詳細・レビュー操作paneと、スマホの下部ナビゲーション・単一詳細を用意しています。以下の接続・運用機能は元のebi-teamを基盤にしています。
 
 Negi-Teams Phase 0–1 の読み取り専用 Codex 履歴診断は [導入・検証手順](docs/negi-teams-phase0-phase1.md) を参照してください。既存の実行機能とは独立したローカル CLI です。
 
@@ -206,7 +208,7 @@ ops/clean-generated-images.sh --dry-run                            # ~/.codex/ge
 
 バックエンドの解決順は **spawn 引数 `backend` > 役割の `backend` > `defaultBackend` > env `EBI_BACKEND` > `claude`**。未実装・未知の id は黙って claude に落とさず明示エラーになります。**master（統括役）は何を設定しても常に claude 固定**です（統括系を落とさないための fail-safe）。後述の「master チャット UI」で `brain` を明示したときだけ、master の頭脳を別 CLI にできます（既定は claude）。
 
-spawn 時の明示指定は master の MCP ツール（`spawn_ebi` / `spawn_engineer` / `send_message` の `backend` 引数）、制御API（`POST /control/spawn` の `backend`）、UI ヘッダの backend セレクトから行えます。
+spawn 時の明示指定は master の MCP ツール（`spawn_ebi` / `spawn_engineer` / `send_message` の `backend` 引数）、制御API（`POST /control/spawn` の `backend`）、UIの「担当を追加」ダイアログの接続先から行えます。
 
 `permissionMode` は抽象語彙で、各 CLI のフラグへ写像されます（**`plan` の厳密な等価物は codex / gemini に無く近似**です）。
 

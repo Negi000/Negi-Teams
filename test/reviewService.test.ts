@@ -133,9 +133,13 @@ test("review HTTP requires a browser cookie and same-origin mutation even on loo
     const cookie = { Cookie: `ebi_auth=${token}` };
     try {
       assert.equal((await fetch(`${url}/api/reviews`)).status, 401);
+      assert.equal((await fetch(`${url}/api/reviews?summary=1`)).status, 401);
       assert.equal((await fetch(`${url}/api/reviews`, { headers: { Authorization: `Bearer ${token}` } })).status, 401);
       assert.equal((await fetch(`${url}/reviews`, { redirect: "manual" })).headers.get("location"), "/login?returnTo=/reviews");
       assert.equal((await fetch(`${url}/reviews`, { headers: cookie })).status, 200);
+      const summary = await (await fetch(`${url}/api/reviews?summary=1`, { headers: cookie })).json();
+      assert.equal(summary[0].status, "awaiting_review"); assert.equal(summary[0].canAccept, true);
+      assert.equal(summary[0].content, undefined); assert.equal(summary[0].artifactSha256, undefined);
       const input = { artifactSha256, requestId: randomUUID() };
       for (const origin of [null, "https://outside.example"]) {
         const headers = { ...cookie, "Content-Type": "application/json", ...(origin ? { Origin: origin } : {}) };
@@ -146,6 +150,8 @@ test("review HTTP requires a browser cookie and same-origin mutation even on loo
         headers: { ...cookie, "Content-Type": "application/json", Origin: url }, body: JSON.stringify(input) });
       assert.equal(result.status, 200);
       assert.equal((await result.json()).status, "accepted");
+      const acceptedSummary = await (await fetch(`${url}/api/reviews?summary=1`, { headers: cookie })).json();
+      assert.equal(acceptedSummary[0].status, "accepted"); assert.equal(acceptedSummary[0].canAccept, false);
     } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
   });
 });

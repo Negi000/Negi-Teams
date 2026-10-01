@@ -4,6 +4,7 @@ import { lstat, mkdir, open, readFile, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { HumanReviewProofStore, type HumanReviewReceipt } from "./humanReviewProof.ts";
 import { FileReviewChain, type ReviewEvent, type ReviewFeedback, type ReviewState } from "./reviewChain.ts";
+import { taskReviewPresentation, type TaskReviewPresentation } from "./reviewPresentation.ts";
 
 export interface RegisteredReviewCase {
   id: string;
@@ -29,6 +30,7 @@ export interface ReviewCaseView {
   artifactSha256: string;
   previousSha256: string | null;
   content: string;
+  presentation: TaskReviewPresentation | null;
   verificationSummary: string;
   limits: string;
   integrityError: string | null;
@@ -311,7 +313,7 @@ export class LocalReviewService {
       objectiveId: state.artifacts.at(-1)!.objectiveId,
       artifactSha256: item.verifiedArtifactSha256,
       previousSha256: state.artifacts.length > 1 ? state.artifacts.at(-2)!.sha256 : null,
-      content: bytes.toString("utf8"), verificationSummary: item.verificationSummary,
+      content: bytes.toString("utf8"), presentation: taskReviewPresentation(bytes.toString("utf8")), verificationSummary: item.verificationSummary,
       limits: item.limits, integrityError,
       status: state.revoked ? "revoked" : state.acceptance ? "accepted" : "awaiting_review",
       canAccept: !integrityError && state.acceptance === null && state.revoked === null,

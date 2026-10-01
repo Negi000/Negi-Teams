@@ -126,7 +126,7 @@ export class ChatPanel {
 
     // ---- ヘッダ（状態 / コスト・文脈 / 新しい会話）----
     this.head = div("chat-head");
-    const title = span("chat-title", "💬 master");
+    const title = span("chat-title", "統括");
     this.stateBadge = span("chat-state", stateLabel(this.state));
     this.statsEl = span("chat-stats", "");
     this.newBtn = document.createElement("button");
@@ -163,7 +163,8 @@ export class ChatPanel {
     this.input = document.createElement("textarea");
     this.input.className = "chat-input";
     this.input.rows = 1;
-    this.input.placeholder = "master に話しかける（Enter で送信 / Shift+Enter で改行）";
+    this.input.placeholder = "依頼や相談を入力（Enter で送信 / Shift+Enter で改行）";
+    this.input.setAttribute("aria-label", "統括へのメッセージ");
     this.input.addEventListener("keydown", (e) => this.onKeyDown(e));
     this.input.addEventListener("input", () => this.autoGrow());
     this.input.addEventListener("paste", (e) => this.onPaste(e));

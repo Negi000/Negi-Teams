@@ -76,7 +76,7 @@ test("authenticated Task requests dispatch once and stop at review, including co
       const view = await service.snapshot("synthetic-run"), id = randomUUID();
       assert.equal(view.canStart, true);
       await Promise.all([service.start(view.id, view.configSha256, id), service.start(view.id, view.configSha256, id)]);
-      await until(async () => (await service.snapshot(view.id)).status === "ready_for_review");
+      await until(async () => { const state = await service.snapshot(view.id); return state.status === "ready_for_review" && !state.live; });
       const result = await service.snapshot(view.id);
       assert.equal(count, 1); assert.equal(result.canStart, false); assert.equal(result.acceptedBy, null);
       assert.equal(result.attempts.length, 2);
@@ -194,8 +194,13 @@ test("Task HTTP requires cookie authentication and same-origin, pinned mutations
     const url = `http://127.0.0.1:${address.port}`, cookie = { Cookie: "ebi_auth=synthetic-task-login" };
     try {
       assert.equal((await fetch(`${url}/api/tasks`)).status, 401);
+      assert.equal((await fetch(`${url}/api/tasks?summary=1`)).status, 401);
       assert.equal((await fetch(`${url}/api/tasks`, { headers: { Authorization: "Bearer synthetic-task-login" } })).status, 401);
       const view = await (await fetch(`${url}/api/tasks/synthetic-run`, { headers: cookie })).json();
+      const summary = await (await fetch(`${url}/api/tasks?summary=1`, { headers: cookie })).json();
+      assert.equal(summary[0].status, "not_started"); assert.equal(summary[0].canStart, true);
+      assert.equal(summary[0].approvalCount, 0); assert.equal(count, 0);
+      assert.equal(summary[0].checkout, undefined); assert.equal(summary[0].configSha256, undefined);
       const input = { configSha256: view.configSha256, requestId: randomUUID() };
       const post = (origin: string | null, value = input) => fetch(`${url}/api/tasks/synthetic-run/start`, {
         method: "POST", headers: { ...cookie, "Content-Type": "application/json", ...(origin ? { Origin: origin } : {}) },
@@ -205,18 +210,27 @@ test("Task HTTP requires cookie authentication and same-origin, pinned mutations
       assert.equal((await post(url, { ...input, configSha256: "0".repeat(64) })).status, 409);
       assert.equal(count, 0);
       assert.equal((await post(url)).status, 200);
-      await until(async () => (await service.snapshot(view.id)).status === "ready_for_review");
+      await until(async () => { const state = await service.snapshot(view.id); return state.status === "ready_for_review" && !state.live; });
       assert.equal(count, 1);
+      const completedSummary = await (await fetch(`${url}/api/tasks?summary=1`, { headers: cookie })).json();
+      assert.equal(completedSummary[0].status, "ready_for_review");
+      assert.equal(completedSummary[0].canStart, false); assert.equal(completedSummary[0].live, false);
     } finally { await service.close(); await new Promise<void>((resolve) => server.close(() => resolve())); }
   });
 });
 
 test("Task page script parses and keeps model output out of HTML interpolation", () => {
   const html = taskPageHtml();
-  const script = html.match(/<script>([\s\S]*?)<\/script>/)?.[1];
-  assert.ok(script); assert.doesNotThrow(() => new Script(script));
-  assert.doesNotMatch(script, /innerHTML|localStorage/);
-  assert.match(html, /min-height:44px/);
+  const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(match => match[1]);
+  assert.ok(scripts.length >= 1);
+  for (const script of scripts) {
+    assert.doesNotThrow(() => new Script(script));
+    assert.doesNotMatch(script, /innerHTML|sessionStorage|indexedDB/);
+    // The only persisted browser value is the non-sensitive theme preference.
+    const storageKeys = [...script.matchAll(/localStorage\.(?:getItem|setItem)\(['"]([^'"]+)['"]/g)].map(match => match[1]);
+    assert.ok(storageKeys.every(key => key === "negi-theme"));
+  }
+  assert.match(html, /min-height:48px/);
 });
 
 test("a frozen Git review binds signed acceptance and revocation to the corresponding Task", async () => {

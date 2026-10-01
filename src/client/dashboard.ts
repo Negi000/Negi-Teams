@@ -69,7 +69,7 @@ export class Dashboard {
 
     const title = document.createElement("h2");
     title.className = "dash-title";
-    title.textContent = "📊 使用状況ダッシュボード";
+    title.textContent = "使用状況";
     this.el.appendChild(title);
 
     const hasUnsupported = this.agents.some((a) => !backendReportsUsage(a.backend));
@@ -80,7 +80,7 @@ export class Dashboard {
       const empty = document.createElement("p");
       empty.className = "dash-empty";
       empty.textContent =
-        "データ待ち（各エビの statusLine が更新されると反映されます）。idle のエビは値が古くなることがあります。";
+        "使用状況の更新を待っています。待機中の担当は値が古くなることがあります。";
       this.el.appendChild(empty);
       return;
     }
@@ -103,7 +103,7 @@ export class Dashboard {
 
     const head = document.createElement("h3");
     head.className = "dash-subtitle";
-    head.textContent = "アカウント レート制限（全エビ共通）";
+    head.textContent = "アカウントの利用枠（全担当で共有）";
     box.appendChild(head);
 
     box.appendChild(this.renderRateRow("5 時間枠", rl.fiveHour));
@@ -163,7 +163,7 @@ export class Dashboard {
 
     const head = document.createElement("h3");
     head.className = "dash-subtitle";
-    head.textContent = "エビ別 使用状況";
+    head.textContent = "担当ごとの使用状況";
     box.appendChild(head);
 
     const table = document.createElement("table");

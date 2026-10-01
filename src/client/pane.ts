@@ -64,8 +64,8 @@ export class Pane {
     if (this.onSummarize) {
       const btn = document.createElement("button");
       btn.className = "summarize";
-      btn.textContent = "🔍 要約";
-      btn.title = "サブスク(claude CLI / Haiku)でこのエビの直近の状況を要約（オンデマンド）";
+      btn.textContent = "要約";
+      btn.title = "サブスクリプションのモデルで、この担当の直近の状況を要約";
       btn.addEventListener("click", (e) => {
         e.stopPropagation();
         this.onSummarize?.(this.id);
@@ -80,7 +80,7 @@ export class Pane {
     const badge = document.createElement("span");
     badge.className = `kind-badge kind-${record.kind}`;
     badge.textContent =
-      record.kind === "master" ? "👑 master" : record.kind === "supervisor" ? "🛡 supervisor" : "dynamic";
+      record.kind === "master" ? "統括" : record.kind === "supervisor" ? "監督" : "担当";
     if (record.model) badge.title = `model: ${record.model}`;
     idWrap.append(document.createTextNode(" "), badge);
 
@@ -100,7 +100,8 @@ export class Pane {
       const killBtn = document.createElement("button");
       killBtn.className = "kill";
       killBtn.textContent = "✕";
-      killBtn.title = "この agent を kill";
+      killBtn.title = "この担当を終了";
+      killBtn.setAttribute("aria-label", "この担当を終了");
       killBtn.addEventListener("click", (e) => {
         e.stopPropagation();
         this.onKill(this.id);
