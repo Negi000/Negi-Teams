@@ -1,10 +1,12 @@
 // Read-only MasterBrain bridge for a deliberately supplied App Server process.
-// No executable is selected here, and the normal master factory does not use it.
+// No executable is selected here. Task tools are supplied by the local server only.
 import { AppServerProcess, type AppServerProcessOptions } from "./appServerProcess.ts";
 import { unsupportedOf, type MasterBrain, type MasterBrainCapabilities,
   type MasterBrainInput, type MasterBrainStartOptions, type MasterEvent,
   type MasterUsage } from "./brain.ts";
 import type { CodexTurnObservation } from "./appServerClient.ts";
+import type { RegisteredTaskTools } from "../orchestration/taskDispatchTools.ts";
+import { subscriptionChildEnv } from "./boundedAppServer.ts";
 
 type RecordValue = Record<string, unknown>;
 function record(value: unknown): RecordValue | null {
@@ -22,7 +24,15 @@ export interface CodexAppServerBrainOptions {
   effort: string;
   turnTimeoutMs: number;
   launch?: (options: AppServerProcessOptions) => AppServerProcess;
+  taskTools?: RegisteredTaskTools;
+  subscriptionOnly?: boolean;
 }
+
+const taskInstructions = "\n登録済みTaskの委任はnegi_list_tasks、negi_read_task、negi_dispatch_taskを使う。" +
+  "委任前に固定契約と現在の状態を読み、カタログのconfigSha256を使う。" +
+  "自由文のPTY起動やshellによる委任は行わない。未登録の依頼はTask Contractの確定が必要と伝える。" +
+  "操作結果が不明な場合は再委任せずnegi_read_taskで照合する。検証済みと人間受入済みを区別する。" +
+  "実行許可、成果受入、契約変更はこのツールの権限外。";
 
 export const CODEX_READ_ONLY_BRAIN_CAPABILITIES: MasterBrainCapabilities = {
   partialText: true, thinking: false, permissionPrompt: false,
@@ -72,8 +82,15 @@ export class CodexAppServerBrain implements MasterBrain {
     this.stopping = false;
     const process = (this.options.launch ?? AppServerProcess.launch)({
       executable: this.options.executable, args: this.options.args, cwd: options.cwd,
+      ...(this.options.subscriptionOnly ? { env: subscriptionChildEnv() } : {}),
       client: {
         onNotice: (method, params) => this.onNotice(method, params),
+        ...(this.options.taskTools ? { onDynamicToolCall: async (call) => {
+          this.emit({ kind: "toolCall", id: call.callId, name: call.tool, input: call.arguments });
+          const result = await this.options.taskTools!.invoke(call);
+          this.emit({ kind: "toolResult", id: call.callId, ok: result.success, content: result.text });
+          return result;
+        } } : {}),
         onClose: (reason) => {
           if (!this.stopping) this.emit({ kind: "notice", level: "error",
             text: `App Server 接続終了。turn結果の照合が必要です: ${reason.message}` });
@@ -87,16 +104,22 @@ export class CodexAppServerBrain implements MasterBrain {
     });
     try {
       await process.client.initialize();
+      if (this.options.subscriptionOnly && (await process.client.readAccountMode()).type !== "chatgpt")
+        throw new Error("Codex master requires ChatGPT subscription authentication");
       const catalog = await process.client.discoverModels();
       if (!catalog.some((model) => model.model === options.model &&
           model.efforts.includes(this.options.effort) && model.inputModalities.includes("text"))) {
         throw new Error("requested model, effort or text input unavailable in account catalog");
       }
       const identity = await process.client.startThread({ cwd: options.cwd, model: options.model,
-        sandbox: "read-only", ...(options.systemPrompt ? { instructions: options.systemPrompt } : {}) });
+        sandbox: "read-only",
+        ...((options.systemPrompt || this.options.taskTools) ? {
+          instructions: (options.systemPrompt ?? "") + (this.options.taskTools ? taskInstructions : "") } : {}),
+        ...(this.options.taskTools ? { dynamicTools: this.options.taskTools.definitions } : {}) });
       if (identity.rerouted) throw new Error("App Server rerouted the requested model");
       this.emit({ kind: "session", sessionId: identity.threadId, model: identity.resolvedModel,
-        apiKeySource: null, mcpServers: [], capabilities: ["read-only"] });
+        apiKeySource: null, mcpServers: [], capabilities: ["read-only",
+          ...(this.options.taskTools ? ["registered-task-tools"] : [])] });
     } catch (error) {
       this.stopping = true;
       await process.stop();

@@ -134,7 +134,8 @@ test("signed feedback becomes a scoped candidate, explicit knowledge approval re
     assert.equal((await f.reviews.snapshot("synthetic")).status, "awaiting_review");
     const next = await f.tasks.snapshot("next-run");
     await f.tasks.start(next.id, next.configSha256, randomUUID());
-    const deadline = Date.now() + 15_000;
+    // Full-suite Git preview capture can run beside other integration fixtures on Windows.
+    const deadline = Date.now() + 45_000;
     while (true) {
       const state = await f.tasks.snapshot(next.id);
       if (!state.live && state.status === "ready_for_review") break;

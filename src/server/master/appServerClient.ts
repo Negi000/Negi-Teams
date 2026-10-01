@@ -1,5 +1,5 @@
 // Version-sensitive Codex App Server client, checked against locally generated
-// 0.158.0-alpha.2.1 protocol types. It owns streams, never spawns a process.
+// 0.158.0-alpha.2.1 types and 0.159.2 experimental dynamic tools. It owns streams, never spawns a process.
 import type { Readable, Writable } from "node:stream";
 import { AppServerTransport } from "./appServerTransport.ts";
 
@@ -65,7 +65,16 @@ export interface AppServerClientOptions {
   onNotice?: (method: string, params: unknown) => void;
   onApproval?: (request: CodexApprovalRequest) => void;
   onClose?: (reason: Error) => void;
+  /** Only server-owned function tools; never forwarded from browser/model input. */
+  onDynamicToolCall?: (request: CodexDynamicToolCall) => Promise<CodexDynamicToolResult>;
 }
+export interface CodexDynamicToolDefinition {
+  type: "function"; name: string; description: string; inputSchema: Record<string, unknown>;
+}
+export interface CodexDynamicToolCall {
+  threadId: string; turnId: string; callId: string; tool: string; arguments: unknown;
+}
+export interface CodexDynamicToolResult { success: boolean; text: string }
 
 export class CodexAppServerClient {
   private readonly transport: AppServerTransport;
@@ -87,6 +96,8 @@ export class CodexAppServerClient {
   }>();
   private readonly approvals = new Map<string, CodexApprovalRequest>();
   private readonly approvalTimers = new Map<string, NodeJS.Timeout>();
+  private dynamicToolNames = new Set<string>();
+  private readonly dynamicCalls = new Map<string, { fingerprint: string; result: Promise<CodexDynamicToolResult> }>();
 
   constructor(readable: Readable, writable: Writable, private readonly options: AppServerClientOptions = {}) {
     this.now = options.now ?? Date.now;
@@ -130,7 +141,7 @@ export class CodexAppServerClient {
     if (this.initialized) return;
     const result = record(await this.transport.request("initialize", {
       clientInfo: { name: "negi-teams", title: "Negi-Teams", version: "0.1.0" },
-      capabilities: null,
+      capabilities: this.options.onDynamicToolCall ? { experimentalApi: true } : null,
     }));
     requiredString(result?.userAgent, "userAgent");
     this.transport.notify("initialized", {});
@@ -174,7 +185,7 @@ export class CodexAppServerClient {
   }
 
   async startThread(options: { cwd: string; model: string; sandbox: "read-only" | "workspace-write";
-    instructions?: string }): Promise<CodexThreadIdentity> {
+    instructions?: string; dynamicTools?: CodexDynamicToolDefinition[] }): Promise<CodexThreadIdentity> {
     this.requireInitialized();
     if (this.identity || this.threadRequestPending || this.needsReconciliation || !options.cwd || !options.model) {
       throw new Error("thread already started, uncertain, or options missing");
@@ -182,12 +193,20 @@ export class CodexAppServerClient {
     if (!this.catalog?.some((x) => x.model === options.model)) {
       throw new Error(`requested model not in discovered account catalog: ${options.model}`);
     }
+    const tools = options.dynamicTools ?? [];
+    if (tools.length > 20 || (tools.length && !this.options.onDynamicToolCall) ||
+        tools.some(tool => tool.type !== "function" || !/^[a-zA-Z0-9_]{1,80}$/.test(tool.name) ||
+          !tool.description.trim() || tool.description.length > 2000 || !record(tool.inputSchema)) ||
+        new Set(tools.map(tool => tool.name)).size !== tools.length || JSON.stringify(tools).length > 32_000)
+      throw new Error("Dynamic tool registry invalid");
+    this.dynamicToolNames = new Set(tools.map(tool => tool.name));
     this.threadRequestPending = true;
     try {
       const result = record(await this.transport.request("thread/start", {
         cwd: options.cwd, model: options.model, sandbox: options.sandbox,
         approvalPolicy: "on-request", approvalsReviewer: "user",
         ...(options.instructions ? { baseInstructions: options.instructions } : {}),
+        ...(tools.length ? { dynamicTools: structuredClone(tools) } : {}),
       }));
       const threadId = requiredString(record(result?.thread)?.id, "thread.id");
       const resolvedModel = requiredString(result?.model, "model");
@@ -238,6 +257,7 @@ export class CodexAppServerClient {
     if (!capability?.efforts.includes(effort)) throw new Error(`effort not supported: ${effort}`);
     if (!capability.inputModalities.includes("text")) throw new Error("model does not support text input");
     this.turnRequestPending = true;
+    this.dynamicCalls.clear();
     try {
       const result = record(await this.transport.request("turn/start", {
         threadId: identity.threadId, input: [{ type: "text", text, text_elements: [] }], effort,
@@ -473,6 +493,7 @@ export class CodexAppServerClient {
   }
 
   private onServerRequest(id: string | number, method: string, params: unknown): void {
+    if (method === "item/tool/call") { this.onDynamicToolRequest(id, params); return; }
     if (method !== "item/commandExecution/requestApproval" &&
         method !== "item/fileChange/requestApproval") {
       this.transport.rejectServerRequest(id, -32601, "Unsupported server request");
@@ -518,5 +539,37 @@ export class CodexAppServerClient {
       this.approvalTimers.delete(key);
       this.transport.rejectServerRequest(id, -32603, "Approval handler failed");
     }
+  }
+  private onDynamicToolRequest(id: string | number, params: unknown): void {
+    const value = record(params), threadId = string(value?.threadId), turnId = string(value?.turnId);
+    const callId = string(value?.callId), tool = string(value?.tool);
+    if (!this.options.onDynamicToolCall || !threadId || !turnId || !callId || callId.length > 200 ||
+        !tool || !this.dynamicToolNames.has(tool) || (value?.namespace !== null && value?.namespace !== undefined) ||
+        threadId !== this.identity?.threadId || turnId !== this.activeTurnId || this.dispatchBlocked ||
+        value?.arguments === undefined || Buffer.byteLength(JSON.stringify(value.arguments)) > 8000) {
+      this.transport.rejectServerRequest(id, -32602, "Dynamic tool identity, registry or arguments mismatch");
+      return;
+    }
+    const key = `${turnId}:${callId}`, fingerprint = JSON.stringify({ tool, arguments: value.arguments });
+    const previous = this.dynamicCalls.get(key);
+    if ((previous && previous.fingerprint !== fingerprint) || (!previous && this.dynamicCalls.size >= 128)) {
+      this.transport.rejectServerRequest(id, -32602, "Dynamic call ID reused or turn call limit reached");
+      return;
+    }
+    const result = previous?.result ?? Promise.resolve().then(() => {
+      if (this.dispatchBlocked || this.activeTurnId !== turnId || this.identity?.threadId !== threadId)
+        throw new Error("Dynamic tool call is no longer active");
+      return this.options.onDynamicToolCall!({ threadId, turnId, callId, tool, arguments: structuredClone(value.arguments) });
+    }).then(result => {
+        if (!result || typeof result.success !== "boolean" || typeof result.text !== "string" ||
+            Buffer.byteLength(result.text) > 24_000) throw new Error("Dynamic result invalid or exceeds limit");
+        return result;
+      }).catch(() => ({ success: false,
+        text: "Task操作の結果を確認できません。再委任せず、Task画面で現在の状態を確認してください。" }));
+    if (!previous) this.dynamicCalls.set(key, { fingerprint, result });
+    void result.then(result => {
+      try { this.transport.respond(id, { contentItems: [{ type: "inputText", text: result.text }], success: result.success }); }
+      catch { /* A disconnected provider must inspect durable Task state before another dispatch. */ }
+    });
   }
 }

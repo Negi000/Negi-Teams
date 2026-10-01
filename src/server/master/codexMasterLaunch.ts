@@ -29,6 +29,6 @@ export function codexMasterLaunchOptions(spec: CodexMasterLaunchSpec,
   const timeoutMs = Number(env.EBI_CODEX_MASTER_TURN_TIMEOUT_MS ?? 120_000);
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 600_000)
     throw new Error("Codex master turn timeout must be 1000..600000 ms");
-  return { executable, args: boundedAppServerArgs(), effort,
-    turnTimeoutMs: timeoutMs };
+  return { executable, args: boundedAppServerArgs(true), effort,
+    turnTimeoutMs: timeoutMs, subscriptionOnly: true };
 }

@@ -17,8 +17,9 @@ test("Codex chat master requires explicit read-only opt-in and a pinned executab
     assert.throws(() => codexMasterLaunchOptions(spec, env), /READ_ONLY_MASTER=1/);
     const active = { ...env, EBI_CODEX_READ_ONLY_MASTER: "1" };
     assert.deepEqual(codexMasterLaunchOptions(spec, active), {
-      executable: exe, args: ["app-server", "--stdio", "--disable", "multi_agent", "--disable", "multi_agent_v2"], effort: "low",
-      turnTimeoutMs: 120_000,
+      executable: exe, args: ["app-server", "--stdio", "--disable", "multi_agent", "--disable", "multi_agent_v2",
+        "-c", 'forced_login_method="chatgpt"', "-c", 'model_provider="openai"'], effort: "low",
+      turnTimeoutMs: 120_000, subscriptionOnly: true,
     });
     assert.throws(() => codexMasterLaunchOptions({ ...spec,
       extraArgs: ["--dangerously-bypass-approvals-and-sandbox"] }, active),

@@ -2,6 +2,8 @@
 
 2026-10-01。`/tasks`は、ローカル管理者が登録した固定Vault Taskを実行する入口です。目的・範囲・不変条件・検証条件を確認してからAstra→Solを開始し、停止、操作承認、検証結果、成果レビューを追えます。ブラウザから実行コマンドやcheckoutパスを作る機能はありません。
 
+登録Taskは[Codex統括からも委任](negi-teams-master-task-tools.md)できます。Task画面と同じ固定契約とschedulerを使い、起動元を記録します。統括の委任は人間の成果受入にはなりません。
+
 ## 設定
 
 知識承認を使う場合は[Phase 6の設定](negi-teams-phase6.md)に従って`NEGI_KNOWLEDGE_CONFIG`を追加します。Taskノートの明示`task_class`をsnapshotへ固定すると、承認済みLessonの適用分類と照合されます。既存snapshotは上書きせず、新しいTask/版の登録として扱ってください。

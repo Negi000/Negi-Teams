@@ -2,6 +2,10 @@
 
 2026-10-01（JST）。基準は `NEGI_TEAMS_MASTER_PLAN.ja.md` のPhase 0〜8と `REQUIREMENTS_TRACEABILITY.ja.md`。この表は実装・合成テスト・実モデル観測・人間受入を分ける。Git管理外の実行証拠も参照しており、実装差分の公開を全Phaseの完了宣言とは扱わない。
 
+追加の[統括から登録Taskへの接続](./negi-teams-master-task-tools.md)では、通常Codex Masterに固定Taskの一覧・完全な契約の読取・同一schedulerへの委任を接続した。起動元は人間受入と別に保存する。実Astraの読取確認と関連TS45件は成功した。Material 3の320px/375px表示と48px角の停止ボタンも確認した。全件の並列試験では知識連携の待ち時間超過、次の試験では旧PTY配送の時間依存による失敗を観測し、直列試験でもPTY待ちとGitの時間切れが出た。全件の成功を今回の確認結果としては主張しない。旧MCP/PTYと常駐統括の全面移行は引き続き未完了。
+
+旧PTY fixtureは固定sleepから描画・idle/busy・queue flushの観測へ変更し、合成heartbeatとテスト側の待機期限を調整した。製品の配送設定は変更していない。最終の関連34件は33成功・1起動待ちタイムアウトで、失敗した1件は個別再実行で成功した。型検査・ビルドも成功。これを全件の一括成功には換算しない。
+
 | Phase | 実施して確認した範囲 | 受入に残る主な条件 |
 |---|---|---|
 | 0 基準 | 既存SHA・dirty状態・起動/テスト・認証/MCP/configの境界を記録。Windowsの標準テスト入口と配送fixtureを修正 | 実CLIのopt-in試験とPOSIX固有試験は別ゲート |

@@ -390,7 +390,7 @@ export class MasterSession {
         this.lastSessionId = ev.sessionId;
         this.lastModel = ev.model;
         const control = ev.mcpServers.find((s) => s.name === "ebi-control");
-        if (!control || control.status !== "connected") {
+        if ((!control || control.status !== "connected") && !ev.capabilities.includes("registered-task-tools")) {
           // R5: 「ツールが見えないまま会話が始まる」静かな故障を、文面ではなく構造で検出する。
           this.handlers.onNotice(
             this.id,

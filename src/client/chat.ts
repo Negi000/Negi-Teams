@@ -941,8 +941,15 @@ function buildItem(
       det.className = `chat-tool state-${item.state}`;
       const sum = document.createElement("summary");
       const icon = item.state === "running" ? "⏳" : item.state === "ok" ? "✅" : "❌";
-      sum.textContent = `🔧 ${item.name} ${icon} ${summarizeToolInput(item.input)}`.trimEnd();
+      const taskLabel = ({ negi_list_tasks: "Task一覧を取得", negi_read_task: "Task契約を確認",
+        negi_dispatch_task: "Taskを委任" } as Record<string, string>)[item.name];
+      sum.textContent = taskLabel ? `${taskLabel} ${icon}` : `🔧 ${item.name} ${icon} ${summarizeToolInput(item.input)}`.trimEnd();
       det.appendChild(sum);
+      if (taskLabel) {
+        const identity = document.createElement("small");
+        identity.textContent = `操作: ${item.name}`;
+        det.appendChild(identity);
+      }
       const inputText = stringifyInput(item.input);
       if (inputText) {
         const pre = document.createElement("pre");

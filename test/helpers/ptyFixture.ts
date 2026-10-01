@@ -12,23 +12,25 @@ export function ptyFixtureLaunch(cwd: string, bridge = false): LaunchParams {
 }
 
 export async function readyPtyFixture(agent: Agent): Promise<Agent> {
-  const deadline = Date.now() + 6000;
-  while (Date.now() < deadline) {
-    if (agent.getScrollback().includes("PTY_FIXTURE_READY") && agent.getStatus() === "idle") return agent;
+  await waitPtyFixture(agent, a => a.getScrollback().includes("PTY_FIXTURE_READY") && a.getStatus() === "idle",
+    "start and become idle");
+  return agent;
+}
+/** Observe fixture output/state; short sleeps cannot synchronize a loaded ConPTY host. */
+export async function waitPtyFixture(agent: Agent, observed: (agent: Agent) => boolean, label: string): Promise<void> {
+  const deadline = Date.now() + 20_000;
+  while (true) {
+    if (observed(agent)) return;
+    if (Date.now() >= deadline) throw new Error(`Local PTY fixture did not ${label}`);
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
-  throw new Error("Local PTY fixture did not start and become idle");
 }
 
 export async function writePtyFixture(agent: Agent, text: string): Promise<void> {
   const mark = agent.scrollbackMark();
   agent.write(text);
-  const deadline = Date.now() + 2000;
-  while (Date.now() < deadline) {
-    if (agent.getStatus() === "busy" && agent.scrollbackSince(mark).includes(text.trim())) return;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error("Local PTY fixture did not echo input and become busy");
+  await waitPtyFixture(agent, a => a.getStatus() === "busy" && a.scrollbackSince(mark).includes(text.trim()),
+    "echo input and become busy");
 }
 
 export async function stopRegistry(registry: Pick<Registry, "list" | "get" | "killAll">): Promise<void> {

@@ -49,7 +49,19 @@ async function writeNew(path: string, value: unknown): Promise<void> {
 }
 interface CatalogRun { title: string; config: VaultRunConfig; configSha256: string;
   snapshotSha256: string; contract: Record<string, unknown> }
-interface StartRequest { runId: string; requestId: string; configSha256: string; at: string }
+export type TaskRequestOrigin = { kind: "browser" } | { kind: "master"; masterId: string;
+  threadId: string; turnId: string; callId: string };
+interface StartRequest { runId: string; requestId: string; configSha256: string; at: string;
+  requestedBy?: TaskRequestOrigin }
+function checkedOrigin(value: TaskRequestOrigin): TaskRequestOrigin {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Task request origin invalid");
+  if (value.kind === "browser" && Object.keys(value).length === 1) return { kind: "browser" };
+  if (value.kind === "master" && Object.keys(value).length === 5 &&
+      [value.masterId, value.threadId, value.turnId, value.callId].every(id => typeof id === "string" &&
+        id.length > 0 && id.length <= 200 && !/[\r\n\0]/.test(id))) return {
+          kind: "master", masterId: value.masterId, threadId: value.threadId, turnId: value.turnId, callId: value.callId };
+  throw new Error("Task request origin invalid");
+}
 export interface TaskRunView {
   id: string; title: string; configSha256: string; project: string; objective: string;
   taskId: string; version: number; baseSha: string; checkout: string;
@@ -63,6 +75,7 @@ export interface TaskRunView {
   reviewId: string | null;
   approvals: Array<TaskOperationApproval & { approvalSha256: string; canDecide: boolean }>;
   resultRevisionCount: number;
+  requestedBy?: TaskRequestOrigin;
 }
 interface Runtime {
   prepare: typeof prepareVaultRun;
@@ -136,6 +149,13 @@ export class LocalTaskService {
     return new LocalTaskService(root, runs, new FileScheduler(schedulerPath!), runtime, operationProofs);
   }
   list(): Array<{ id: string; title: string }> { return this.runs.map((run) => ({ id: run.config.runId, title: run.title })); }
+  /** Fixed catalog metadata for the planner. Does not disclose local paths or run commands. */
+  dispatchCatalog(): Array<{ id: string; title: string; project: string; taskId: string; version: number; configSha256: string }> {
+    return this.runs.map(run => ({ id: run.config.runId, title: run.title, project: String(run.contract.project),
+      taskId: String(run.contract.vaultId), version: Number(run.contract.version), configSha256: run.configSha256 }));
+  }
+  /** Complete pinned Task Contract; provider launch and verification commands stay server-owned. */
+  dispatchContract(id: string): Record<string, unknown> { return structuredClone(this.registered(id).contract); }
   /** Server configuration only; neither paths nor scope are supplied by HTTP. */
   knowledgeRegistrations(): Array<{ vault: string; project: string; checkout: string }> {
     return this.runs.map((run) => ({ vault: run.config.vault,
@@ -444,6 +464,7 @@ export class LocalTaskService {
     if (value && (value.runId !== run.config.runId || value.configSha256 !== run.configSha256 ||
         !isReviewRequestId(value.requestId) || !Number.isFinite(Date.parse(value.at))))
       throw new Error("Stored Task request differs from the registered configuration");
+    if (value?.requestedBy !== undefined) checkedOrigin(value!.requestedBy!);
     return value;
   }
   async snapshot(id: string): Promise<TaskRunView> {
@@ -482,6 +503,7 @@ export class LocalTaskService {
         model: attempt.resolvedModel ?? attempt.requestedModel, state: attempt.state, usage: attempt.usage })) ?? [],
       reviewId: manifest?.review.id ?? null,
       resultRevisionCount: state?.resultRevisions?.length ?? 0,
+      ...(request?.requestedBy ? { requestedBy: structuredClone(request.requestedBy) } : {}),
       approvals: (state?.approvals ?? []).filter((approval) => approval.decision === "pending").map((approval) => {
         const { decision: _decision, ...scope } = approval;
         return { ...scope, approvalSha256: hash(JSON.stringify(scope)),
@@ -489,23 +511,27 @@ export class LocalTaskService {
             this.approvals.get(id)?.has(approval.id) && Date.now() < Date.parse(approval.expiresAt)) };
       }) };
   }
-  async start(id: string, configSha256: string, requestId: string): Promise<TaskRunView> {
+  async start(id: string, configSha256: string, requestId: string,
+              requestedBy: TaskRequestOrigin = { kind: "browser" }): Promise<TaskRunView> {
     const run = this.registered(id);
+    const origin = checkedOrigin(requestedBy);
     if (this.closing || configSha256 !== run.configSha256 || !isReviewRequestId(requestId)) throw new Error("Task request identity invalid");
     const existing = await this.request(run);
     if (existing) {
-      if (existing.requestId !== requestId.toLowerCase()) throw new Error("Task was already requested; inspect the existing run");
+      if (existing.requestId !== requestId.toLowerCase() || (existing.requestedBy &&
+          JSON.stringify(existing.requestedBy) !== JSON.stringify(origin))) throw new Error("Task was already requested; inspect the existing run");
       return this.snapshot(id);
     }
-    if (this.starts.has(id)) { await this.starts.get(id); return this.start(id, configSha256, requestId); }
-    const operation = this.startNew(run, requestId.toLowerCase());
+    if (this.starts.has(id)) { await this.starts.get(id); return this.start(id, configSha256, requestId, origin); }
+    const operation = this.startNew(run, requestId.toLowerCase(), origin);
     this.starts.set(id, operation);
     try { return await operation; } finally { this.starts.delete(id); }
   }
-  private async startNew(run: CatalogRun, requestId: string): Promise<TaskRunView> {
+  private async startNew(run: CatalogRun, requestId: string, requestedBy: TaskRequestOrigin): Promise<TaskRunView> {
     const id = run.config.runId;
     if (!(await this.snapshot(id)).canStart) throw new Error("Task cannot be dispatched again");
-    await writeNew(this.requestPath(id), { runId: id, requestId, configSha256: run.configSha256, at: new Date().toISOString() });
+    await writeNew(this.requestPath(id), { runId: id, requestId, configSha256: run.configSha256,
+      requestedBy, at: new Date().toISOString() });
     try {
       if (hash(await readFile(run.config.snapshot)) !== run.snapshotSha256) throw new Error("Task snapshot changed");
       const prepared = await this.runtime.prepare(run.config);

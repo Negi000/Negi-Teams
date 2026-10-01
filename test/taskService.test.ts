@@ -17,6 +17,7 @@ import type { VaultRunConfig } from "../src/server/orchestration/vaultRunConfig.
 import type { VaultTaskContract } from "../src/server/orchestration/vaultTaskContract.ts";
 import { LocalReviewService } from "../src/server/orchestration/reviewService.ts";
 import { FileReviewChain } from "../src/server/orchestration/reviewChain.ts";
+import { registeredTaskTools } from "../src/server/orchestration/taskDispatchTools.ts";
 
 async function fixture(run: (data: { dir: string; config: VaultRunConfig; catalog: unknown;
   contract: VaultTaskContract; prepare: (config: VaultRunConfig) => Promise<PreparedVaultRun> }) => Promise<void>) {
@@ -59,13 +60,142 @@ async function completed(prepared: PreparedVaultRun, scheduler: FileScheduler,
     type: "settle", workId: config.runId, outcome: "verified", evidenceRef, actualCostUsd: null } });
   return state;
 }
-async function until(predicate: () => Promise<boolean>) {
-  const deadline = Date.now() + 5000;
+async function until(predicate: () => Promise<boolean>, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
   while (!await predicate()) {
     if (Date.now() > deadline) throw new Error("Synthetic runner did not settle");
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }
+
+test("native planner uses the UI scheduler once and persists its origin without human acceptance", async () => {
+  await fixture(async ({ catalog, prepare, config, dir }) => {
+    let count = 0;
+    const runtime = { prepare, submit: submitVaultRun, execute: async (...args: Parameters<typeof completed>) => {
+      count++; return completed(...args); } };
+    const service = await LocalTaskService.open(catalog, runtime);
+    const tools = registeredTaskTools(service, "planner");
+    const context = { threadId: "thread-native", turnId: "turn-native", callId: "dispatch-1" };
+    try {
+      const list = await tools.invoke({ ...context, tool: "negi_list_tasks", arguments: {} });
+      assert.equal(list.success, true);
+      const row = JSON.parse(list.text).tasks[0];
+      assert.equal(row.project, "fixture"); assert.equal(list.text.includes(config.checkout), false);
+      const read = await tools.invoke({ ...context, tool: "negi_read_task", arguments: { run_id: row.id } });
+      assert.deepEqual(JSON.parse(read.text).acceptance, ["Explicit review required"]);
+      assert.deepEqual(JSON.parse(read.text).taskContract.limits, { maxAttempts: 1, timeLimitMinutes: 5 });
+      assert.equal(read.text.includes(config.checkout), false);
+      const call = { ...context, tool: "negi_dispatch_task", arguments: { run_id: row.id, config_sha256: row.configSha256 } };
+      const results = await Promise.all([tools.invoke(call), tools.invoke(call)]);
+      assert.equal(results.every(result => result.success), true);
+      await until(async () => { const v = await service.snapshot(row.id); return v.status === "ready_for_review" && !v.live; });
+      assert.equal(count, 1);
+      const view = await service.snapshot(row.id);
+      assert.deepEqual(view.requestedBy, { kind: "master", masterId: "planner", ...context });
+      assert.equal(view.acceptedBy, null); assert.equal(view.verificationOutcome, "passed");
+      assert.equal((await tools.invoke(call)).success, true); assert.equal(count, 1);
+      assert.equal((await tools.invoke({ ...call, callId: "another-dispatch" })).success, false);
+      const requestPath = join(dir, "task-state", row.id + ".request.json");
+      const request = JSON.parse(await readFile(requestPath, "utf8"));
+      await assert.rejects(service.start(row.id, row.configSha256, request.requestId), /already requested/);
+      assert.equal((await new FileScheduler(config.schedulerPath).read()).state?.entries.length, 1);
+    } finally { await service.close(); }
+    const restarted = await LocalTaskService.open(catalog, runtime);
+    try {
+      const view = await restarted.snapshot(config.runId);
+      assert.deepEqual(view.requestedBy, { kind: "master", masterId: "planner", ...context });
+      assert.equal(view.acceptedBy, null); assert.equal(count, 1);
+    } finally { await restarted.close(); }
+  });
+});
+
+test("planner cannot alter fixed scope, model, command, configuration or review through native tools", async () => {
+  await fixture(async ({ catalog, prepare, config }) => {
+    let prepared = 0;
+    const service = await LocalTaskService.open(catalog, { prepare: async value => { prepared++; return prepare(value); },
+      submit: submitVaultRun, execute: completed });
+    const tools = registeredTaskTools(service, "planner"), context = { threadId: "t", turnId: "u", callId: "c" };
+    try {
+      const v = await service.snapshot(config.runId);
+      for (const [tool, args] of [
+        ["negi_dispatch_task", { run_id: v.id, config_sha256: "0".repeat(64) }],
+        ["negi_dispatch_task", { run_id: v.id, config_sha256: v.configSha256, command: "publish" }],
+        ["negi_dispatch_task", { run_id: v.id, config_sha256: v.configSha256, model: "other" }],
+        ["negi_read_task", { run_id: v.id, allowedPaths: ["secret"] }],
+        ["negi_accept_task", { run_id: v.id }],
+        ["negi_approve_task", { run_id: v.id }],
+        ["negi_list_tasks", { project: "", offset: 0 }],
+        ["negi_list_tasks", { offset: -1 }],
+        ["negi_read_task", { run_id: "missing" }],
+      ] as const) {
+        const result = await tools.invoke({ ...context, tool, arguments: args });
+        assert.equal(result.success, false); assert.equal(JSON.parse(result.text).noAutomaticRetry, true);
+      }
+      assert.equal(prepared, 0); assert.equal((await service.snapshot(v.id)).canStart, true);
+      assert.equal((await tools.invoke({ ...context, tool: "negi_list_tasks", arguments: { project: "other" } })).success, true);
+      assert.throws(() => registeredTaskTools(service, "../bad"), /identity invalid/);
+      assert.equal((await tools.invoke({ ...context, turnId: "\n", tool: "negi_list_tasks", arguments: {} })).success, false);
+    } finally { await service.close(); }
+  });
+});
+
+test("native and browser race consumes one Task request and never restarts the losing dispatch", async () => {
+  await fixture(async ({ catalog, prepare, config }) => {
+    let count = 0;
+    const service = await LocalTaskService.open(catalog, { prepare, submit: submitVaultRun,
+      execute: async (...args) => { count++; return completed(args[0], args[1]); } });
+    try {
+      const view = await service.snapshot(config.runId), tools = registeredTaskTools(service, "planner");
+      const results = await Promise.allSettled([service.start(view.id, view.configSha256, randomUUID()),
+        tools.invoke({ threadId: "t", turnId: "u", callId: "c", tool: "negi_dispatch_task",
+          arguments: { run_id: view.id, config_sha256: view.configSha256 } })]);
+      const successes = results.filter(result => result.status === "fulfilled" &&
+        (!("success" in result.value) || result.value.success));
+      assert.equal(successes.length, 1);
+      await until(async () => { const v = await service.snapshot(view.id); return v.status === "ready_for_review" && !v.live; });
+      assert.equal(count, 1); assert.equal((await service.snapshot(view.id)).acceptedBy, null);
+    } finally { await service.close(); }
+  });
+});
+
+test("planner does not dispatch a Task whose mandatory contract exceeds the native response bound", async () => {
+  await fixture(async ({ catalog, prepare, config, contract }) => {
+    contract.acceptance = Array.from({ length: 35 }, (_, i) => `${i}:` + "a".repeat(800));
+    await writeFile(config.snapshot, JSON.stringify(contract));
+    let prepared = 0;
+    const service = await LocalTaskService.open(catalog, { prepare: async config => { prepared++; return prepare(config); },
+      submit: submitVaultRun, execute: completed });
+    try {
+      const view = await service.snapshot(config.runId), tools = registeredTaskTools(service, "planner");
+      const result = await tools.invoke({ threadId: "t", turnId: "u", callId: "c", tool: "negi_dispatch_task",
+        arguments: { run_id: view.id, config_sha256: view.configSha256 } });
+      assert.equal(result.success, false); assert.equal(prepared, 0);
+      assert.equal((await service.snapshot(view.id)).canStart, true);
+    } finally { await service.close(); }
+  });
+});
+
+test("legacy Task request without recorded origin remains readable and is not attributed to a human", async () => {
+  await fixture(async ({ catalog, prepare, config, dir }) => {
+    const runtime = { prepare, submit: submitVaultRun, execute: completed };
+    const service = await LocalTaskService.open(catalog, runtime), requestId = randomUUID();
+    try {
+      const view = await service.snapshot(config.runId);
+      await service.start(view.id, view.configSha256, requestId);
+      await until(async () => !(await service.snapshot(view.id)).live);
+      assert.deepEqual((await service.snapshot(view.id)).requestedBy, { kind: "browser" });
+    } finally { await service.close(); }
+    const path = join(dir, "task-state", config.runId + ".request.json");
+    const request = JSON.parse(await readFile(path, "utf8")); delete request.requestedBy;
+    await writeFile(path, JSON.stringify(request));
+    const restarted = await LocalTaskService.open(catalog, runtime);
+    try {
+      const view = await restarted.snapshot(config.runId);
+      assert.equal(view.requestedBy, undefined); assert.equal(view.acceptedBy, null);
+      assert.equal((await restarted.start(view.id, view.configSha256, requestId)).requestedBy, undefined);
+    } finally { await restarted.close(); }
+  });
+});
 
 test("authenticated Task requests dispatch once and stop at review, including concurrent retries", async () => {
   await fixture(async ({ catalog, prepare }) => {
@@ -257,7 +387,7 @@ test("a frozen Git review binds signed acceptance and revocation to the correspo
     await service.connectReviews(reviews);
     const view = await service.snapshot(config.runId);
     await service.start(view.id, view.configSha256, randomUUID());
-    await until(async () => (await service.snapshot(view.id)).reviewId !== null);
+    await until(async () => (await service.snapshot(view.id)).reviewId !== null, 30_000);
     try {
       const result = await service.snapshot(view.id);
       assert.equal(result.status, "ready_for_review"); assert.ok(result.reviewId);
@@ -368,7 +498,7 @@ test(`local revision ${revisionMode}: immutable evidence, recovery and no model 
     const reviews = await LocalReviewService.open(reviewConfig), service = await LocalTaskService.open(catalog, runtime);
     await service.connectReviews(reviews);
     const before = await service.snapshot(config.runId); await service.start(before.id, before.configSha256, randomUUID());
-    await until(async () => (await service.snapshot(before.id)).reviewId !== null);
+    await until(async () => (await service.snapshot(before.id)).reviewId !== null, 30_000);
     const viewA = await service.snapshot(before.id), reviewA = await reviews.snapshot(viewA.reviewId!);
     const previewA = await readFile(join(config.outputDir, "review-result.md"));
     const originalManifestPath = join(config.outputDir, "review-manifest.json");

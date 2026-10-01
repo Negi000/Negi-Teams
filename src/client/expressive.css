@@ -57,6 +57,7 @@
 .negi-workspace .chat-bubble { border-radius:24px; background:var(--md-surface-container); border:0; color:var(--md-on-surface); padding:16px 20px }
 .negi-workspace .chat-bubble.user { background:var(--md-primary-container); color:var(--md-on-primary-container); border-radius:24px 24px 6px 24px }
 .negi-workspace .chat-bubble.assistant { background:transparent; padding:16px 0 }
+.negi-workspace .chat-stop { min-width:48px; flex-shrink:0 }
 .negi-workspace .chat-foot { border:0; background:var(--md-surface-low); padding:16px }
 .negi-workspace .chat-input-row { align-items:end }
 .negi-workspace .chat-input { background:var(--md-surface-high); border:0; border-radius:24px; min-height:56px; padding:16px; font-size:16px }

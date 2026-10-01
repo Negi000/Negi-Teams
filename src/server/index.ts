@@ -57,6 +57,7 @@ import {
 } from "./fixedEbi.ts";
 import { MasterSession, sanitizeReplyRef } from "./master/session.ts";
 import { CodexAppServerBrain } from "./master/codexAppServerBrain.ts";
+import { registeredTaskTools } from "./orchestration/taskDispatchTools.ts";
 import { codexMasterLaunchOptions } from "./master/codexMasterLaunch.ts";
 import { LocalReviewService } from "./orchestration/reviewService.ts";
 import { createReviewHttp } from "./orchestration/reviewHttp.ts";
@@ -460,7 +461,8 @@ async function startMasterChatSession(spec: FixedEbiSpec): Promise<void> {
     mcpConfigPath: codexReadOnly || hasManualMcp ? null : ROLE_MCP_CONFIG.master,
     extraArgs: codexReadOnly ? [] : spec.extraArgs,
     logPath: MASTER_CHAT_LOG_PATH,
-    ...(codexReadOnly ? { createBrain: () => new CodexAppServerBrain(codexReadOnly) } : {}),
+    ...(codexReadOnly ? { createBrain: () => new CodexAppServerBrain({ ...codexReadOnly,
+      ...(taskService ? { taskTools: registeredTaskTools(taskService, spec.id) } : {}) }) } : {}),
     handlers: {
       onEvent: (id, envelope) => {
         broadcast({ type: "chatEvent", id, seq: envelope.seq, ts: envelope.ts, event: envelope.event });

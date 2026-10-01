@@ -15,11 +15,11 @@ import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ptyFixtureLaunch, readyPtyFixture, stopRegistry } from "./helpers/ptyFixture.ts";
+import { ptyFixtureLaunch, readyPtyFixture, stopRegistry, waitPtyFixture } from "./helpers/ptyFixture.ts";
 
-// deliver の ACK 待ちタイムアウトを短くしてテストを速くする（registry.ts はモジュール読込時に
-// この env を読むので、動的 import より前に設定する）。
-process.env.EBI_DELIVER_ACK_TIMEOUT_MS = "300";
+// 実ConPTYの描画を観測してからfixtureがACKするための猶予。製品の設定は変更しない。
+// registry.ts はモジュール読込時にこの env を読むので、動的 import より前に設定する。
+process.env.EBI_DELIVER_ACK_TIMEOUT_MS = "10000";
 // セッション到達確認（本文エコー）の待ちも短くする（同上・モジュール読込前に設定）。
 process.env.EBI_ECHO_CONFIRM_MS = "1500";
 delete process.env.EBI_INJECT_MODE; // notify モード（既定）で検証する。
@@ -211,10 +211,14 @@ test("ACK＋セッションが本文を描画 → via:notify（以降は確認�
   // PTY へのエコー（fake claude = cat）で作る。
   const bridge = (async () => {
     const msgs = await mb.subscribe("ebi-2", 2000);
-    mb.ack("ebi-2", msgs.map((m) => m.id));
     // 実ブリッジ（src/mcp/control-server.ts）と同じ deliveryText() で描画を作る。
     // ここを手書きの `[from:x] ` に戻すと照合キーがズレて抑止が壊れる（2026-08-16）。
-    for (const m of msgs) agent.write(`ebi-control: ${deliveryText(m.from, m.message, m.id)}\n`);
+    for (const m of msgs) {
+      const rendered = `ebi-control: ${deliveryText(m.from, m.message, m.id)}`;
+      agent.write(rendered + "\n");
+      await waitPtyFixture(agent, a => a.getScrollback().includes(rendered), "render notification text");
+    }
+    mb.ack("ebi-2", msgs.map((m) => m.id));
   })();
 
   const out = await reg.deliver("ebi-2", "master", "描画される本文です");
@@ -241,7 +245,8 @@ test("エコー照合は push 以降の出力だけを見る（過去の同一�
   // push より「前」に**同じ照合キー（msgId=1 のタグ）**が scrollback に出ている状況を作る。
   // この Mailbox は新規なので最初の push は msgId=1 になり、mark が効かなければ誤検知する。
   agent.write(`ebi-control: ${deliveryText("master", "同じ本文", 1)}\n`);
-  await sleep(300);
+  await waitPtyFixture(agent, a => a.getScrollback().includes(deliveryText("master", "同じ本文", 1)) &&
+    a.getStatus() === "idle", "render past message before the next dispatch");
 
   const bridge = (async () => {
     const msgs = await mb.subscribe("ebi-3", 2000);

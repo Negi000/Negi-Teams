@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
-import { CodexAppServerClient, type CodexApprovalRequest } from "../src/server/master/appServerClient.ts";
+import { CodexAppServerClient, type CodexApprovalRequest, type CodexDynamicToolCall, type CodexDynamicToolResult } from "../src/server/master/appServerClient.ts";
 
 function fakeServer(handle: (request: Record<string, unknown>) => unknown,
                     options: ConstructorParameters<typeof CodexAppServerClient>[2] = {}) {
@@ -40,6 +40,94 @@ function basic(request: Record<string, unknown>): unknown {
     default: throw new Error(`unexpected request: ${request.method}`);
   }
 }
+
+const taskTool = { type: "function" as const, name: "negi_dispatch_task", description: "Fixed Task dispatch",
+  inputSchema: { type: "object", additionalProperties: false } };
+async function dynamicFixture(handler: (call: CodexDynamicToolCall) => Promise<CodexDynamicToolResult>) {
+  const f = fakeServer(basic, { onDynamicToolCall: handler });
+  await f.client.initialize(); await f.client.discoverModels();
+  await f.client.startThread({ cwd: "E:/repo", model: "gpt-6-astra", sandbox: "read-only", dynamicTools: [taskTool] });
+  await f.client.startTurn("delegate fixed Task", "medium");
+  const call = (id: string, overrides: Record<string, unknown> = {}) => f.toClient.write(JSON.stringify({
+    jsonrpc: "2.0", id, method: "item/tool/call", params: { threadId: "thread-a", turnId: "turn-a",
+      callId: "call-a", namespace: null, tool: taskTool.name, arguments: { run_id: "task-a" }, ...overrides } }) + "\n");
+  return { ...f, call };
+}
+const microtasks = () => new Promise<void>(resolve => setImmediate(resolve));
+
+test("registered native tool opts into the protocol and coalesces duplicate calls without repeating dispatch", async () => {
+  let calls = 0, release!: (result: CodexDynamicToolResult) => void;
+  const result = new Promise<CodexDynamicToolResult>(resolve => { release = resolve; });
+  const f = await dynamicFixture(async call => { calls++; assert.equal(call.callId, "call-a"); return result; });
+  try {
+    assert.deepEqual((f.messages[0].params as Record<string, unknown>).capabilities, { experimentalApi: true });
+    assert.deepEqual((f.messages.find(m => m.method === "thread/start")!.params as Record<string, unknown>).dynamicTools, [taskTool]);
+    f.call("tool-1"); f.call("tool-2");
+    await microtasks(); assert.equal(calls, 1);
+    f.call("tool-changed", { arguments: { run_id: "task-b" } });
+    assert.equal((f.messages.at(-1)!.error as Record<string, unknown>).code, -32602);
+    release({ success: true, text: "queued" }); await microtasks();
+    for (const id of ["tool-1", "tool-2"]) assert.deepEqual(f.messages.find(m => m.id === id)?.result,
+      { contentItems: [{ type: "inputText", text: "queued" }], success: true });
+    f.call("tool-3"); await microtasks(); assert.equal(calls, 1);
+  } finally { f.client.close(); }
+});
+
+test("foreign, stale, unregistered and oversized native calls cannot reach the Task service", async () => {
+  let calls = 0;
+  const f = await dynamicFixture(async () => { calls++; return { success: true, text: "ok" }; });
+  try {
+    for (const [index, overrides] of [{ threadId: "other" }, { turnId: "other" }, { namespace: "other" },
+      { tool: "negi_accept_task" }, { callId: "" }, { arguments: "x".repeat(8001) }].entries()) {
+      f.call(`invalid-${index}`, overrides);
+      assert.equal((f.messages.at(-1)!.error as Record<string, unknown>).code, -32602);
+    }
+    f.call("before-completion");
+    // Turn completion in the same input batch prevents the deferred mutation.
+    f.notify("turn/completed", { threadId: "thread-a", turn: { id: "turn-a", status: "completed" } });
+    await microtasks(); assert.equal(calls, 0);
+    assert.equal((f.messages.find(m => m.id === "before-completion")!.result as Record<string, unknown>).success, false);
+    f.call("after-completion"); assert.equal((f.messages.at(-1)!.error as Record<string, unknown>).code, -32602);
+  } finally { f.client.close(); }
+});
+
+test("native handler failure or oversized result is returned once without provider details or automatic rerun", async () => {
+  for (const failure of ["throw", "oversized"]) {
+    let calls = 0;
+    const f = await dynamicFixture(async () => {
+      calls++; if (failure === "throw") throw new Error("private provider detail");
+      return { success: true, text: "x".repeat(24001) };
+    });
+    try {
+      f.call("failure"); await microtasks(); f.call("failure-repeat"); await microtasks();
+      assert.equal(calls, 1);
+      const result = f.messages.find(m => m.id === "failure")!.result as { success: boolean; contentItems: Array<{ text: string }> };
+      assert.equal(result.success, false); assert.match(result.contentItems[0].text, /再委任せず/);
+      assert.equal(JSON.stringify(result).includes("private provider detail"), false);
+    } finally { f.client.close(); }
+  }
+});
+
+test("worker clients cannot register planner tools and unsupported native calls are rejected", async () => {
+  const f = fakeServer(basic);
+  try {
+    await f.client.initialize(); await f.client.discoverModels();
+    await assert.rejects(f.client.startThread({ cwd: "E:/repo", model: "gpt-6-astra", sandbox: "read-only",
+      dynamicTools: [taskTool] }), /registry invalid/);
+    assert.equal(f.messages.some(m => m.method === "thread/start"), false);
+    f.toClient.write(JSON.stringify({ jsonrpc: "2.0", id: "worker-tool", method: "item/tool/call",
+      params: { threadId: "thread-a", turnId: "turn-a", callId: "call-a", tool: taskTool.name, arguments: {} } }) + "\n");
+    assert.equal((f.messages.at(-1)!.error as Record<string, unknown>).code, -32602);
+  } finally { f.client.close(); }
+});
+
+test("provider disconnect after Task dispatch does not replay the operation", async () => {
+  let calls = 0, release!: () => void;
+  const waiting = new Promise<void>(resolve => { release = resolve; });
+  const f = await dynamicFixture(async () => { calls++; await waiting; return { success: true, text: "queued" }; });
+  f.call("disconnect"); await microtasks(); assert.equal(calls, 1);
+  f.client.close(); release(); await microtasks(); assert.equal(calls, 1);
+});
 
 test("initialize, discover capability, start exact model and observe one turn", async () => {
   const f = fakeServer(basic);
