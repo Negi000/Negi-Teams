@@ -71,6 +71,7 @@ import { createTaskAuthoringHttp } from "./orchestration/taskAuthoringHttp.ts";
 import { LocalIntegrationExecutionService } from "./orchestration/integrationExecution.ts";
 import { createIntegrationHttp } from "./orchestration/integrationHttp.ts";
 import { LocalProjectSetup } from "./orchestration/projectSetup.ts";
+import { LocalProjectConfiguration, type ConfigurationAdmission, type ProjectConfiguration } from "./orchestration/projectConfiguration.ts";
 import { createProjectSetupHttp } from "./orchestration/projectSetupHttp.ts";
 import { startConfirmedSetupMaster } from "./orchestration/projectSetupStartup.ts";
 import { ChatAttachmentStore, MAX_ATTACHMENTS_PER_TURN } from "./chatAttachments.ts";
@@ -121,10 +122,13 @@ const legacyProjectConfiguration=Boolean(process.env.NEGI_TASK_CONFIG||process.e
 if(process.env.NEGI_SETUP_ROOT&&!authConfig.token)throw Error("NEGI_SETUP_ROOT requires EBI_AUTH_TOKEN");
 const projectSetup=process.env.NEGI_SETUP_ROOT&&!legacyProjectConfiguration?
   await LocalProjectSetup.open(process.env.NEGI_SETUP_ROOT,[process.cwd()]):null;
-const savedProjectSetup=await projectSetup?.current();
-const setupStartup=savedProjectSetup?await projectSetup!.startup(savedProjectSetup):null;
-let setupModelsVerified=!setupStartup;
-let setupActivationError:string|null=null;
+const projectConfiguration=projectSetup?await LocalProjectConfiguration.open(projectSetup):null;
+let bootConfiguration:ProjectConfiguration|null=null,configurationStartupHeld=false;
+try{bootConfiguration=await projectConfiguration?.current()??null}catch{configurationStartupHeld=true;}
+let setupStartup:Awaited<ReturnType<LocalProjectConfiguration["startup"]>>|null=null;
+if(bootConfiguration)try{setupStartup=await projectConfiguration!.startup(bootConfiguration)}catch{configurationStartupHeld=true;}
+let setupModelsVerified=!setupStartup&&!configurationStartupHeld;
+let setupActivationError:string|null=configurationStartupHeld?"設定・作業場所の起動条件を確認できません。プロジェクト設定で保存状態を確認してください。":null;
 const reviewConfigPath = process.env.NEGI_REVIEW_CONFIG;
 let reviewService: LocalReviewService | null = null;
 if (reviewConfigPath) {
@@ -153,7 +157,7 @@ if(process.env.NEGI_TASK_AUTHORING_CONFIG){
 }else if(setupStartup&&taskService)taskAuthoringService=await LocalTaskAuthoringService.open(setupStartup.authoring,taskService);
 const taskAuthoringApi=createTaskAuthoringHttp(taskAuthoringService,authConfig);
 const projectSetupApi=createProjectSetupHttp(projectSetup,authConfig,()=>({legacyConfigured:legacyProjectConfiguration,
-  active:!!setupStartup&&setupModelsVerified&&!!taskAuthoringService&&!!masterSession&&masterSession.state!=="stopped"&&masterSession.state!=="starting",activationError:setupActivationError}));
+  active:!!setupStartup&&setupModelsVerified&&!!taskAuthoringService&&!!masterSession&&masterSession.state!=="stopped"&&masterSession.state!=="starting",activationError:setupActivationError,bootHash:bootConfiguration?.hash}),projectConfiguration);
 const integrationConfigPath = process.env.NEGI_INTEGRATION_CONFIG;
 let integrationReviewService: LocalIntegrationReviewService | null = null;
 if (integrationConfigPath) {
@@ -167,6 +171,14 @@ const knowledgeConfigPath = process.env.NEGI_KNOWLEDGE_CONFIG;
 const integrationExecutionService=taskAuthoringService&&taskService&&reviewService?
   await LocalIntegrationExecutionService.open(taskAuthoringService,taskService,reviewService):null;
 const integrationApi=createIntegrationHttp(integrationExecutionService,authConfig);
+if(projectConfiguration&&bootConfiguration){
+  const admission:ConfigurationAdmission=operation=>{
+    if(!setupModelsVerified)throw Error("担当モデルの起動条件を確認できないため保留しています。");
+    return projectConfiguration.admit(bootConfiguration.hash,operation);
+  };
+  taskService?.bindConfigurationAdmission(admission);taskAuthoringService?.bindConfigurationAdmission(admission);
+  integrationExecutionService?.bindConfigurationAdmission(admission);
+}
 const taskApi=createTaskHttp(taskService,authConfig,taskAuthoringService!==null,integrationExecutionService!==null);
 let knowledgeService: LocalKnowledgeService | null = null;
 if (knowledgeConfigPath) {
@@ -867,7 +879,7 @@ const httpServer = createServer(async (req, res) => {
 
   // Reviews require an authenticated browser cookie, even on loopback.
   if (await projectSetupApi(req, res, url)) return;
-  if(setupStartup&&!setupModelsVerified&&req.method==="POST"&&(/^\/api\/tasks(?:\/|$)/.test(url.pathname)||/^\/api\/task-plans(?:\/|$)/.test(url.pathname)||/^\/api\/integrations(?:\/|$)/.test(url.pathname))){
+  if(setupStartup&&!setupModelsVerified&&req.method==="POST"&&!url.pathname.endsWith("/stop")&&(/^\/api\/tasks(?:\/|$)/.test(url.pathname)||/^\/api\/task-plans(?:\/|$)/.test(url.pathname)||/^\/api\/integrations(?:\/|$)/.test(url.pathname))){
     res.writeHead(503,{"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store"});res.end(JSON.stringify({error:"担当モデルの接続・利用条件を確認できないため、新しい作業を保留しています。プロジェクト設定を確認してください。"}));return;
   }
   if (await reviewApi(req, res, url)) return;
@@ -1107,10 +1119,13 @@ function handleClientMessage(ws: WebSocket, msg: ClientMessage): void {
           accepted, ...(reason ? { reason } : {}) });
         else if (!accepted) send(ws, { type: "error", text: reason ?? "送信できませんでした" });
       };
-      if(setupStartup&&!setupModelsVerified){report(false,"担当モデルの起動条件を確認できないため保留しています。今回の入力は未送信です。");break}
+      if(configurationStartupHeld||setupStartup&&!setupModelsVerified){report(false,"設定・担当モデルの起動条件を確認できないため保留しています。今回の入力は未送信です。");break}
       const session = chatSessionFor(ws, msg.id);
       if (!session) { report(false, "統括が起動していません。今回の入力は未送信です。"); break; }
       void (async () => {
+        if(projectConfiguration&&bootConfiguration&&(await projectConfiguration.current())?.hash!==bootConfiguration.hash){
+          report(false,"設定を保存済みです。再起動を確認してください。今回の入力は未送信です。");return;
+        }
         // 添付は「保存済み basename」でしか参照できない（クライアントは任意パスを送れない）。
         // ここで実体を読み直して base64 化し、stream-json の image ブロックに載せる。
         const attachments = (msg.attachments ?? []).slice(0, MAX_ATTACHMENTS_PER_TURN);
@@ -1154,7 +1169,11 @@ function handleClientMessage(ws: WebSocket, msg: ClientMessage): void {
       // `--resume` 無しで起動し直して文脈をリセットする（設計書 §10 Q-3）。
       const session = chatSessionFor(ws, msg.id);
       if (!session) break;
-      void session.newConversation().catch((err) => {
+      void (async()=>{
+        if(configurationStartupHeld||setupStartup&&!setupModelsVerified)throw Error("設定・担当モデルの起動条件を確認できないため保留しています。");
+        if(projectConfiguration&&bootConfiguration)await projectConfiguration.admit(bootConfiguration.hash,()=>session.newConversation());
+        else await session.newConversation();
+      })().catch((err) => {
         send(ws, { type: "error", text: `新しい会話を開始できませんでした: ${(err as Error).message}` });
       });
       break;
@@ -1787,12 +1806,13 @@ async function handleSummarize(ws: WebSocket, id: string): Promise<void> {
 async function startFixedEbi(): Promise<void> {
   try {
     const raw = await loadFixedEbi(CONFIG_PATH, { command: COMMAND, backend: BACKEND_ID });
+    if(configurationStartupHeld)throw Error("Project configuration requires reconciliation before starting any fixed agent");
     if(setupStartup){
       if(raw.length)throw Error("Saved project setup conflicts with fixed agents; choose the startup configuration explicitly");
       const config=setupStartup.config,spec:FixedEbiSpec={id:"negi-master",kind:"master",ui:"chat",brain:"codex",permissionMode:"plan",extraArgs:[],notifySubscribe:false,
         launch:{command:config.executable,args:[],cwd:config.checkout,model:config.astra.model,backend:"codex",systemPrompt:"Astraとして必須仕様を読み、利用者の目的を契約案へまとめる。Taskの開始は登録済みTaskの操作だけを使う。追加のCLI、別チャット、隠れた子agentを起動しない。"}};
-      await startMasterChatSession(spec,{...codexMasterLaunchOptions({model:spec.launch.model,extraArgs:[]},
-        {...process.env,EBI_CODEX_READ_ONLY_MASTER:"1",EBI_CODEX_APP_SERVER_EXE:config.executable,EBI_CODEX_MASTER_EFFORT:config.astra.effort}),requiredModels:[config.astra,config.sol]});
+      await projectConfiguration!.admit(bootConfiguration!.hash,()=>startMasterChatSession(spec,{...codexMasterLaunchOptions({model:spec.launch.model,extraArgs:[]},
+        {...process.env,EBI_CODEX_READ_ONLY_MASTER:"1",EBI_CODEX_APP_SERVER_EXE:config.executable,EBI_CODEX_MASTER_EFFORT:config.astra.effort}),requiredModels:setupStartup!.requiredModels}));
       setupModelsVerified=true;
       broadcast({type:"capabilities",supervisor:supervisor.enabled,reviews:reviewService!==null,tasks:taskService!==null,taskAuthoring:taskAuthoringService!==null,projectSetup:!!authConfig.token});
       return;

@@ -4,6 +4,7 @@ import type { LocalTaskService } from "./taskService.ts";
 import { isReviewRequestId } from "./humanReviewProof.ts";
 import { taskPageHtml } from "./taskPage.ts";
 import type { TaskOverview } from "../../shared/workspace.ts";
+import { ConfigurationPendingError } from "./projectConfiguration.ts";
 
 function json(res: ServerResponse, code: number, value: unknown) {
   res.writeHead(code, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
@@ -92,7 +93,7 @@ export function createTaskHttp(service: LocalTaskService | null, auth: AuthConfi
           await service.decideApproval(match[1], input.configSha256, input.requestId,
             input.approvalId as string, input.approvalSha256 as string, input.decision as "allow" | "deny");
       json(res, 200, result);
-    } catch { json(res, 409, { error: "操作を確定できませんでした。再実行せず、画面を更新して現在の作業を確認してください。" }); }
+    } catch(e) { json(res, 409, { error: e instanceof ConfigurationPendingError?e.message:"操作を確定できませんでした。再実行せず、画面を更新して現在の作業を確認してください。" }); }
     return true;
   };
 }

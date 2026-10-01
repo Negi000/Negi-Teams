@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { parseCookie, tokenMatches, type AuthConfig } from "../auth.ts";
 import type { LocalTaskAuthoringService } from "./taskAuthoring.ts";
 import { taskPlanPageHtml } from "./taskPlanPage.ts";
+import { ConfigurationPendingError } from "./projectConfiguration.ts";
 
 function json(res:ServerResponse,status:number,value:unknown) {
   res.writeHead(status,{"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store"});res.end(JSON.stringify(value));
@@ -37,7 +38,7 @@ export function createTaskAuthoringHttp(service:LocalTaskAuthoringService|null,a
       }
       if(!input||Array.isArray(input)||Object.keys(input).length!==2||typeof input.expectedHash!=="string"||typeof input.requestId!=="string")throw Error("Approval target invalid");
       json(res,200,await service.finalize(match![1],input.expectedHash,input.requestId));
-    }catch{json(res,409,{error:url.pathname.includes("/baselines/")?"先行成果の受入・版・保存状態を確認できません。操作を繰り返さず、レビューと現在の作業を更新してください。":"契約を確定できませんでした。操作を繰り返さず、状態を更新して現在の契約と作業を確認してください。"})}
+    }catch(e){json(res,409,{error:e instanceof ConfigurationPendingError?e.message:url.pathname.includes("/baselines/")?"先行成果の受入・版・保存状態を確認できません。操作を繰り返さず、レビューと現在の作業を更新してください。":"契約を確定できませんでした。操作を繰り返さず、状態を更新して現在の契約と作業を確認してください。"})}
     return true;
   };
 }

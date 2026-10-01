@@ -16,6 +16,7 @@ import { taskDecomposition, type TaskDecompositionFields, type TaskDecomposition
 import { IntegrationBaselines, type IntegrationBase } from "./integrationBaseline.ts";
 import type { IntegrationReviewOptions, IntegrationReviewManifest } from "./integrationReview.ts";
 import type { LocalReviewService } from "./reviewService.ts";
+import type { ConfigurationAdmission } from "./projectConfiguration.ts";
 
 const exec = promisify(execFile), sha = (text: string) => createHash("sha256").update(text).digest("hex");
 const label = /^[a-zA-Z0-9._-]{1,100}$/, digest = /^[0-9a-f]{64}$/;
@@ -31,7 +32,7 @@ export interface TaskPlanFields {
   maxAttempts: number; timeLimitMinutes: number;
 }
 export interface TaskExecutionProfile { id: string; title: string; project: string; repository: string; worktreeRoot: string;
-  allowedPaths: string[]; maxAttempts: number; timeLimitMinutes: number; config: VaultRunConfig; hash: string }
+  allowedPaths: string[]; maxAttempts: number; timeLimitMinutes: number; config: VaultRunConfig; hash: string; active?:boolean }
 type Profile = TaskExecutionProfile;
 interface Draft { schema: "negi-task-plan/1"; id: string; createdAt: string; profileId: string;
   profileHash: string; baseSha: string; sources: Source[]; fields: TaskPlanFields;
@@ -138,12 +139,16 @@ function snapshot(draft: Draft, profile: Profile, content: string): VaultTaskCon
 
 export class LocalTaskAuthoringService {
   private queue: Promise<unknown> = Promise.resolve();
+  private admission:ConfigurationAdmission=operation=>operation();
+  bindConfigurationAdmission(admission:ConfigurationAdmission){this.admission=admission;}
+  assertActiveProfile(id:string){if(this.profile(id).active===false)throw Error("Project settings version is retired");}
   private constructor(private readonly root: string, private readonly profiles: Profile[],
     private readonly proofs: HumanReviewProofStore, private readonly tasks: LocalTaskService,
     private readonly baselines: IntegrationBaselines) {}
   static async open(raw: unknown, tasks: LocalTaskService): Promise<LocalTaskAuthoringService> {
-    const value = raw as { storageRoot?: unknown; profiles?: unknown };
-    if (!value || !Array.isArray(value.profiles) || !value.profiles.length || value.profiles.length > 20) throw new Error("Task authoring profiles invalid");
+    const value = raw as { storageRoot?: unknown; profiles?: unknown;strictProfileHistory?:boolean };
+    if (!value || !Array.isArray(value.profiles) || !value.profiles.length || value.profiles.length > 1280) throw new Error("Task authoring profiles invalid");
+    if(value.profiles.filter(p=>p.active!==false).length>20||!value.profiles.some(p=>p.active!==false))throw Error("Active project limit invalid");
     const root = await directory(value.storageRoot), profiles: Profile[] = [];
     for (const raw of value.profiles) {
       const p = raw as Record<string, unknown>;
@@ -166,7 +171,8 @@ export class LocalTaskAuthoringService {
       if ((await realpath(top)).toLowerCase() !== repository.toLowerCase()) throw new Error("Project repository must be a Git root");
       const core = { id: p.id, title: text(p.title, 160), project, repository, worktreeRoot, allowedPaths,
         maxAttempts: Number(p.maxAttempts), timeLimitMinutes: Number(p.timeLimitMinutes), config };
-      profiles.push({ ...core, hash: sha(JSON.stringify(core)) });
+      if(p.active!==undefined&&typeof p.active!=="boolean")throw Error("Project version activation invalid");
+      profiles.push({ ...core, hash: sha(JSON.stringify(core)),...(p.active===undefined?{}:{active:p.active}) });
     }
     if (new Set(profiles.map(p => p.id)).size !== profiles.length) throw new Error("Task authoring profiles repeated");
     for (const a of profiles) for (const b of profiles)
@@ -176,6 +182,10 @@ export class LocalTaskAuthoringService {
     await mkdir(join(root,"decompositions"), { recursive:true });
     const proofs = await HumanReviewProofStore.open(join(root,"approvals"));
     const service = new LocalTaskAuthoringService(root,profiles,proofs,tasks,await IntegrationBaselines.open(join(root,"baselines")));
+    if(value.strictProfileHistory)for(const d of await service.drafts()){
+      if(service.profile(d.profileId).hash!==d.profileHash)throw Error("Task history requires its exact execution profile");
+      const receipt=await service.approval(d);if(receipt&&receipt.data.profileHash!==d.profileHash)throw Error("Task approval profile differs");
+    }
     await service.restoreRegistrations(); return service;
   }
   private serial<T>(fn: () => Promise<T>): Promise<T> { const pending = this.queue.catch(() => undefined).then(fn); this.queue = pending; return pending; }
@@ -185,7 +195,7 @@ export class LocalTaskAuthoringService {
     catch(error){if((error as NodeJS.ErrnoException).code!=="EEXIST")throw error;await wait(100)}
     throw new Error("Task draft writer is busy or requires reconciliation");
   }
-  listProfiles() { return this.profiles.map(p => ({ id:p.id, title:p.title, project:p.project, allowedPaths:p.allowedPaths,
+  listProfiles() { return this.profiles.filter(p=>p.active!==false).map(p => ({ id:p.id, title:p.title, project:p.project, allowedPaths:p.allowedPaths,
     verification:p.config.verification.map(c=>c.requirement), planner:p.config.astra, worker:p.config.sol,
     maxAttempts:p.maxAttempts, timeLimitMinutes:p.timeLimitMinutes, independentTasksOnly:true,
     decomposition:{maxTasks:8, executable:"independent_roots", successors:"new_plan_after_integration"} })); }
@@ -201,7 +211,7 @@ export class LocalTaskAuthoringService {
     if(ids.length)reviews.bindIntegrationBaselines(manifest.review.id,()=>Promise.all(ids.map(row=>this.baselines.preview(row.profileId,row.id))));
   }
   async publishIntegrationBase(profileId:string,id:string,artifactSha256:string,requestId:string) {
-    this.profile(profileId);return this.baselines.publish(profileId,id,artifactSha256,requestId);
+    return this.admission(async()=>{this.assertActiveProfile(profileId);return this.baselines.publish(profileId,id,artifactSha256,requestId)});
   }
   async integrationBase(profileId:string,id:string){this.profile(profileId);return this.baselines.resolve(profileId,id)}
   private withBase<T>(profileId:string,id:string|undefined,operation:(base?:IntegrationBase)=>Promise<T>):Promise<T> {
@@ -221,12 +231,14 @@ export class LocalTaskAuthoringService {
     return context;
   }
   async readProject(id: string, references: string[] = [], baselineId?:string) {
+    this.assertActiveProfile(id);
     const context=await this.projectReferences(id,references);
     return { ...this.listProfiles().find(row=>row.id===id)!, ...context, integrationBases:await this.baselines.choices(id),
       ...(baselineId?{integrationBase:await this.baselines.resolve(id,baselineId)}:{}) };
   }
   async propose(profileId: string, raw: unknown, origin: Draft["origin"], baselineId?:string): Promise<TaskPlanView> {
-    return this.serial(()=>this.withBase(profileId,baselineId,async(integrationBase)=>{
+    return this.serial(()=>this.admission(()=>this.withBase(profileId,baselineId,async(integrationBase)=>{
+      this.assertActiveProfile(profileId);
       const p = this.profile(profileId), f = fields(raw,p);
       if (origin.kind !== "master" || origin.model !== p.config.astra.model || origin.effort !== p.config.astra.effort ||
           ![origin.masterId,origin.threadId,origin.turnId,origin.callId].every(id=>typeof id === "string" && id.length>0 && id.length<=200 && !/[\r\n\0]/.test(id)))
@@ -249,10 +261,11 @@ export class LocalTaskAuthoringService {
         }
       }finally{await lock.close();await unlink(join(this.root,"draft-writer.lock"))}
       return this.view(selected);
-    }));
+    })));
   }
   async proposeDecomposition(profileId: string, raw: unknown, origin: Draft["origin"], baselineId?:string): Promise<TaskPlanView[]> {
-    return this.serial(()=>this.withBase(profileId,baselineId,async(integrationBase)=>{
+    return this.serial(()=>this.admission(()=>this.withBase(profileId,baselineId,async(integrationBase)=>{
+      this.assertActiveProfile(profileId);
       const p=this.profile(profileId), f=taskDecomposition(raw,raw=>fields(raw,p));
       if(origin.kind!=="master"||origin.model!==p.config.astra.model||origin.effort!==p.config.astra.effort||
         ![origin.masterId,origin.threadId,origin.turnId,origin.callId].every(id=>typeof id==="string"&&id.length>0&&id.length<=200&&!/[\r\n\0]/.test(id)))
@@ -279,7 +292,7 @@ export class LocalTaskAuthoringService {
         }
       }finally{await lock.close();await unlink(join(this.root,"draft-writer.lock"))}
       return Promise.all(this.expand(group).map(d=>this.view(d)));
-    }));
+    })));
   }
   private expand(group:DecompositionDraft):Draft[] {
     return group.fields.nodes.map((n,position)=>{
@@ -349,7 +362,7 @@ export class LocalTaskAuthoringService {
     const p = this.profile(d.profileId); let error:string|null=null;
     const approval = await this.approval(d), runId = approval?.runId ?? null;
     const registered = runId && this.tasks.list().some(r=>r.id===runId);
-    if (!registered) try { await this.freshness(d,p); } catch { error="参照仕様・プロジェクトの版・実行設定が変わりました。統括に新しい案を依頼してください。"; }
+    if (!registered) try { this.assertActiveProfile(p.id); await this.freshness(d,p); } catch { error="参照仕様・プロジェクトの版・実行設定が変わりました。統括に新しい案を依頼してください。"; }
     if(!registered&&!error)try{await lstat(join(this.root,"writer.lock"));error="契約の確定処理が進行中、または停止後の照合を待っています。状態を更新して確認してください。"}
     catch(e){if((e as NodeJS.ErrnoException).code!=="ENOENT")throw e}
     if (approval && !registered && !error) error="契約の確定処理を照合してください。実行はまだ開始していません。";
@@ -367,7 +380,7 @@ export class LocalTaskAuthoringService {
     return result;
   }
   async finalize(id: string, expectedHash: string, requestId: string): Promise<TaskPlanView> {
-    return this.serial(async () => {
+    return this.serial(()=>this.admission(async () => {
       if (!isReviewRequestId(id) || !digest.test(expectedHash) || !isReviewRequestId(requestId)) throw new Error("Task approval identity invalid");
       const d = (await this.drafts()).find(d=>d.id===id); if (!d || d.hash!==expectedHash) throw new Error("Task plan version differs");
       if(d.decomposition?.dependsOn.length)throw new Error("Successor requires integrated upstream results and a new plan at the actual base");
@@ -379,6 +392,7 @@ export class LocalTaskAuthoringService {
         if (prior.id!==requestId) throw new Error("Task draft was already approved; inspect it");
         return this.view(d); // A retry never creates or starts another worktree/provider.
       }
+      this.assertActiveProfile(p.id);
       await this.freshness(d,p);
       const runId=`task-${d.id}`, out=join(this.root,"runs",runId); await mkdir(out,{recursive:true});
       const config:VaultRunConfig={...structuredClone(p.config),runId,checkout:join(p.worktreeRoot,runId),snapshot:join(out,"contract.json"),
@@ -409,7 +423,7 @@ export class LocalTaskAuthoringService {
       return this.view(d);
       } finally { await lock.close(); await unlink(join(this.root,"writer.lock")); }
       });
-    });
+    }));
   }
   private bindAuthoredAdmission(d:Draft,runId:string):void {
     if(!d.decomposition&&!d.integrationBase)return;

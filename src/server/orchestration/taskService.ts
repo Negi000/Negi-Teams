@@ -4,6 +4,7 @@ import { lstat, mkdir, open, readFile, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { FileScheduler, parseSchedulerCapacity, schedulerCapacityUsage, schedulerWorkEligible, type ScheduledPhase } from "./scheduler.ts";
 import { scheduledMasterTurns, type MasterTurnAdmission } from "./masterTurnAdmission.ts";
+import type { ConfigurationAdmission } from "./projectConfiguration.ts";
 import { FileTaskLedger, type TaskEvent, type TaskSnapshot } from "./singleTask.ts";
 import { HumanReviewProofStore, isReviewRequestId } from "./humanReviewProof.ts";
 import { assertVaultRunOutputPaths, parseVaultRunConfig, type VaultRunConfig } from "./vaultRunConfig.ts";
@@ -91,6 +92,8 @@ interface Runtime {
 }
 
 export class LocalTaskService {
+  private configurationAdmission:ConfigurationAdmission=operation=>operation();
+  bindConfigurationAdmission(admission:ConfigurationAdmission){this.configurationAdmission=admission;}
   private readonly admissionGuards=new Map<string,TaskAdmissionGuard>();
   bindAdmissionGuard(id:string,guard:TaskAdmissionGuard):void{this.registered(id);this.admissionGuards.set(id,guard)}
   private readonly startChecks = new Map<string, () => Promise<string | null>>();
@@ -214,8 +217,9 @@ export class LocalTaskService {
   }
   /** A resident planner uses the exact scheduler and a server-owned evidence directory. */
   masterTurnAdmission(masterId: string): MasterTurnAdmission {
-    return scheduledMasterTurns({ root: join(this.root, "master-turns"), masterId,
+    const admission=scheduledMasterTurns({ root: join(this.root, "master-turns"), masterId,
       scheduler: this.scheduler, onReleased: () => this.pump() });
+    return {reserve:request=>this.configurationAdmission(()=>admission.reserve(request))};
   }
   /** Fixed catalog metadata for the planner. Does not disclose local paths or run commands. */
   dispatchCatalog(): Array<{ id: string; title: string; project: string; taskId: string; version: number; configSha256: string }> {
@@ -662,7 +666,7 @@ export class LocalTaskService {
   }
   private async startNew(run: CatalogRun, requestId: string, requestedBy: TaskRequestOrigin): Promise<TaskRunView> {
     const guard=this.admissionGuards.get(run.config.runId),operation=()=>this.startNewOnce(run,requestId,requestedBy);
-    const result=guard?await guard(operation):await operation();
+    const result=await this.configurationAdmission(()=>guard?guard(operation):operation());
     void this.pump().catch(()=>{});return result;
   }
   private async startNewOnce(run: CatalogRun, requestId: string, requestedBy: TaskRequestOrigin): Promise<TaskRunView> {

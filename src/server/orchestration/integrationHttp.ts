@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { parseCookie, tokenMatches, type AuthConfig } from "../auth.ts";
 import type { LocalIntegrationExecutionService } from "./integrationExecution.ts";
 import { integrationPageHtml } from "./integrationPage.ts";
+import { ConfigurationPendingError } from "./projectConfiguration.ts";
 
 function json(res:ServerResponse,status:number,value:unknown){res.writeHead(status,{"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store"});res.end(JSON.stringify(value))}
 export function createIntegrationHttp(service:LocalIntegrationExecutionService|null,auth:AuthConfig){
@@ -29,7 +30,7 @@ export function createIntegrationHttp(service:LocalIntegrationExecutionService|n
    const value=match?.[2]==="stop"?await service.stop(match[1],input.expectedHash,input.requestId):match?.[2]==="resume"?await service.resume(match[1],input.expectedHash,input.requestId):
     url.pathname.endsWith("/preview")?await service.preview(input.profileId,input.sourceRunIds):await service.start(input.profileId,input.sourceRunIds,input.expectedHash,input.requestId);
    json(res,200,value);
-  }catch{json(res,409,{error:url.pathname.endsWith("/preview")?"同じ基準で検証された固定成果と、重ならない変更範囲を選んでください。競合は統括へ戻してください。":"統合の版または実行状態を確認できません。操作を繰り返さず、状態を更新して差分と実行記録を確認してください。"})}
+  }catch(e){json(res,409,{error:e instanceof ConfigurationPendingError?e.message:url.pathname.endsWith("/preview")?"同じ基準で検証された固定成果と、重ならない変更範囲を選んでください。競合は統括へ戻してください。":"統合の版または実行状態を確認できません。操作を繰り返さず、状態を更新して差分と実行記録を確認してください。"})}
   return true;
  };
 }

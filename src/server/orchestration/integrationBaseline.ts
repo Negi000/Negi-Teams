@@ -40,6 +40,7 @@ export interface IntegrationBaseChoice {
 interface Registration {
   id: string; profileId: string; projectTitle:string; repository: string; profileHash: string;
   options: IntegrationReviewOptions; manifest: IntegrationReviewManifest; reviews: LocalReviewService;
+  active:boolean;
 }
 export class IntegrationBaselines {
   private readonly entries = new Map<string, Registration>();
@@ -49,12 +50,18 @@ export class IntegrationBaselines {
     if ((await lstat(root)).isSymbolicLink()) throw Error("Baseline storage cannot be a link");
     return new IntegrationBaselines(await realpath(root), await HumanReviewProofStore.open(join(root, "approvals")));
   }
-  async bind(profile: { id: string; title?:string; repository: string; hash: string }, options: IntegrationReviewOptions,
+  async bind(profile: { id: string; title?:string; repository: string; hash: string;project?:string;config?:{vault:string};allowedPaths?:string[];active?:boolean }, options: IntegrationReviewOptions,
     manifest: IntegrationReviewManifest, reviews: LocalReviewService): Promise<string | null> {
     if (await common(profile.repository) !== await common(options.checkout)) return null;
+    if(profile.project!==undefined){
+      for(const source of options.sources){const state=await source.readState();
+        if(state.contract.project!==profile.project||!profile.config||await realpath(source.config.vault)!==await realpath(profile.config.vault))return null;
+      }
+      if(!profile.allowedPaths||manifest.files.some(f=>!profile.allowedPaths!.some(p=>f.path===p||f.path.startsWith(p+"/"))))return null;
+    }
     const id = `base-${hash(profile.id + "\n" + manifest.review.id + "\n" + manifest.review.verifiedArtifactSha256).slice(0, 24)}`;
     reviews.bindCurrentCheck(manifest.review.id,()=>verifyIntegrationReview(options,manifest));
-    this.entries.set(id, { id, profileId: profile.id, projectTitle:profile.title??profile.id, repository: profile.repository, profileHash: profile.hash, options, manifest, reviews });
+    this.entries.set(id, { id, profileId: profile.id, projectTitle:profile.title??profile.id, repository: profile.repository, profileHash: profile.hash, options, manifest, reviews,active:profile.active!==false });
     return id;
   }
   private entry(profileId: string, id: string): Registration {
@@ -78,7 +85,7 @@ export class IntegrationBaselines {
         else if (await read(join(this.root, `${entry.id}.intent.json`))) error = "基準の保存が途中で止まりました。保存操作の照合が必要です。";
       } catch { error = "統合成果の受入・版・保存状態を確認してください。"; }
       rows.push({ id: entry.id, profileId, projectTitle:entry.projectTitle, title: entry.options.title, reviewId: entry.manifest.review.id,
-        artifactSha256: entry.manifest.review.verifiedArtifactSha256, baseSha, canPublish: !error && !baseSha, error });
+        artifactSha256: entry.manifest.review.verifiedArtifactSha256, baseSha, canPublish: entry.active && !error && !baseSha, error });
     }
     return rows;
   }
@@ -99,7 +106,7 @@ export class IntegrationBaselines {
       else if (await read(join(this.root, `${id}.intent.json`))) error = "基準の保存が途中で止まりました。保存操作の照合が必要です。";
     } catch { error = "保存した基準の版を照合できません。"; }
     return { id, profileId, projectTitle:entry.projectTitle, title: entry.options.title, reviewId: entry.manifest.review.id,
-      artifactSha256: entry.manifest.review.verifiedArtifactSha256, baseSha, canPublish: !error && !baseSha, error };
+      artifactSha256: entry.manifest.review.verifiedArtifactSha256, baseSha, canPublish: entry.active && !error && !baseSha, error };
   }
   private async record(entry: Registration): Promise<IntegrationBase> {
     const { id, profileId } = entry;
@@ -131,6 +138,7 @@ export class IntegrationBaselines {
   }
   async publish(profileId: string, id: string, artifactSha256: string, requestId: string): Promise<IntegrationBase> {
     const entry=this.entry(profileId,id);
+    if(!entry.active)throw Error("Project settings version is retired");
     return entry.reviews.withCurrentAcceptance(entry.manifest.review.id,artifactSha256,
       ()=>this.publishAccepted(profileId,id,artifactSha256,requestId));
   }

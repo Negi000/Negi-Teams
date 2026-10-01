@@ -11,6 +11,8 @@ import { LocalReviewService } from "../src/server/orchestration/reviewService.ts
 import { FileScheduler } from "../src/server/orchestration/scheduler.ts";
 import { createIntegrationHttp } from "../src/server/orchestration/integrationHttp.ts";
 import { integrationPageHtml } from "../src/server/orchestration/integrationPage.ts";
+import { LocalTaskAuthoringService } from "../src/server/orchestration/taskAuthoring.ts";
+import { LocalTaskService } from "../src/server/orchestration/taskService.ts";
 
 async function until<T>(read:()=>Promise<T>,done:(value:T)=>boolean) { const deadline=Date.now()+90000;for(;;){const value=await read();if(done(value))return value;assert.ok(Date.now()<deadline,"Observed state did not settle");await new Promise(r=>setTimeout(r,50));} }
 async function predecessors(f: Awaited<ReturnType<typeof setup>>) {
@@ -25,7 +27,7 @@ async function predecessors(f: Awaited<ReturnType<typeof setup>>) {
 }
 
 test("normal integration HTTP creates only its own worktree, preserves sources, stops queued work, restores without replay and resumes into signed review/baseline",async()=>{
- const f=await setup();let service:LocalIntegrationExecutionService|null=null;
+ const f=await setup();let service:LocalIntegrationExecutionService|null=null,restoredTasks:LocalTaskService|null=null;
  try{
   const reviews=await LocalReviewService.open({storageRoot:join(f.root,"reviews"),writableRoots:[],cases:[]});await f.tasks.connectReviews(reviews);
   const ids=await predecessors(f);
@@ -83,8 +85,21 @@ test("normal integration HTTP creates only its own worktree, preserves sources, 
   assert.equal(git(f.repo,["rev-parse","HEAD"]),originalHead);assert.equal(git(f.repo,["status","--porcelain"]),originalStatus);
   for(const p of sourcePins){assert.equal(git(p.checkout,["status","--porcelain"]),p.status);assert.equal(git(p.checkout,["diff","--cached"]),p.index)}assert.deepEqual(f.calls(),{astra:0,sol:2});
   await service.close();service=await LocalIntegrationExecutionService.open(f.authoring,f.tasks,reviews);assert.equal((await service.snapshot(second.id)).status,"ready_for_review");assert.equal((await reviews.snapshot(review.id)).status,"accepted");
+  await service.close();
+  await f.tasks.close();restoredTasks=await LocalTaskService.open(f.catalog,f.runtime);await restoredTasks.connectReviews(reviews);
+  const originalProfile=f.authoring.integrationConfiguration().profiles[0],newProfile={...originalProfile,id:"new-conditions",title:"新しい条件",active:true,allowedPaths:["docs/checks.txt"]};
+  const historical=await LocalTaskAuthoringService.open({storageRoot:f.authoringConfig.storageRoot,strictProfileHistory:true,
+    profiles:[{...originalProfile,active:false},newProfile,{...originalProfile,id:"other-project",project:"foreign-project",active:true}]},restoredTasks);
+  service=await LocalIntegrationExecutionService.open(historical,restoredTasks,reviews);
+  assert.equal((await service.snapshot(second.id)).reviewId,review.id);assert.equal((await reviews.snapshot(review.id)).status,"accepted");
+  assert.deepEqual(await historical.integrationBase("docs-project",published.id),published);
+  assert.equal((await reviews.snapshot(review.id)).integration!.baselines!.find(b=>b.profileId==="docs-project")!.canPublish,false);
+  assert.ok(!(await reviews.snapshot(review.id)).integration!.baselines!.some(b=>b.profileId==="new-conditions"),"Narrowed scope cannot inherit the wider integration");
+  assert.ok(!(await reviews.snapshot(review.id)).integration!.baselines!.some(b=>b.profileId==="other-project"),"Another logical project cannot inherit this integration");
+  await assert.rejects(historical.publishIntegrationBase("docs-project",published.id,review.artifactSha256,randomUUID()),/retired/);
+  assert.equal((await service.overview()).profileId,"new-conditions");
   const events=(await scheduler.read()).events;assert.equal(events.filter(e=>e.action.type==="claim"&&e.action.workId===second.id).length,1);assert.equal(events.filter(e=>e.action.type==="claim"&&e.action.workId===first.id).length,0);
- }finally{await service?.close();await f.close()}
+ }finally{await service?.close();await restoredTasks?.close();await f.close()}
 });
 
 test("another server can stop preflight without poisoning retry and stop a running verification without publishing",async()=>{

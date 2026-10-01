@@ -16,6 +16,7 @@ import type { LocalReviewService } from "./reviewService.ts";
 import type { LocalTaskAuthoringService, TaskExecutionProfile } from "./taskAuthoring.ts";
 import type { VerificationCommand } from "./vaultRunConfig.ts";
 import type { IntegrationReviewOptions } from "./integrationReview.ts";
+import type { ConfigurationAdmission } from "./projectConfiguration.ts";
 
 const exec = promisify(execFile), hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const idPattern = /^integration-[a-f0-9-]{36}$/;
@@ -59,6 +60,8 @@ export interface IntegrationExecutionView {
   live: boolean; canStop: boolean; canResume: boolean; reviewId: string | null; error: string | null;
 }
 export class LocalIntegrationExecutionService {
+  private admission:ConfigurationAdmission=operation=>operation();
+  bindConfigurationAdmission(admission:ConfigurationAdmission){this.admission=admission;}
   private readonly pending = new Set<string>();
   private readonly active = new Map<string, { controller: AbortController; promise: Promise<void> }>();
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -81,10 +84,14 @@ export class LocalIntegrationExecutionService {
       await HumanReviewProofStore.open(join(root, "approvals")));
     // Only immutable completed results are registered on restart. No queued or
     // uncertain write/verification command is replayed without another human action.
-    for (const id of await service.ids()) try {
-      const setup = await service.setup(id), result = await service.result(setup);
+    for (const id of await service.ids()) {
+      // A missing/rewritten historical profile cannot silently drop a completed review.
+      if(await exists(join(service.dir(id),"setup.json"))){const recorded=await json<Setup>(join(service.dir(id),"setup.json"));
+        if(service.profile(recorded.selection.profileId).hash!==recorded.selection.profileHash)throw Error("Integration history requires its exact execution profile");}
+      try {const setup = await service.setup(id), result = await service.result(setup);
       if (result?.status === "ready_for_review") await service.register(setup, result);
-    } catch { /* the operation remains visible for reconciliation */ }
+      } catch { /* the operation remains visible for reconciliation */ }
+    }
     return service;
   }
   private profile(id: string) { const p = this.profiles.find(p => p.id === id); if (!p) throw Error("Integration project missing"); return p; }
@@ -113,7 +120,7 @@ export class LocalIntegrationExecutionService {
     for (const id of [...ids].sort()) {
       const source = await this.tasks.integrationSource(id), state = await source.readState(), manifest = await source.readManifest!();
       const project = await this.tasks.knowledgeSource(id), entry = scheduler.entries.find(e => e.work.id === id);
-      if (project.project !== p.project || await common(source.config.checkout) !== await common(p.repository) ||
+      if (project.project !== p.project || await realpath(source.config.vault)!==await realpath(p.config.vault) || await common(source.config.checkout) !== await common(p.repository) ||
         await realpath(source.config.schedulerPath) !== await realpath(p.config.schedulerPath) ||
         !["ready_for_review", "accepted"].includes(state.status) || state.verification?.outcome !== "passed" ||
         entry?.status !== "verified" || entry.evidenceRef !== state.verification.evidenceRef ||
@@ -143,19 +150,19 @@ export class LocalIntegrationExecutionService {
       paths: selection.paths, verification: uniqueCommands.map(c => c.requirement), sources: rows };
     return { selection, preview, sources, commands: uniqueCommands };
   }
-  async preview(profileId: string, ids: string[]) { return (await this.selected(profileId, ids)).preview; }
+  async preview(profileId: string, ids: string[]) { this.authoring.assertActiveProfile(profileId);return (await this.selected(profileId, ids)).preview; }
   async overview(profileId?: string) {
-    const p = this.profile(profileId ?? this.profiles[0].id), sources = [];
+    const p = this.profile(profileId ?? this.profiles.find(p=>p.active!==false)!.id), sources = [];
     for (const item of this.tasks.list()) {
       if ((await this.tasks.knowledgeSource(item.id)).project !== p.project) continue;
       const view = await this.tasks.snapshot(item.id);
       let eligible = false;
-      try { const source = await this.tasks.integrationSource(item.id); eligible = ["ready_for_review", "accepted"].includes(view.status) && await common(source.config.checkout) === await common(p.repository); } catch { /* not ready */ }
+      try { const source = await this.tasks.integrationSource(item.id); eligible = p.active!==false && ["ready_for_review", "accepted"].includes(view.status) && await realpath(source.config.vault)===await realpath(p.config.vault) && await common(source.config.checkout) === await common(p.repository); } catch { /* not ready */ }
       sources.push({ id: item.id, title: item.title, status: view.status, eligible, baseSha: view.baseSha,
         reviewId: view.reviewId, error: eligible ? null : "固定成果と検証を確認してから統合できます。" });
     }
     const runs = []; for (const id of await this.ids()) runs.push(await this.snapshot(id));
-    return { profiles: this.profiles.map(p => ({ id: p.id, title: p.title })), profileId: p.id, sources, runs };
+    return { profiles: this.profiles.filter(p=>p.active!==false).map(p => ({ id: p.id, title: p.title })), profileId: p.id, sources, runs };
   }
   private async worktree(setup: Setup, clean = false) {
     const checkout = this.checkout(setup), p = this.profile(setup.selection.profileId);
@@ -166,6 +173,10 @@ export class LocalIntegrationExecutionService {
     if (created.setupHash !== hash(setup)) throw Error("Integration worktree creation is not confirmed");
   }
   async start(profileId: string, ids: string[], expectedHash: string, requestId: string) {
+    return this.admission(()=>this.startAdmitted(profileId,ids,expectedHash,requestId));
+  }
+  private async startAdmitted(profileId: string, ids: string[], expectedHash: string, requestId: string) {
+    this.authoring.assertActiveProfile(profileId);
     if (this.closing || !isReviewRequestId(requestId) || !/^[a-f0-9]{64}$/.test(expectedHash)) throw Error("Integration approval invalid");
     requestId = requestId.toLowerCase(); const id = "integration-" + requestId;
     const lockPath = join(this.root, "writer.lock"), lock = await open(lockPath, "wx", 0o600);
@@ -304,7 +315,7 @@ export class LocalIntegrationExecutionService {
       else { status = "needs_reconciliation"; error = "統合結果の版・検証・レビュー登録を照合してください。"; }
     }
     let canResume = false;
-    if (entry?.status === "queued" && !live && !this.closing && !await exists(join(this.dir(id), "dispatch.lock"))) try {
+    if (this.profile(setup.selection.profileId).active!==false && entry?.status === "queued" && !live && !this.closing && !await exists(join(this.dir(id), "dispatch.lock"))) try {
       await this.worktree(setup, true); canResume = isDeepStrictEqual((await this.selected(setup.selection.profileId, setup.selection.pins.map(p => p.runId))).selection, setup.selection);
     } catch { error = "待機中に元Taskまたは作業場所が変わりました。開始を保留しています。"; }
     return { id, hash: setup.hash, projectTitle: this.profile(setup.selection.profileId).title, sourceRunIds: setup.selection.pins.map(p => p.runId),
@@ -338,7 +349,11 @@ export class LocalIntegrationExecutionService {
     try { return await fn(); } finally { await lock.close(); await unlink(path); }
   }
   async resume(id: string, expectedHash: string, requestId: string) {
+    return this.admission(()=>this.resumeAdmitted(id,expectedHash,requestId));
+  }
+  private async resumeAdmitted(id: string, expectedHash: string, requestId: string) {
     const setup = await this.setup(id); if (setup.hash !== expectedHash || !isReviewRequestId(requestId) || !(await this.snapshot(id)).canResume) throw Error("Integration cannot resume");
+    this.authoring.assertActiveProfile(setup.selection.profileId);
     await this.proofs.create({ id: requestId, action: "operation", caseId: id, runId: id, artifactSha256: expectedHash,
       verificationRef: null, data: { domain: "integration-resume", setupSha256: hash(setup) } });
     this.pending.add(id); void this.pump().catch(() => undefined); return this.snapshot(id);

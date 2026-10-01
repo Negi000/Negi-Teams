@@ -12,10 +12,10 @@ import { parseVaultRunConfig, type VaultRunConfig } from "./vaultRunConfig.ts";
 const exec = promisify(execFile), hash = (v:unknown)=>createHash("sha256").update(JSON.stringify(v)).digest("hex");
 const inside=(a:string,b:string)=>{const r=relative(a.toLowerCase(),b.toLowerCase());return !r||(!r.startsWith("..")&&!isAbsolute(r))};
 const label=(v:unknown)=>typeof v==="string"&&/^[a-zA-Z0-9._-]{1,100}$/.test(v);
-interface Settings { id:string; title:string; project:string; repository:string; vault:string; executable:string;
+export interface ProjectSettings { id:string; title:string; project:string; repository:string; vault:string; executable:string;
   allowedPaths:string[]; astra:VaultRunConfig["astra"]; sol:VaultRunConfig["sol"]; verification:VaultRunConfig["verification"];
   maxAttempts:number; timeLimitMinutes:number }
-export interface ProjectSetupPreview { schema:"negi-project-setup/1"; settings:Settings; baseSha:string;
+export interface ProjectSetupPreview { schema:"negi-project-setup/1"; settings:ProjectSettings; baseSha:string;
   sources:Array<{id:string;kind:string;version:number;sha256:string;path:string}>; hash:string }
 interface Publication { requestId:string; preview:ProjectSetupPreview }
 async function boundedJson(path:string,maximum=24000):Promise<unknown> {
@@ -74,7 +74,7 @@ export class LocalProjectSetup {
     let inspector=script;try{await lstat(inspector)}catch{inspector=fileURLToPath(new URL("../../../../scripts/negi_task_authoring.py",import.meta.url))}
     const refs=JSON.parse((await exec("python",[inspector,"--vault",vault,"inspect","--project",String(p.project)],
       {windowsHide:true,timeout:20000,maxBuffer:200000,env:{...process.env,PYTHONIOENCODING:"utf-8"}})).stdout) as {sources:ProjectSetupPreview["sources"]};
-    const settings:Settings={id:String(p.id),title:p.title.trim(),project:String(p.project),repository,vault,executable,allowedPaths:p.allowedPaths as string[],
+    const settings:ProjectSettings={id:String(p.id),title:p.title.trim(),project:String(p.project),repository,vault,executable,allowedPaths:p.allowedPaths as string[],
       astra:config.astra,sol:config.sol,verification:config.verification,maxAttempts:Number(p.maxAttempts),timeLimitMinutes:Number(p.timeLimitMinutes)};
     const core={schema:"negi-project-setup/1" as const,settings,baseSha,sources:refs.sources},preview={...core,hash:hash(core)};
     if(Buffer.byteLength(JSON.stringify(preview))>20000)throw Error("Setup preview too large");return preview;
@@ -106,17 +106,27 @@ export class LocalProjectSetup {
   /** Trusted startup composition. Configuration is never accepted from a model tool. */
   async startup(preview:ProjectSetupPreview) {
     if(!isDeepStrictEqual(await this.current(),preview))throw Error("Setup publication changed");
-    const p=preview.settings;
+    return this.runtimeProfiles([{id:preview.settings.id,preview,active:true}]);
+  }
+  /** Only the signed configuration registry supplies these immutable execution versions. */
+  async runtimeProfiles(entries:Array<{id:string;preview:ProjectSetupPreview;active:boolean}>) {
+    if(!entries.length||!entries.some(p=>p.active))throw Error("Active project required");
+    for(const entry of entries){const p=entry.preview.settings;
     for(const source of [p.repository,p.vault]){const actual=await existing(source,"directory");if(actual!==source||inside(source,this.root)||inside(this.root,source))throw Error("Setup root identity changed")}
     const executable=await existing(p.executable,"file");if(executable!==p.executable)throw Error("Codex executable changed location");
-    await this.cleanRepository(p.repository);
+    if(entry.active)await this.cleanRepository(p.repository);
     for(const c of p.verification)if(await existing(c.program,"file")!==c.program)throw Error("Verification program changed location");
+    }
     for(const d of ["profile","authoring","task-state","reviews","worktrees"])await mkdir(join(this.root,d),{recursive:true});
-    const config:VaultRunConfig={executable,checkout:p.repository,vault:p.vault,snapshot:join(this.root,"profile","not-a-task.json"),outputDir:join(this.root,"profile"),
-      schedulerPath:join(this.root,"scheduler.jsonl"),runId:p.id,astra:p.astra,sol:p.sol,verification:p.verification,resources:[]};
+    const profiles=entries.map(entry=>{const p=entry.preview.settings;
+      const config:VaultRunConfig={executable:p.executable,checkout:p.repository,vault:p.vault,snapshot:join(this.root,"profile","not-a-task.json"),outputDir:join(this.root,"profile"),
+        schedulerPath:join(this.root,"scheduler.jsonl"),runId:entry.id,astra:p.astra,sol:p.sol,verification:p.verification,resources:[]};
+      return {id:entry.id,title:p.title,project:p.project,config,repository:p.repository,worktreeRoot:join(this.root,"worktrees"),
+        allowedPaths:p.allowedPaths,maxAttempts:p.maxAttempts,timeLimitMinutes:p.timeLimitMinutes,active:entry.active};});
+    const config=profiles.find(p=>p.active)!.config;
     return {tasks:{stateRoot:join(this.root,"task-state"),schedulerPath:config.schedulerPath,runs:[]},
-      reviews:{storageRoot:join(this.root,"reviews"),writableRoots:[p.repository,p.vault,join(this.root,"worktrees")],cases:[]},
-      authoring:{storageRoot:join(this.root,"authoring"),profiles:[{id:p.id,title:p.title,project:p.project,config,repository:p.repository,
-        worktreeRoot:join(this.root,"worktrees"),allowedPaths:p.allowedPaths,maxAttempts:p.maxAttempts,timeLimitMinutes:p.timeLimitMinutes}]},config};
+      reviews:{storageRoot:join(this.root,"reviews"),writableRoots:[...new Set(entries.flatMap(e=>[e.preview.settings.repository,e.preview.settings.vault])),join(this.root,"worktrees")],cases:[]},
+      authoring:{storageRoot:join(this.root,"authoring"),profiles,strictProfileHistory:true},config,
+      requiredModels:profiles.filter(p=>p.active).flatMap(p=>[p.config.astra,p.config.sol])};
   }
 }
