@@ -38,6 +38,7 @@ import type {
 import { ChatLog } from "./chatLog.ts";
 import { createMasterBrain } from "./index.ts";
 import { parseRateLimitEvent } from "./rateLimit.ts";
+import { MasterInputNotSentError } from "../orchestration/masterTurnAdmission.ts";
 
 /**
  * プロセス死亡からの `--resume` 自動復帰ポリシー（設計書 §8-R1）。
@@ -531,6 +532,7 @@ export class MasterSession {
       attachments?: ChatAttachment[];
       /** 返信の引用元（PR-M11）。既に sanitize 済みのものを渡す。 */
       replyTo?: ChatReplyRef;
+      requestId?: string;
     } = {},
   ): Promise<{ accepted: boolean; reason?: string }> {
     const brain = this.brain;
@@ -550,6 +552,10 @@ export class MasterSession {
         ].join("\n") });
         if (!delivery.acked) throw new Error("App Server did not acknowledge turn/start");
       } catch (err) {
+        if (err instanceof MasterInputNotSentError) {
+          if (this.brain === brain) { this.codexTurnPending = false; this.setState("idle"); }
+          return { accepted: false, reason: err.message };
+        }
         // An errored request may still have reached the provider. Hold this
         // session until the process exits; never allow an automatic resend.
         if (this.brain === brain) this.setState("stopped");
@@ -557,6 +563,7 @@ export class MasterSession {
           reason: `Codex turn 投入に失敗し、再送前に照合が必要です: ${(err as Error).message}` };
       }
       this.emitChat({ kind: "user", text,
+        ...(opts.requestId ? { requestId: opts.requestId } : {}),
         ...(opts.replyTo ? { replyTo: opts.replyTo } : {}) });
       return { accepted: true };
     }

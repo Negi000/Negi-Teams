@@ -96,6 +96,8 @@ export class ChatPanel {
   private moreRow: HTMLElement | null = null;
   /** master の agent id（chatState 受信で確定する）。 */
   private masterId: string | null = null;
+  private disconnected = false;
+  private pendingCodexSend: { requestId: string; text: string; draft: string; replyTo: ChatReplyRef | null } | null = null;
   /** アカウント枠（WS `usage` 由来・ヘッダ表示用）。未受信は「—」。 */
   private rateLimits: HeaderRateLimits = NO_RATE_LIMITS;
   /** ライトボックス（PR-M10）の状態機械。DOM 側はこの値を描画するだけ。 */
@@ -112,7 +114,8 @@ export class ChatPanel {
       text: string,
       attachments: ChatAttachment[],
       replyTo: ChatReplyRef | null,
-    ) => void,
+      requestId?: string,
+    ) => void | boolean,
     private readonly onStop: (id: string) => void,
     private readonly onNew: (id: string) => void,
     /** 承認/質問への応答（PR-M5）。WS `chatAnswer` を送る。 */
@@ -195,6 +198,8 @@ export class ChatPanel {
     this.trayEl = div("chat-tray");
     this.trayEl.hidden = true;
     this.hintEl = div("chat-hint");
+    this.hintEl.setAttribute("role", "status");
+    this.hintEl.setAttribute("aria-live", "polite");
     this.hintEl.hidden = true;
     foot.append(this.pendingBar, this.hintEl, this.replyEl, this.trayEl, row);
 
@@ -221,6 +226,7 @@ export class ChatPanel {
 
   /** WS `chatState`。chat モードの master が居ることの判定材料も兼ねる。 */
   applyState(id: string, state: MasterChatState, pending: number): void {
+    this.disconnected = false;
     this.masterId = id;
     this.state = state;
     this.pending = pending;
@@ -241,6 +247,8 @@ export class ChatPanel {
 
   /** WS `chatSnapshot`（接続直後・再接続時の一括復元）。 */
   applySnapshot(envelopes: readonly MasterChatEnvelope[], hasMore: boolean): void {
+    if (this.pendingCodexSend && envelopes.some(({ event }) => event.kind === "user" &&
+        event.requestId === this.pendingCodexSend!.requestId)) this.finishCodexSend(true);
     this.transcript.reset(envelopes);
     this.transcript.trim(MAX_CHAT_ITEMS);
     // アイテムが総入れ替えになるので、開いていたライトボックスは畳む（key が変わりうる）。
@@ -251,6 +259,8 @@ export class ChatPanel {
 
   /** WS `chatEvent`（live 1 件）。 */
   applyEvent(envelope: MasterChatEnvelope): void {
+    if (envelope.event.kind === "user" && envelope.event.requestId === this.pendingCodexSend?.requestId &&
+        this.pendingCodexSend) this.finishCodexSend(true);
     const change = this.transcript.apply(envelope);
     if (change.touched.length === 0) return;
     const wasBottom = this.stuckToBottom;
@@ -274,8 +284,31 @@ export class ChatPanel {
 
   /** 接続が切れたときの表示（再接続で snapshot が来れば戻る）。 */
   markDisconnected(): void {
+    this.disconnected = true;
     this.stateBadge.textContent = "切断（再接続中…）";
     this.stateBadge.className = "chat-state state-stopped";
+    if (this.pendingCodexSend) this.showHint("送信結果を確認できません。入力を保持しています。会話履歴の照合を待ち、自動再送しません。", "error");
+    this.syncControls();
+  }
+
+  applySendResult(id: string, requestId: string, accepted: boolean, reason?: string): void {
+    if (id !== this.masterId || requestId !== this.pendingCodexSend?.requestId) return;
+    this.finishCodexSend(accepted);
+    if (!accepted) this.showHint(reason ?? "送信できませんでした。入力を保持しています。", "error");
+  }
+
+  private finishCodexSend(accepted: boolean): void {
+    const pending = this.pendingCodexSend;
+    if (!pending) return;
+    this.pendingCodexSend = null;
+    if (accepted) {
+      this.hintEl.hidden = true;
+      if (this.hintTimer !== null) { window.clearTimeout(this.hintTimer); this.hintTimer = null; }
+      this.history.push(pending.text);
+      if (this.input.value === pending.draft) { this.input.value = ""; this.autoGrow(); }
+      if (this.replyTo === pending.replyTo) this.setReplyTo(null);
+    }
+    this.syncControls();
   }
 
   /** 入力欄へフォーカス（広幅のみ。狭幅は勝手にソフトキーボードを出さない）。 */
@@ -329,6 +362,7 @@ export class ChatPanel {
 
   private onSendClick(): void {
     if (!this.masterId) return;
+    if (this.disconnected || this.pendingCodexSend) return;
     if (this.codexReadOnly && this.state === "busy") return;
     // busy 中も送れる（走行中ターンに合流する）。送れないのは頭脳が居ないときだけ。
     if (!sendEnabled(this.state)) return;
@@ -339,7 +373,22 @@ export class ChatPanel {
       this.showHint("Codex master の添付ファイル入力は未対応です", "error");
       return;
     }
-    this.onSend(this.masterId, text, [...this.attachments], this.replyTo);
+    if (this.codexReadOnly) {
+      const requestId = crypto.randomUUID();
+      this.pendingCodexSend = { requestId, text, draft: this.input.value, replyTo: this.replyTo };
+      this.syncControls();
+      if (this.onSend(this.masterId, text, [], this.replyTo, requestId) === false) {
+        this.finishCodexSend(false);
+        this.markDisconnected();
+        this.showHint("接続が切れています。今回の入力は未送信で、入力欄に保持しています。", "error");
+      }
+      return;
+    }
+    if (this.onSend(this.masterId, text, [...this.attachments], this.replyTo) === false) {
+      this.markDisconnected();
+      this.showHint("接続が切れています。今回の入力は未送信で、入力欄に保持しています。", "error");
+      return;
+    }
     this.history.push(text);
     this.attachments.length = 0;
     this.setReplyTo(null);
@@ -488,12 +537,15 @@ export class ChatPanel {
 
   /** 状態に応じて送信ボタン・入力欄・pending バーを更新する。 */
   private syncControls(): void {
-    const blocked = !sendEnabled(this.state) || (this.codexReadOnly && this.state === "busy");
+    const blocked = this.disconnected || Boolean(this.pendingCodexSend) || !sendEnabled(this.state) ||
+      (this.codexReadOnly && this.state === "busy");
     this.sendBtn.disabled = blocked;
     this.stopBtn.disabled = !stopEnabled(this.state);
     this.input.disabled = blocked;
     this.input.placeholder = blocked
-      ? this.codexReadOnly && this.state === "busy"
+      ? this.pendingCodexSend
+        ? "送信結果を確認しています（入力は保持されます）"
+        : this.codexReadOnly && this.state === "busy"
         ? "Codex master の turn が終了するまでお待ちください"
         : "master（chat）が起動していません…"
       : this.state === "busy"

@@ -7,6 +7,8 @@ import { unsupportedOf, type MasterBrain, type MasterBrainCapabilities,
 import type { CodexTurnObservation } from "./appServerClient.ts";
 import type { RegisteredTaskTools } from "../orchestration/taskDispatchTools.ts";
 import { subscriptionChildEnv } from "./boundedAppServer.ts";
+import { MasterInputNotSentError, type MasterTurnAdmission,
+  type MasterTurnLease } from "../orchestration/masterTurnAdmission.ts";
 
 type RecordValue = Record<string, unknown>;
 function record(value: unknown): RecordValue | null {
@@ -26,6 +28,7 @@ export interface CodexAppServerBrainOptions {
   launch?: (options: AppServerProcessOptions) => AppServerProcess;
   taskTools?: RegisteredTaskTools;
   subscriptionOnly?: boolean;
+  admission?: MasterTurnAdmission;
 }
 
 const taskInstructions = "\n登録済みTaskの委任はnegi_list_tasks、negi_read_task、negi_dispatch_taskを使う。" +
@@ -63,6 +66,9 @@ export class CodexAppServerBrain implements MasterBrain {
   private waiter: ((value: IteratorResult<MasterEvent>) => void) | null = null;
   private closed = false;
   private stopping = false;
+  private startOptions: { cwd: string; model: string } | null = null;
+  private pendingSend: Promise<{ acked: boolean }> | null = null;
+  private settlement: Promise<void> | null = null;
 
   constructor(private readonly options: CodexAppServerBrainOptions) {}
 
@@ -80,6 +86,7 @@ export class CodexAppServerBrain implements MasterBrain {
     }
     this.closed = false;
     this.stopping = false;
+    this.startOptions = { cwd: options.cwd, model: options.model };
     const process = (this.options.launch ?? AppServerProcess.launch)({
       executable: this.options.executable, args: this.options.args, cwd: options.cwd,
       ...(this.options.subscriptionOnly ? { env: subscriptionChildEnv() } : {}),
@@ -128,27 +135,69 @@ export class CodexAppServerBrain implements MasterBrain {
   }
 
   async send(input: MasterBrainInput): Promise<{ acked: boolean }> {
+    if (this.pendingSend || this.settlement || this.process?.client.activeTurn)
+      throw new MasterInputNotSentError("統括は実行中です。今回の入力は未送信です。");
+    const pending = this.sendTurn(input);
+    this.pendingSend = pending;
+    try { return await pending; }
+    finally { if (this.pendingSend === pending) this.pendingSend = null; }
+  }
+
+  private async sendTurn(input: MasterBrainInput): Promise<{ acked: boolean }> {
     const process = this.process;
-    if (!process || this.closed || (input.images?.length ?? 0) > 0) {
+    if (!process || this.closed || this.stopping || !this.startOptions || (input.images?.length ?? 0) > 0) {
       throw new Error("Codex read-only brain is stopped or image input is unsupported");
     }
-    let turnId: string;
-    try { turnId = await process.client.startTurn(input.text, this.options.effort); }
+    let lease: MasterTurnLease | undefined;
+    try {
+      lease = await this.options.admission?.reserve({ ...this.startOptions, text: input.text,
+        effort: this.options.effort, threadId: this.sessionId()! });
+    } catch (error) {
+      if (error instanceof MasterInputNotSentError) throw error;
+      throw new MasterInputNotSentError(`実行枠の確認に失敗しました。今回の入力は未送信です: ${(error as Error).message}`);
+    }
+    if (this.closed || this.stopping) {
+      await lease?.cancelBeforeDispatch();
+      throw new MasterInputNotSentError("送信前に統括が停止しました。今回の入力は未送信です。");
+    }
+    try { await lease?.dispatching(); }
     catch (error) {
-      void process.stop();
+      try { await lease?.cancelBeforeDispatch(); }
+      catch { await this.holdUnknown(lease, "Master dispatch record failed before provider call; inspect scheduler evidence"); }
+      throw new MasterInputNotSentError(`送信記録を保存できませんでした。今回の入力は未送信です: ${(error as Error).message}`);
+    }
+    let turnId: string;
+    try {
+      turnId = await process.client.startTurn(input.text, this.options.effort);
+      await lease?.bind(turnId);
+    }
+    catch (error) {
+      await this.holdUnknown(lease, "Master turn/start or durable provider binding was not confirmed");
+      await process.stop();
       throw error;
     }
-    void this.settleTurn(process, turnId);
+    const settlement = this.settleTurn(process, turnId, lease);
+    this.settlement = settlement;
+    void settlement.finally(() => { if (this.settlement === settlement) this.settlement = null; }).catch(() => {});
     return { acked: true };
   }
 
-  private async settleTurn(process: AppServerProcess, turnId: string): Promise<void> {
+  private async holdUnknown(lease: MasterTurnLease | undefined, reason: string): Promise<void> {
+    try { await lease?.unknown(reason); }
+    catch {
+      // A failed ledger append cannot prove release. The original running claim remains reserved.
+      this.emit({ kind: "notice", level: "error", text: "実行枠の照合記録を保存できませんでした。台帳の確認が必要です。" });
+    }
+  }
+
+  private async settleTurn(process: AppServerProcess, turnId: string, lease?: MasterTurnLease): Promise<void> {
     try {
       const observation = await process.client.waitForTurn(turnId, this.options.turnTimeoutMs);
       if (observation.status === "unknown" ||
           (observation.status === "completed" && observation.finalText === null)) {
         throw new Error("turn outcome or final answer is unknown");
       }
+      await lease?.complete(observation);
       if (observation.status === "completed") {
         this.emit({ kind: "text", text: observation.finalText!, partial: false });
       }
@@ -156,6 +205,7 @@ export class CodexAppServerBrain implements MasterBrain {
         aborted: observation.status === "interrupted", usage: usageOf(observation),
         costUsd: null, errorText: observation.status === "failed" ? "Codex turn failed" : null });
     } catch (error) {
+      await this.holdUnknown(lease, "Master provider result or durable terminal evidence unknown; inspect before release");
       this.emit({ kind: "notice", level: "error",
         text: `Codex turn ${turnId} の結果は未確定です。再送前に照合してください: ${(error as Error).message}` });
       await process.stop();
@@ -181,6 +231,8 @@ export class CodexAppServerBrain implements MasterBrain {
   async stop(): Promise<void> {
     this.stopping = true;
     if (this.process) await this.process.stop();
+    await this.pendingSend?.catch(() => {});
+    await this.settlement;
     this.finish();
   }
 

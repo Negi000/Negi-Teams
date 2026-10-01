@@ -448,6 +448,8 @@ async function startMasterChatSession(spec: FixedEbiSpec): Promise<void> {
   const codexReadOnly = spec.brain === "codex"
     ? codexMasterLaunchOptions({ model: spec.launch.model, extraArgs: spec.extraArgs })
     : null;
+  if (codexReadOnly && !taskService)
+    throw new Error("Codex chat master requires NEGI_TASK_CONFIG for shared turn admission");
   // config の args に --mcp-config を手書きしている場合はそちらを尊重する
   //（applyMasterMcpConfig と同じ方針。二重指定を作らない）。
   const hasManualMcp = spec.extraArgs.includes("--mcp-config");
@@ -462,6 +464,7 @@ async function startMasterChatSession(spec: FixedEbiSpec): Promise<void> {
     extraArgs: codexReadOnly ? [] : spec.extraArgs,
     logPath: MASTER_CHAT_LOG_PATH,
     ...(codexReadOnly ? { createBrain: () => new CodexAppServerBrain({ ...codexReadOnly,
+      admission: taskService!.masterTurnAdmission(spec.id),
       ...(taskService ? { taskTools: registeredTaskTools(taskService, spec.id) } : {}) }) } : {}),
     handlers: {
       onEvent: (id, envelope) => {
@@ -1042,8 +1045,18 @@ function handleClientMessage(ws: WebSocket, msg: ClientMessage): void {
       break;
     }
     case "chatSend": {
+      if (msg.requestId !== undefined && (typeof msg.requestId !== "string" ||
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(msg.requestId))) {
+        send(ws, { type: "error", text: "チャット送信の識別子が不正です" });
+        break;
+      }
+      const report = (accepted: boolean, reason?: string) => {
+        if (msg.requestId) send(ws, { type: "chatSendResult", id: msg.id, requestId: msg.requestId,
+          accepted, ...(reason ? { reason } : {}) });
+        else if (!accepted) send(ws, { type: "error", text: reason ?? "送信できませんでした" });
+      };
       const session = chatSessionFor(ws, msg.id);
-      if (!session) break;
+      if (!session) { report(false, "統括が起動していません。今回の入力は未送信です。"); break; }
       void (async () => {
         // 添付は「保存済み basename」でしか参照できない（クライアントは任意パスを送れない）。
         // ここで実体を読み直して base64 化し、stream-json の image ブロックに載せる。
@@ -1066,11 +1079,12 @@ function handleClientMessage(ws: WebSocket, msg: ClientMessage): void {
         const r = await session.sendUserText(msg.text, {
           images,
           attachments: resolved,
+          ...(msg.requestId ? { requestId: msg.requestId } : {}),
           ...(replyTo ? { replyTo } : {}),
         });
-        if (!r.accepted) send(ws, { type: "error", text: r.reason ?? "送信できませんでした" });
+        report(r.accepted, r.reason);
       })().catch((err) => {
-        send(ws, { type: "error", text: `送信に失敗しました: ${(err as Error).message}` });
+        report(false, `送信に失敗しました: ${(err as Error).message}`);
       });
       break;
     }

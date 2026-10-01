@@ -6,6 +6,8 @@
 
 旧PTY fixtureは固定sleepから描画・idle/busy・queue flushの観測へ変更し、合成heartbeatとテスト側の待機期限を調整した。製品の配送設定は変更していない。最終の関連34件は33成功・1起動待ちタイムアウトで、失敗した1件は個別再実行で成功した。型検査・ビルドも成功。これを全件の一括成功には換算しない。
 
+通常Codex MasterのturnもTaskと同じschedulerへ計上した。入力とprovider ID、終了証拠を保存し、確認済みの終了で枠を解放、結果不明時は保持する。満席は未送信として入力を保持し、枠解放後に待機Taskを再評価する。関連87件・型検査・ビルドと、実Astra lowの読取1 turnの記録・枠解放を確認。既存Task・Vault参照ノート・二つのcheckoutは前後で変化しなかった。Material 3のエラー表示と受付までの入力保持を1440px/320px/375pxで確認。既存の並列数は変更せず、Task内Astraを含むplanner 1＋worker 2の容量設定、統括の照合・再開UI、完了通知は残る。
+
 | Phase | 実施して確認した範囲 | 受入に残る主な条件 |
 |---|---|---|
 | 0 基準 | 既存SHA・dirty状態・起動/テスト・認証/MCP/configの境界を記録。Windowsの標準テスト入口と配送fixtureを修正 | 実CLIのopt-in試験とPOSIX固有試験は別ゲート |

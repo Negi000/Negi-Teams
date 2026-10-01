@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { lstat, mkdir, open, readFile, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { FileScheduler, schedulerWorkEligible } from "./scheduler.ts";
+import { scheduledMasterTurns, type MasterTurnAdmission } from "./masterTurnAdmission.ts";
 import { FileTaskLedger, type TaskEvent, type TaskSnapshot } from "./singleTask.ts";
 import { HumanReviewProofStore, isReviewRequestId } from "./humanReviewProof.ts";
 import { assertVaultRunOutputPaths, parseVaultRunConfig, type VaultRunConfig } from "./vaultRunConfig.ts";
@@ -89,6 +90,7 @@ export class LocalTaskService {
   private readonly active = new Map<string, { controller: AbortController; promise: Promise<void> }>();
   private readonly starts = new Map<string, Promise<TaskRunView>>();
   private pumping = false;
+  private pumpAgain = false;
   private closing = false;
   private reviews: LocalReviewService | null = null;
   private knowledgeProofDirectory?: string;
@@ -149,6 +151,11 @@ export class LocalTaskService {
     return new LocalTaskService(root, runs, new FileScheduler(schedulerPath!), runtime, operationProofs);
   }
   list(): Array<{ id: string; title: string }> { return this.runs.map((run) => ({ id: run.config.runId, title: run.title })); }
+  /** A resident planner uses the exact scheduler and a server-owned evidence directory. */
+  masterTurnAdmission(masterId: string): MasterTurnAdmission {
+    return scheduledMasterTurns({ root: join(this.root, "master-turns"), masterId,
+      scheduler: this.scheduler, onReleased: () => this.pump() });
+  }
   /** Fixed catalog metadata for the planner. Does not disclose local paths or run commands. */
   dispatchCatalog(): Array<{ id: string; title: string; project: string; taskId: string; version: number; configSha256: string }> {
     return this.runs.map(run => ({ id: run.config.runId, title: run.title, project: String(run.contract.project),
@@ -545,7 +552,8 @@ export class LocalTaskService {
     return this.snapshot(id);
   }
   private async pump(): Promise<void> {
-    if (this.pumping || this.closing) return;
+    if (this.closing) return;
+    if (this.pumping) { this.pumpAgain = true; return; }
     this.pumping = true;
     try {
       const state = (await this.scheduler.read()).state;
@@ -581,7 +589,10 @@ export class LocalTaskService {
         // Read fresh capacity after the next dispatch claim rather than using this snapshot again.
         break;
       }
-    } finally { this.pumping = false; }
+    } finally {
+      this.pumping = false;
+      if (this.pumpAgain) { this.pumpAgain = false; void this.pump().catch(() => {}); }
+    }
   }
   async stop(id: string, configSha256: string): Promise<TaskRunView> {
     const run = this.registered(id);

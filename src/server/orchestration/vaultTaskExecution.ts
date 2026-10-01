@@ -46,10 +46,7 @@ export async function prepareVaultRun(raw: VaultRunConfig): Promise<PreparedVaul
 export async function submitVaultRun(prepared: PreparedVaultRun, scheduler: FileScheduler): Promise<void> {
   const { config } = prepared;
   await mkdir(config.outputDir, { recursive: true });
-  const current = (await scheduler.read()).state;
-  if (!current) await scheduler.append({ key: "subscription:configure", at: new Date().toISOString(),
-    action: { type: "configure", maxConcurrent: 1, budgetUsd: 0 } });
-  else if (current.budgetUsd !== 0) throw new Error("Subscription scheduler requires zero-USD planning budget");
+  await scheduler.ensureSubscriptionConfiguration();
   if ((await scheduler.read()).state?.entries.some((entry) => entry.work.id === config.runId))
     throw new Error("Run ID already registered; inspect it before any new attempt");
   await scheduler.append({ key: `${config.runId}:submit`, at: new Date().toISOString(),

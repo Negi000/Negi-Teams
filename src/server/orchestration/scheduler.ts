@@ -271,12 +271,39 @@ export class FileScheduler {
     });
   }
 
+  /** Preserve the configured capacity; subscription turns do not borrow an API budget. */
+  async ensureSubscriptionConfiguration(): Promise<SchedulerSnapshot> {
+    return this.withLock(async () => {
+      const current = await this.read();
+      if (current.state) {
+        reject(current.state.budgetUsd === 0, "subscription scheduler must not share an API budget");
+        return current.state;
+      }
+      const event: SchedulerEvent = { key: "subscription:configure", at: new Date().toISOString(),
+        action: { type: "configure", maxConcurrent: 1, budgetUsd: 0 } };
+      const next = reduceScheduler(null, event);
+      await this.write(event);
+      return next;
+    });
+  }
+
   async claim(workId: string, key: string = randomUUID()): Promise<ScheduledEntry> {
+    const entry = await this.tryClaim(workId, key);
+    reject(entry !== null, "work not eligible for a slot");
+    return entry;
+  }
+
+  /** A capacity miss is known before dispatch; corrupt logs and reused keys still throw. */
+  async tryClaim(workId: string, key: string = randomUUID()): Promise<ScheduledEntry | null> {
     return this.withLock(async () => {
       const current = await this.read();
       reject(current.state !== null, "scheduler not configured");
       reject(!current.events.some((item) => item.key === key),
         "claim key already used; inspect the existing dispatch");
+      const entry = current.state.entries.find((item) => item.work.id === workId);
+      reject(Boolean(entry), "work not registered");
+      reject(entry!.status === "queued", "work is not queued; inspect the existing dispatch");
+      if (!schedulerWorkEligible(current.state, entry!)) return null;
       const event: SchedulerEvent = { key, at: new Date().toISOString(),
         action: { type: "claim", workId } };
       const next = reduceScheduler(current.state, event);

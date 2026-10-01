@@ -109,6 +109,31 @@ test("native planner uses the UI scheduler once and persists its origin without 
   });
 });
 
+test("a Task queued by a resident Master starts after the shared Master lease releases", async () => {
+  await fixture(async ({ catalog, prepare, config }) => {
+    let count = 0;
+    const service = await LocalTaskService.open(catalog, { prepare, submit: submitVaultRun,
+      execute: async (...args) => { count++; return completed(args[0], args[1]); } });
+    try {
+      const admission = service.masterTurnAdmission("master");
+      const lease = await admission.reserve({ cwd: config.checkout, model: "synthetic-astra", effort: "medium",
+        threadId: "resident-thread", text: "Dispatch the registered Task" });
+      await lease.dispatching(); await lease.bind("resident-turn");
+      const view = await service.snapshot(config.runId);
+      await service.start(view.id, view.configSha256, randomUUID(), { kind: "master", masterId: "master",
+        threadId: "resident-thread", turnId: "resident-turn", callId: "dispatch-call" });
+      assert.equal((await service.snapshot(view.id)).status, "queued"); assert.equal(count, 0);
+      await lease.complete({ turnId: "resident-turn", status: "completed", finalText: "Task queued",
+        contextInputTokens: null, contextWindow: null, lastUsage: null });
+      await until(async () => { const v = await service.snapshot(view.id); return v.status === "ready_for_review" && !v.live; });
+      assert.equal(count, 1); assert.equal((await service.snapshot(view.id)).acceptedBy, null);
+      const entries = (await new FileScheduler(config.schedulerPath).read()).state!.entries;
+      assert.equal(entries.length, 2); assert.equal(entries.every(e => e.status === "verified"), true);
+      assert.deepEqual(entries.map(e => e.work.role), ["astra", "sol"]);
+    } finally { await service.close(); }
+  });
+});
+
 test("planner cannot alter fixed scope, model, command, configuration or review through native tools", async () => {
   await fixture(async ({ catalog, prepare, config }) => {
     let prepared = 0;

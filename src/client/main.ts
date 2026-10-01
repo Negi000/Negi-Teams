@@ -89,11 +89,12 @@ const viewer = new Viewer(document.getElementById("viewer") as HTMLElement, (id)
 //（registry にはモードの情報が無いため。サーバは接続直後、registry より先に chatState を送る）。
 const chatPanel = new ChatPanel(
   document.getElementById("chat") as HTMLElement,
-  (id, text, attachments, replyTo) =>
+  (id, text, attachments, replyTo, requestId) =>
     sendMsg({
       type: "chatSend",
       id,
       text,
+      ...(requestId ? { requestId } : {}),
       ...(attachments.length > 0 ? { attachments } : {}),
       ...(replyTo ? { replyTo } : {}),
     }),
@@ -200,8 +201,10 @@ function connect(): void {
   });
 }
 
-function sendMsg(msg: ClientMessage): void {
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+function sendMsg(msg: ClientMessage): boolean {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  ws.send(JSON.stringify(msg));
+  return true;
 }
 
 // ===== サーバメッセージ処理 =====
@@ -319,6 +322,9 @@ function handleServerMessage(msg: ServerMessage): void {
       break;
     case "chatEvent":
       chatPanel.applyEvent({ seq: msg.seq, ts: msg.ts, event: msg.event });
+      break;
+    case "chatSendResult":
+      chatPanel.applySendResult(msg.id, msg.requestId, msg.accepted, msg.reason);
       break;
     case "dirListing":
       // ファイルピッカーのディレクトリ列挙応答。error なら理由をモーダル内に表示。

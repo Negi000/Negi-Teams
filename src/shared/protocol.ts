@@ -451,7 +451,8 @@ export type ServerMessage =
   | DirListingMessage
   | ChatEventMessage
   | ChatSnapshotMessage
-  | ChatStateMessage;
+  | ChatStateMessage
+  | ChatSendResultMessage;
 
 // ===== master チャット UI（ui:"chat"）のプロトコル =====
 //
@@ -549,7 +550,7 @@ export type MasterChatEvent =
       mcpServers: { name: string; status: string }[];
       capabilities: string[];
     }
-  | { kind: "user"; text: string; attachments?: ChatAttachment[]; replyTo?: ChatReplyRef }
+  | { kind: "user"; text: string; attachments?: ChatAttachment[]; replyTo?: ChatReplyRef; requestId?: string }
   /**
    * master がチャットへ共有した画像（PR-M10・`chat_image` ツール）。
    * `user` / `inbound` と同じ「ワイヤ側にしか無い kind」で、MasterSession.shareImage()
@@ -641,6 +642,8 @@ export interface ChatSendMessage {
   /** master の agent id（既定 "master"）。 */
   id: string;
   text: string;
+  /** Correlates the response and accepted transcript entry; never an automatic retry token. */
+  requestId?: string;
   /**
    * 添付画像（PR-M4）。`POST /control/chat-attach` で保存済みのものだけを参照する。
    * サーバは image/* のものを stream-json の image content block として投入する。
@@ -651,6 +654,14 @@ export interface ChatSendMessage {
    * `> [reply to master#<seq>] <抜粋>` が 1 行足される。
    */
   replyTo?: ChatReplyRef;
+}
+
+export interface ChatSendResultMessage {
+  type: "chatSendResult";
+  id: string;
+  requestId: string;
+  accepted: boolean;
+  reason?: string;
 }
 
 /**

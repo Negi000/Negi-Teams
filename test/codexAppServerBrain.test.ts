@@ -6,10 +6,17 @@ import { MasterSession, type MasterSessionHandlers,
   type MasterUsageSnapshot } from "../src/server/master/session.ts";
 import type { MasterChatEnvelope } from "../src/shared/protocol.ts";
 import type { RegisteredTaskTools } from "../src/server/orchestration/taskDispatchTools.ts";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { FileScheduler } from "../src/server/orchestration/scheduler.ts";
+import { scheduledMasterTurns, MasterInputNotSentError, type MasterTurnAdmission } from
+  "../src/server/orchestration/masterTurnAdmission.ts";
 
 // Only Node speaks this synthetic protocol. No Codex binary or model is used.
 const fixture = String.raw`
 const fail = process.argv[1] === "fail";
+const hold = process.argv[1] === "hold";
 let data = "";
 function send(value) { process.stdout.write(JSON.stringify(value) + "\n"); }
 process.stdin.on("data", (chunk) => {
@@ -29,6 +36,8 @@ process.stdin.on("data", (chunk) => {
     else if (message.method === "turn/start") result = { turn: { id: "synthetic-turn" } };
     else result = {};
     send({ jsonrpc: "2.0", id: message.id, result });
+    if (message.method === "turn/interrupt") send({ jsonrpc: "2.0", method: "turn/completed", params: {
+      threadId: "synthetic-thread", turn: { id: "synthetic-turn", status: "interrupted" } } });
     if (message.method === "turn/start") {
       if (fail) { setTimeout(() => process.exit(9), 5); continue; }
       send({ jsonrpc: "2.0", method: "turn/started", params: {
@@ -39,6 +48,7 @@ process.stdin.on("data", (chunk) => {
         threadId: "synthetic-thread", turnId: "synthetic-turn",
         tokenUsage: { last: { inputTokens: 12, outputTokens: 3, cachedInputTokens: 4,
           cacheWriteInputTokens: 0 }, modelContextWindow: 120 } } });
+      if (hold) continue;
       send({ jsonrpc: "2.0", method: "item/completed", params: {
         threadId: "synthetic-thread", turnId: "synthetic-turn",
         item: { type: "agentMessage", phase: "final_answer", text: "final plan" } } });
@@ -225,4 +235,105 @@ test("subscription-only Master rejects API authentication before opening a model
       invoke: async () => { calls++; return { success: true, text: "fixed contract" }; } } });
   await assert.rejects(brain.start(start), /subscription authentication/);
   assert.equal(brain.sessionId(), null); assert.equal(calls, 0); await brain.stop();
+});
+
+async function scheduledBrainFixture(run: (data: { scheduler: FileScheduler; root: string;
+  admission: MasterTurnAdmission; options: MasterBrainStartOptions }) => Promise<void>) {
+  const dir = await mkdtemp(join(tmpdir(), "negi-scheduled-brain-"));
+  const cwd = join(dir, "checkout"), root = join(dir, "state");
+  await mkdir(cwd);
+  const scheduler = new FileScheduler(join(dir, "scheduler.jsonl"));
+  try { await run({ scheduler, root, options: { ...start, cwd },
+    admission: scheduledMasterTurns({ root, masterId: "master", scheduler }) }); }
+  finally { await rm(dir, { recursive: true, force: true }); }
+}
+
+test("Master capacity miss is known unsent and leaves the provider/session ready for a later send", async () => {
+  await scheduledBrainFixture(async ({ admission, options, scheduler }) => {
+    const held = await admission.reserve({ cwd: options.cwd, model: options.model!, effort: "medium",
+      threadId: "held-thread", text: "held plan" });
+    const events: MasterChatEnvelope[] = [];
+    const session = new MasterSession({ id: "scheduled-master", brainId: "codex", cwd: options.cwd,
+      model: options.model, permissionMode: "plan", systemPrompt: null, mcpConfigPath: null,
+      extraArgs: [], logPath: null, handlers: { onEvent: (_id, e) => events.push(e), onState: () => {},
+        onNotice: () => {}, onUsage: () => {}, onRateLimits: () => {}, onRegistryChange: () => {} },
+      createBrain: () => new CodexAppServerBrain({ executable: process.execPath,
+        args: ["-e", fixture, "ok"], effort: "medium", turnTimeoutMs: 5000, admission }) });
+    try {
+      await session.start();
+      const denied = await session.sendUserText("waiting plan");
+      assert.equal(denied.accepted, false); assert.match(denied.reason!, /未送信/);
+      assert.equal(session.state, "idle"); assert.equal(events.some(e => e.event.kind === "user"), false);
+      await held.cancelBeforeDispatch();
+      const requestId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+      assert.equal((await session.sendUserText("waiting plan", { requestId })).accepted, true);
+      const deadline = Date.now() + 10000;
+      while (!events.some(e => e.event.kind === "turnEnd") && Date.now() < deadline)
+        await new Promise(resolve => setTimeout(resolve, 5));
+      assert.equal(session.state, "idle");
+      assert.equal(events.filter(e => e.event.kind === "user").length, 1);
+      const user = events.find(e => e.event.kind === "user")!.event;
+      assert.equal(user.kind === "user" && user.requestId, requestId);
+      assert.deepEqual((await scheduler.read()).state?.entries.map(e => e.status), ["failed", "cancelled", "verified"]);
+    } finally { await session.stop(); }
+  });
+});
+
+test("provider loss holds the Master's shared claim durably and cannot look completed", async () => {
+  await scheduledBrainFixture(async ({ admission, options, scheduler, root }) => {
+    const brain = new CodexAppServerBrain({ executable: process.execPath, args: ["-e", fixture, "fail"],
+      effort: "medium", turnTimeoutMs: 5000, admission });
+    try {
+      await brain.start(options); await brain.send({ text: "plan" });
+      const events = await collectUntil(brain, "exit"); await brain.stop();
+      assert.equal(events.some(e => e.kind === "turnEnd"), false);
+      const entry = (await scheduler.read()).state!.entries[0];
+      assert.equal(entry.status, "needs_reconciliation");
+      const provider = JSON.parse(await readFile(join(root, entry.work.id, "provider.json"), "utf8"));
+      assert.equal(provider.turnId, "synthetic-turn");
+      await assert.rejects(admission.reserve({ cwd: options.cwd, model: options.model!, effort: "medium",
+        threadId: "later", text: "another plan" }), MasterInputNotSentError);
+    } finally { await brain.stop(); }
+  });
+});
+
+test("concurrent send is rejected before another lease, and a confirmed interrupt releases capacity", async () => {
+  await scheduledBrainFixture(async ({ admission, options, scheduler }) => {
+    const brain = new CodexAppServerBrain({ executable: process.execPath, args: ["-e", fixture, "hold"],
+      effort: "medium", turnTimeoutMs: 10000, admission });
+    try {
+      await brain.start(options);
+      const sent = brain.send({ text: "first" });
+      await assert.rejects(brain.send({ text: "second" }), MasterInputNotSentError);
+      await sent;
+      assert.equal((await scheduler.read()).state?.entries.length, 1);
+      await brain.interrupt();
+      const events = await collectUntil(brain, "turnEnd");
+      const terminal = events.at(-1);
+      assert.equal(terminal?.kind === "turnEnd" && terminal.aborted, true);
+      assert.equal((await scheduler.read()).state?.entries[0].status, "failed");
+    } finally { await brain.stop(); }
+  });
+});
+
+test("stop while awaiting admission cancels the proven unsent lease without starting a turn", async () => {
+  await scheduledBrainFixture(async ({ admission, options, scheduler }) => {
+    let release!: () => void;
+    let obtained!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const ready = new Promise<void>(resolve => { obtained = resolve; });
+    const delayed: MasterTurnAdmission = { reserve: async request => {
+      const lease = await admission.reserve(request); obtained(); await gate; return lease; } };
+    const brain = new CodexAppServerBrain({ executable: process.execPath, args: ["-e", fixture, "ok"],
+      effort: "medium", turnTimeoutMs: 5000, admission: delayed });
+    try {
+      await brain.start(options);
+      const sent = brain.send({ text: "unsent" });
+      const rejected = assert.rejects(sent, MasterInputNotSentError);
+      await ready; const stopped = brain.stop(); release(); await stopped; await rejected;
+      const entries = (await scheduler.read()).state!.entries;
+      assert.equal(entries.length, 1); assert.equal(entries[0].status, "failed");
+      assert.match(entries[0].evidenceRef!, /not-sent.json/);
+    } finally { release?.(); await brain.stop(); }
+  });
 });

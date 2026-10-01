@@ -63,6 +63,8 @@
 .negi-workspace .chat-input { background:var(--md-surface-high); border:0; border-radius:24px; min-height:56px; padding:16px; font-size:16px }
 .negi-workspace .chat-send { background:var(--md-primary); color:var(--md-on-primary); min-height:52px; padding:12px 22px }
 .negi-workspace .chat-stop { color:var(--md-error); min-height:48px }
+.negi-workspace .chat-hint { font-size:14px; padding:12px 16px; margin-bottom:8px; border-radius:var(--md-radius-md); overflow-wrap:anywhere }
+.negi-workspace .chat-hint.level-error { color:var(--md-error); background:var(--md-error-container) }
 .negi-workspace .chat-log { padding:20px 28px }
 .negi-workspace .viewer-body { color:var(--md-on-surface); background:transparent; padding:24px }
 .negi-workspace .pane { background:#141c17; color:#e2eadb }
