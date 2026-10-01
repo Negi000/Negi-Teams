@@ -342,7 +342,7 @@ export class FileScheduler {
     finally { await file.close(); }
   }
 
-  async append(event: SchedulerEvent): Promise<SchedulerSnapshot> {
+  async append(event: SchedulerEvent, validate?: (current: {state:SchedulerSnapshot|null;events:SchedulerEvent[]}) => Promise<boolean>): Promise<SchedulerSnapshot> {
     const pinned = structuredClone(event);
     reject(pinned.action.type !== "claim" && pinned.action.type !== "start_worker", "use atomic claim methods for dispatch");
     return this.withLock(async () => {
@@ -352,6 +352,7 @@ export class FileScheduler {
         reject(same(old.action, pinned.action), "idempotency key reused for different action");
         return current.state!;
       }
+      if(validate)reject(await validate(structuredClone(current)), "current scheduler evidence changed");
       const next = reduceScheduler(current.state, pinned);
       await this.write(pinned);
       return next;

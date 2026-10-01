@@ -421,6 +421,20 @@ test("read-only provider inspection pages to an exact turn without unblocking di
   f.client.close();
 });
 
+test("managed provider inspection pins the registered checkout and provider before reading turns",async()=>{
+  for(const thread of [{id:"thread-a",cwd:"E:/other",modelProvider:"openai"},
+    {id:"thread-a",cwd:"E:/repo",modelProvider:"other"},{id:"thread-a",cwd:"E:\\repo",modelProvider:"openai"}]){
+    const f=fakeServer(request=>request.method==="thread/read"?{thread}:request.method==="thread/turns/list"?
+      {data:[{id:"target",status:"interrupted"}],nextCursor:null}:basic(request));
+    try{await f.client.initialize();if(thread.modelProvider==="openai"&&thread.cwd==="E:\\repo"){
+      assert.equal((await f.client.inspectProviderTurn("thread-a","target",20,{cwd:process.platform==="win32"?"E:/repo":"E:\\repo",modelProvider:"openai"})).status,"interrupted");
+    }else{await assert.rejects(f.client.inspectProviderTurn("thread-a","target",20,{cwd:"E:/repo",modelProvider:"openai"}),/checkout or provider/);
+      assert.equal(f.messages.some(m=>m.method==="thread/turns/list"),false)}
+      assert.equal(f.messages.some(m=>["thread/start","thread/resume","turn/start"].includes(String(m.method))),false);
+    }finally{f.client.close()}
+  }
+});
+
 test("provider inspection bounds unknown outcomes and rejects mismatched metadata", async () => {
   const endless = fakeServer((request) => {
     if (request.method === "thread/read") return { thread: { id: "thread-a" } };
@@ -465,6 +479,34 @@ test("provider inspection bounds unknown outcomes and rejects mismatched metadat
   });
   assert.equal(absent.client.dispatchBlocked, true);
   absent.client.close();
+});
+
+test("exact-turn process inspection holds executable, unknown, incomplete and changing histories",async()=>{
+  for(const mode of ["passive","passive-pages","command","unknown","foreign","changing","endless","duplicate","cursor-repeat"]){
+    let lists=0;
+    const f=fakeServer(request=>{
+      if(request.method==="thread/read")return{thread:{id:"thread-a",cwd:"E:/repo",modelProvider:"openai"}};
+      if(request.method==="thread/turns/list")return{data:[{id:"target",status:mode==="changing"&&lists++>0?"inProgress":"interrupted"}],nextCursor:null};
+      if(request.method==="thread/items/list"){const params=request.params as {cursor:string|null};
+        return{data:[{turnId:mode==="foreign"?"other":"target",item:{id:mode==="duplicate"?"same":mode==="cursor-repeat"?String(Math.random()):params.cursor??"item",type:mode==="command"?"commandExecution":mode==="unknown"?"newTool":"agentMessage"}}],
+          nextCursor:mode==="endless"?String(Number(params.cursor??0)+1):["duplicate","cursor-repeat"].includes(mode)?"repeat":mode==="passive-pages"&&!params.cursor?"second":null};}
+      return basic(request);
+    });
+    try{await f.client.initialize();if(["foreign","duplicate","cursor-repeat"].includes(mode)){
+      await assert.rejects(f.client.inspectProviderTurnProcessSafety("thread-a","target",{cwd:"E:/repo",modelProvider:"openai"}),/another turn|duplicated an item|cursor repeated/);
+    }else{const result=await f.client.inspectProviderTurnProcessSafety("thread-a","target",{cwd:"E:/repo",modelProvider:"openai"});
+      assert.equal(result.processSafety.noExecutableItems,["passive","passive-pages"].includes(mode));if(mode==="passive-pages")assert.equal(result.processSafety.pagesRead,2);if(["changing","endless"].includes(mode))assert.equal(result.processSafety.complete,false);
+      assert.ok(result.processSafety.pagesRead<=20);}
+      assert.equal(f.messages.some(m=>["thread/start","thread/resume","turn/start","turn/interrupt"].includes(String(m.method))),false);
+    }finally{f.client.close()}
+  }
+});
+test("provider checkout case identity follows the host filesystem",async()=>{
+  const f=fakeServer(request=>request.method==="thread/read"?{thread:{id:"thread-a",cwd:"/srv/Repo",modelProvider:"openai"}}:
+    request.method==="thread/turns/list"?{data:[{id:"target",status:"interrupted"}],nextCursor:null}:basic(request));
+  try{await f.client.initialize();const operation=f.client.inspectProviderTurn("thread-a","target",20,{cwd:"/srv/repo",modelProvider:"openai"});
+    if(process.platform==="win32")assert.equal((await operation).status,"interrupted");else await assert.rejects(operation,/checkout or provider/);
+  }finally{f.client.close()}
 });
 
 test("missing approval handler and foreign turn requests fail closed", async () => {

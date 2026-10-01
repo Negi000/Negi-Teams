@@ -7,7 +7,7 @@ import { scheduledMasterTurns, type MasterTurnAdmission } from "./masterTurnAdmi
 import type { ConfigurationAdmission } from "./projectConfiguration.ts";
 import { FileTaskLedger, type TaskEvent, type TaskSnapshot } from "./singleTask.ts";
 import { HumanReviewProofStore, isReviewRequestId } from "./humanReviewProof.ts";
-import { assertVaultRunOutputPaths, parseVaultRunConfig, type VaultRunConfig } from "./vaultRunConfig.ts";
+import { assertVaultRunOutputPaths, canonicalVaultRunRegistration, parseVaultRunConfig, type VaultRunConfig } from "./vaultRunConfig.ts";
 import { executeVaultRun, prepareVaultRun, submitVaultRun, verifyVaultRun, type PreparedVaultRun, type TaskOperationApproval } from "./vaultTaskExecution.ts";
 import { captureTaskReview, verifyTaskReviewCheckout, type TaskReviewManifest } from "./taskReviewArtifact.ts";
 import { ReviewDecisionBusyError, type LocalReviewService } from "./reviewService.ts";
@@ -20,6 +20,8 @@ import { readTaskRevision, replayRevisionReview, revisionMatchesTask, taskManife
   taskRevisionHash, writeTaskRevisionPointer, type PinnedTaskRevision, type TaskRevisionJournal } from "./taskRevision.ts";
 import { TaskResultStore, type TaskResultContext } from "./taskResults.ts";
 import type { TaskResultNotice, TaskResultSummary } from "../../shared/taskResults.ts";
+import { TaskExecutionOwner } from "./taskExecutionOwner.ts";
+import { LocalTaskReconciliation, type InspectTaskProvider, type TaskReconciliationView } from "./taskReconciliation.ts";
 
 const hash = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
 function inside(root: string, path: string): boolean {
@@ -89,6 +91,7 @@ interface Runtime {
   submit: typeof submitVaultRun;
   execute: typeof executeVaultRun;
   prepareRevision?: (config: VaultRunConfig, state: TaskSnapshot) => Promise<PreparedVaultRun>;
+  inspectProvider?: InspectTaskProvider;
 }
 
 export class LocalTaskService {
@@ -115,7 +118,8 @@ export class LocalTaskService {
   private readonly settlements = new Set<Promise<void>>();
   private constructor(private readonly root: string, private readonly runs: CatalogRun[],
     private readonly scheduler: FileScheduler, private readonly runtime: Runtime,
-    private readonly operationProofs: HumanReviewProofStore, private readonly resultStore: TaskResultStore) {
+    private readonly operationProofs: HumanReviewProofStore, private readonly resultStore: TaskResultStore,
+    private readonly reconciliation: LocalTaskReconciliation) {
     resultStore.subscribe(results => this.resultListener?.(results.filter(n =>
       runs.some(run => run.config.runId === n.runId && run.configSha256 === n.configSha256))));
   }
@@ -135,11 +139,7 @@ export class LocalTaskService {
       if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error("Task catalog run invalid");
       const item = entry as Record<string, unknown>;
       if (typeof item.title !== "string" || !item.title.trim() || item.title.length > 200) throw new Error("Task title invalid");
-      const config = parseVaultRunConfig(item.config);
-      config.checkout = await realpath(config.checkout);
-      config.vault = await realpath(config.vault);
-      config.outputDir = await localDestination(config.outputDir, true);
-      config.schedulerPath = await localDestination(config.schedulerPath, false);
+      const config = await canonicalVaultRunRegistration(parseVaultRunConfig(item.config));
       await assertVaultRunOutputPaths(config);
       if (schedulerPath && schedulerPath.toLowerCase() !== config.schedulerPath.toLowerCase())
         throw new Error("All catalog runs must share one scheduler");
@@ -170,7 +170,8 @@ export class LocalTaskService {
     const scheduler = new FileScheduler(schedulerPath!);
     await scheduler.ensureSubscriptionConfiguration(capacity);
     const results = await TaskResultStore.open(join(root, "task-results"));
-    return new LocalTaskService(root, runs, scheduler, runtime, operationProofs, results);
+    const reconciliation=await LocalTaskReconciliation.open(join(root,"reconciliation-proofs"),runtime.inspectProvider);
+    return new LocalTaskService(root, runs, scheduler, runtime, operationProofs, results,reconciliation);
   }
   list(): Array<{ id: string; title: string }> { return this.runs.map((run) => ({ id: run.config.runId, title: run.title })); }
   subscribeResults(listener: (results: TaskResultSummary[]) => void): void { this.resultListener = listener; }
@@ -391,10 +392,25 @@ export class LocalTaskService {
     });
   }
   private ledger(run: CatalogRun): FileTaskLedger {
-    return new FileTaskLedger(join(run.config.outputDir, "run.jsonl"), Date.now, undefined,
+    return new FileTaskLedger(join(run.config.outputDir, "run.jsonl"), Date.now,
+      this.reconciliation.verifier(run),
       ({ event, state }) => this.verifyHumanDecision(run, event, state),
       ({ event, state }) => this.verifyOperationDecision(run, event, state),
       ({ event, state }) => this.verifyResultRevision(run, event, state));
+  }
+  private reconciliationSource(run:CatalogRun){
+    return {config:run.config,configSha256:run.configSha256,snapshotSha256:run.snapshotSha256,
+      ledger:this.ledger(run),scheduler:this.scheduler,isActive:()=>this.active.has(run.config.runId)||this.closing};
+  }
+  async inspectReconciliation(id:string,configSha256:string,requestId:string):Promise<TaskReconciliationView>{
+    const run=this.registered(id);if(configSha256!==run.configSha256)throw Error("Task reconciliation target changed");
+    return this.reconciliation.inspect(this.reconciliationSource(run),requestId);
+  }
+  async closeReconciliation(id:string,configSha256:string,requestId:string,inspectionId:string,dossierSha256:string):Promise<TaskRunView>{
+    const run=this.registered(id);if(configSha256!==run.configSha256)throw Error("Task reconciliation target changed");
+    await this.reconciliation.close(this.reconciliationSource(run),requestId,inspectionId,dossierSha256);
+    try{await this.publishResult(id)}catch{/* Task facts remain authoritative; notification revision is separate. */}
+    void this.pump().catch(()=>{});return this.snapshot(id);
   }
   private async verifyResultRevision(run: CatalogRun, event: TaskEvent, state: TaskSnapshot): Promise<boolean> {
     if (!this.reviews || event.action.type !== "reverify_result") return false;
@@ -697,7 +713,11 @@ export class LocalTaskService {
         const entry = state.entries.find((item) => item.work.id === id);
         if (this.active.has(id) || !entry || !schedulerWorkEligible(state, entry)) continue;
         const controller = new AbortController();
-        const promise = Promise.resolve().then(() => this.runtime.execute(prepared, this.scheduler, controller.signal, {
+        let owner: TaskExecutionOwner | undefined;
+        const promise = Promise.resolve().then(async () => {
+          owner = await TaskExecutionOwner.acquire(prepared.config.outputDir, id, this.registered(id).configSha256, `${id}:dispatch`);
+          return this.runtime.execute(prepared, this.scheduler, controller.signal, {
+          executionOwner: owner,
           admit:this.admissionGuards.has(id)?operation=>this.admitWhenAvailable(id,operation,controller.signal,
             Date.now()+prepared.contract.limits.timeLimitMinutes*60_000):undefined,
           onCapacityReleased: () => this.pump(),
@@ -706,7 +726,7 @@ export class LocalTaskService {
           onApproval: (approval, decide) => {
             if (!this.approvals.has(id)) this.approvals.set(id, new Map());
             this.approvals.get(id)!.set(approval.id, { approval: structuredClone(approval), decide });
-          } }))
+          } }); })
           .then(async (result) => {
             if (result.status === "ready_for_review" && this.reviews) {
               try {
@@ -725,8 +745,10 @@ export class LocalTaskService {
             if (current?.status === "running") await this.scheduler.append({ key: `${id}:ui-unknown`, at: new Date().toISOString(),
               action: { type: "unknown", workId: id, reason: "UI runner stopped without a confirmed terminal outcome" } });
           }).finally(async () => {
-            this.active.delete(id); this.prepared.delete(id); this.approvals.delete(id);
             try { await this.publishResult(id); } catch { /* durable Task facts remain available for recovery */ }
+            try { await owner?.finish(); } finally {
+              this.active.delete(id); this.prepared.delete(id); this.approvals.delete(id);
+            }
             void this.pump().catch(() => {});
           }).catch(() => {});
         this.active.set(id, { controller, promise });

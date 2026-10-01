@@ -36,7 +36,8 @@ export function createTaskHttp(service: LocalTaskService | null, auth: AuthConfi
     const cookie = parseCookie(req.headers.cookie, "ebi_auth");
     if (!cookie || !tokenMatches(cookie, auth.token)) {
       if (url.pathname === "/tasks" && req.method === "GET") {
-        res.writeHead(302, { Location: "/login?returnTo=/tasks", "Cache-Control": "no-store" }); res.end();
+        const run=url.searchParams.get("run"),destination=run&&/^[a-zA-Z0-9._-]{1,128}$/.test(run)?"/tasks?run="+run:"/tasks";
+        res.writeHead(302, { Location: "/login?returnTo="+encodeURIComponent(destination), "Cache-Control": "no-store" }); res.end();
       } else json(res, 401, { error: "ログインしてからTaskを開いてください。" });
       return true;
     }
@@ -76,7 +77,7 @@ export function createTaskHttp(service: LocalTaskService | null, auth: AuthConfi
       }
       json(res, 200, views); return true;
     }
-    const match = url.pathname.match(/^\/api\/tasks\/([a-zA-Z0-9._-]+)(?:\/(start|stop|approval))?$/);
+    const match = url.pathname.match(/^\/api\/tasks\/([a-zA-Z0-9._-]+)(?:\/(start|stop|approval|inspect-reconciliation|close-reconciliation))?$/);
     if (!match) { json(res, 404, { error: "Taskがありません。" }); return true; }
     try {
       if (!match[2] && req.method === "GET") { json(res, 200, await service.snapshot(match[1])); return true; }
@@ -85,6 +86,15 @@ export function createTaskHttp(service: LocalTaskService | null, auth: AuthConfi
       const input = await body(req);
       if (!isReviewRequestId(input.requestId) || typeof input.configSha256 !== "string" ||
           !/^[0-9a-f]{64}$/i.test(input.configSha256)) throw new Error("Task identity invalid");
+      if(match[2]==="inspect-reconciliation"){
+        if(Object.keys(input).length!==2)throw Error("Unexpected Task inspection input");
+        json(res,200,await service.inspectReconciliation(match[1],input.configSha256,input.requestId));return true;
+      }
+      if(match[2]==="close-reconciliation"){
+        if(Object.keys(input).length!==4||!isReviewRequestId(input.inspectionId)||typeof input.dossierSha256!=="string"||
+          !/^[0-9a-f]{64}$/.test(input.dossierSha256))throw Error("Task close input invalid");
+        json(res,200,await service.closeReconciliation(match[1],input.configSha256,input.requestId,input.inspectionId,input.dossierSha256));return true;
+      }
       if (match[2] === "approval" && (typeof input.approvalId !== "string" ||
           typeof input.approvalSha256 !== "string" || !/^[0-9a-f]{64}$/i.test(input.approvalSha256) ||
           !["allow", "deny"].includes(input.decision as string))) throw new Error("Operation approval target invalid");

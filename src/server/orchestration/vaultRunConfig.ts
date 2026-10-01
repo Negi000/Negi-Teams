@@ -130,6 +130,13 @@ async function canonicalDestination(raw: string, kind: "file" | "directory"): Pr
   return join(await realpath(dirname(target)), basename(target));
 }
 
+/** Stable catalog identity, shared by CLI and GUI. Preserve the configured
+ * executable spelling for historical request hashes; dereference it only at launch. */
+export async function canonicalVaultRunRegistration(raw:VaultRunConfig):Promise<VaultRunConfig>{
+  return {...structuredClone(raw),checkout:await realpath(raw.checkout),vault:await realpath(raw.vault),
+    outputDir:await canonicalDestination(raw.outputDir,"directory"),schedulerPath:await canonicalDestination(raw.schedulerPath,"file")};
+}
+
 /** Reject local logs and generated artifacts inside the model's writable tree. */
 export async function assertVaultRunOutputPaths(config: VaultRunConfig): Promise<void> {
   const checkout = await realpath(config.checkout);

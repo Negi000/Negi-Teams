@@ -65,6 +65,8 @@ export interface ProviderTurnEvidence {
   completeSearch: boolean;
   observedAtMs: number;
   source: "thread/turns/list";
+  processSafety?: {source:"thread/items/list";complete:boolean;pagesRead:number;itemCount:number;
+    itemTypes:string[];sha256:string;noExecutableItems:boolean};
 }
 export interface TaskSnapshot {
   runId: string;
@@ -93,6 +95,7 @@ export type TaskAction =
   | { type: "fail_attempt"; attemptId: string; reason: string }
   | { type: "reconcile"; attemptId: string; outcome: "completed" | "abandoned";
       evidenceRef: string; outputRef?: string }
+  | { type: "close_uncertain_attempt"; attemptId: string; evidenceRef: string }
   | { type: "request_approval"; approval: Omit<Approval, "decision"> }
   | { type: "decide_approval"; approvalId: string; attemptId: string; threadId: string;
       turnId: string; operation: string; target: string; decision: "allow" | "deny"; approvalRef?: string }
@@ -108,6 +111,7 @@ export interface TaskEvent { key: string; at: string; action: TaskAction }
 export type ReconciliationVerifier = (review: {
   event: TaskEvent;
   state: TaskSnapshot;
+  events?: TaskEvent[];
 }) => Promise<boolean>;
 export type AcceptanceVerifier = ReconciliationVerifier;
 
@@ -249,6 +253,17 @@ export function reduceTask(state: TaskSnapshot | null, event: TaskEvent): TaskSn
       next.stopReason = `reconciled: ${a.evidenceRef}`;
       return next;
     }
+    case "close_uncertain_attempt": {
+      const attempt = next.attempts.find((x) => x.id === a.attemptId);
+      requireState(Boolean(attempt) && ["unknown", "running"].includes(attempt!.state) &&
+        ["needs_reconciliation", "planning", "working"].includes(next.status) && Boolean(a.evidenceRef),
+        "uncertain attempt and signed close evidence required");
+      attempt!.state = "abandoned";
+      for (const approval of next.approvals) if (approval.decision === "pending") approval.decision = "discarded";
+      next.stoppedFrom = next.status;next.status = "stopped";
+      next.stopReason = `Closed after reconciliation: ${a.evidenceRef}`;
+      return next;
+    }
     case "request_approval": {
       const p = a.approval;
       requireState(active !== undefined && active.id === p.attemptId &&
@@ -332,7 +347,8 @@ export class FileTaskLedger {
               private readonly verifyReconciliation?: ReconciliationVerifier,
               private readonly verifyAcceptance?: AcceptanceVerifier,
               private readonly verifyOperationApproval?: ReconciliationVerifier,
-              private readonly verifyResultRevision?: ReconciliationVerifier) {
+              private readonly verifyResultRevision?: ReconciliationVerifier,
+              private readonly verifyReconciliationOnRead = false) {
     this.path = resolve(path);
   }
 
@@ -353,6 +369,12 @@ export class FileTaskLedger {
       requireState(!keys.has(event.key), "duplicate event key in ledger");
       keys.add(event.key);
       const next = reduceTask(state, event);
+      if (event.action.type === "close_uncertain_attempt" ||
+          (event.action.type === "reconcile" && this.verifyReconciliationOnRead)) {
+        requireState(Boolean(this.verifyReconciliation) && state !== null, "trusted reconciliation review unavailable");
+        requireState(await this.verifyReconciliation!({event, state:structuredClone(state!),events:structuredClone(events)}),
+          "trusted reconciliation review rejected");
+      }
       if (event.action.type === "accept" || event.action.type === "revoke_acceptance") {
         requireState(Boolean(this.verifyAcceptance) && state !== null,
           "trusted human acceptance unavailable");
@@ -398,10 +420,10 @@ export class FileTaskLedger {
         requireState(Boolean(approval) && this.now() <= Date.parse(approval!.expiresAt), "approval expired");
       }
       const next = reduceTask(current.state, entry);
-      if (entry.action.type === "reconcile") {
+      if (entry.action.type === "reconcile" || entry.action.type === "close_uncertain_attempt") {
         requireState(Boolean(this.verifyReconciliation), "trusted reconciliation review unavailable");
         const approved = await this.verifyReconciliation!({ event: structuredClone(entry),
-          state: structuredClone(current.state!) });
+          state: structuredClone(current.state!),events:structuredClone(current.events) });
         requireState(approved === true, "trusted reconciliation review rejected");
       }
       if (entry.action.type === "accept" || entry.action.type === "revoke_acceptance") {

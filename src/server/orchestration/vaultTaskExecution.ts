@@ -1,7 +1,7 @@
 // Shared server/CLI execution. Browser input never supplies executable commands.
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdir, realpath, stat } from "node:fs/promises";
+import { mkdir, readFile, realpath, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { AppServerProcess } from "../master/appServerProcess.ts";
@@ -12,19 +12,21 @@ import type { CodexApprovalRequest } from "../master/appServerClient.ts";
 import { runScheduledVaultTask, type TaskAdmissionGuard } from "./scheduledVaultRun.ts";
 import { loadVaultTaskContract,
   runSingleTaskFromVault, type VaultTaskContract } from "./vaultTaskContract.ts";
-import { assertVaultRunOutputPaths, assertVerificationCoverage, type VaultRunConfig } from "./vaultRunConfig.ts";
+import { assertVaultRunOutputPaths, assertVerificationCoverage, canonicalVaultRunRegistration, type VaultRunConfig } from "./vaultRunConfig.ts";
 import { loadApprovedTaskPlan, type ApprovedTaskPlan } from "./approvedTaskPlan.ts";
 import { verifyConfiguredCheckout } from "./checkoutVerification.ts";
+import { TaskExecutionOwner } from "./taskExecutionOwner.ts";
 
 const exec = promisify(execFile);
 const hash = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
-export interface PreparedVaultRun { config: VaultRunConfig; contract: VaultTaskContract; approvedPlan?: ApprovedTaskPlan }
+export interface PreparedVaultRun { config: VaultRunConfig; contract: VaultTaskContract; approvedPlan?: ApprovedTaskPlan; executionConfigSha256?:string }
 export interface TaskOperationApproval {
   id: string; attemptId: string; threadId: string; turnId: string;
   operation: string; target: string; expiresAt: string;
   targetKnown?: boolean;
 }
 export interface TaskExecutionHooks {
+  executionOwner?: TaskExecutionOwner;
   admit?:TaskAdmissionGuard;
   knowledgeProofDirectory?: string;
   onApproval: (approval: TaskOperationApproval,
@@ -34,8 +36,9 @@ export interface TaskExecutionHooks {
 }
 
 export async function prepareVaultRun(raw: VaultRunConfig): Promise<PreparedVaultRun> {
-  const config = { ...structuredClone(raw), checkout: await realpath(raw.checkout),
-    vault: await realpath(raw.vault), executable: await realpath(raw.executable) };
+  const registered=await canonicalVaultRunRegistration(raw);
+  const executionConfigSha256=hash(JSON.stringify({config:registered,snapshotSha256:hash(await readFile(registered.snapshot))}));
+  const config = { ...registered, executable: await realpath(registered.executable) };
   if (!(await stat(config.executable)).isFile()) throw new Error("Codex executable is not a regular file");
   const login = await exec(config.executable, ["login", "status"],
     { encoding: "utf8", windowsHide: true, timeout: 20_000, env: subscriptionChildEnv() });
@@ -45,7 +48,7 @@ export async function prepareVaultRun(raw: VaultRunConfig): Promise<PreparedVaul
   assertVerificationCoverage(contract.verification, config.verification);
   await assertVaultRunOutputPaths(config);
   const approvedPlan = await loadApprovedTaskPlan(config, contract);
-  return { config, contract, ...(approvedPlan ? { approvedPlan } : {}) };
+  return { config, contract,executionConfigSha256, ...(approvedPlan ? { approvedPlan } : {}) };
 }
 
 export async function submitVaultRun(prepared: PreparedVaultRun, scheduler: FileScheduler): Promise<void> {
@@ -76,8 +79,10 @@ export async function executeVaultRun(prepared: PreparedVaultRun, scheduler: Fil
   const deadlineAtMs = Date.now() + contract.limits.timeLimitMinutes * 60_000;
   signal = signal ? AbortSignal.any([signal, deadline]) : deadline;
   const ledger = new FileTaskLedger(join(config.outputDir, "run.jsonl"), Date.now, undefined, undefined, hooks?.verifyApproval);
+  const owner = hooks?.executionOwner ?? await TaskExecutionOwner.acquire(config.outputDir, config.runId,
+    prepared.executionConfigSha256??hash(JSON.stringify({config,snapshotSha256:hash(await readFile(config.snapshot))})), `${config.runId}:dispatch`);
   // Admission occurs before opening either provider process.
-  return runScheduledVaultTask({ scheduler, dispatchKey: `${config.runId}:dispatch`, signal,
+  try { return await runScheduledVaultTask({ scheduler, dispatchKey: `${config.runId}:dispatch`, signal,
     admit:hooks?.admit,
     onCapacityReleased: hooks?.onCapacityReleased,
     run: { runId: config.runId, cwd: config.checkout, vaultDirectory: config.vault,
@@ -126,15 +131,21 @@ export async function executeVaultRun(prepared: PreparedVaultRun, scheduler: Fil
           try { provider?.client.answerApproval(request, false); } catch { /* provider may be gone */ }
         });
       } : undefined;
-      if (!prepared.approvedPlan) astra = AppServerProcess.launch({ executable: config.executable,
-        args: boundedAppServerArgs(true), env: subscriptionChildEnv(), cwd: config.checkout,
-        client: { transportTimeoutMs: 20_000, onApproval: onApproval("astra") } });
       const stop = () => { if (astra) void astra.stop(); if (sol) void sol.stop(); };
       signal?.addEventListener("abort", stop, { once: true });
       try {
+        if (!prepared.approvedPlan) {
+          await owner.launching("astra");
+          astra = AppServerProcess.launch({ executable: config.executable,
+            args: boundedAppServerArgs(true), env: subscriptionChildEnv(), cwd: config.checkout,
+            client: { transportTimeoutMs: 20_000, onApproval: onApproval("astra") } });
+          await owner.started("astra", astra.pid);
+        }
+        await owner.launching("sol");
         sol = AppServerProcess.launch({ executable: config.executable,
           args: boundedAppServerArgs(true), env: subscriptionChildEnv(), cwd: config.checkout,
           client: { transportTimeoutMs: 20_000, onApproval: onApproval("sol") } });
+        await owner.started("sol", sol.pid);
         for (const provider of [...(astra ? [astra] : []), sol]) {
           await provider.client.initialize();
           const account = await provider.client.readAccountMode();
@@ -171,7 +182,12 @@ export async function executeVaultRun(prepared: PreparedVaultRun, scheduler: Fil
           } });
       } finally {
         signal?.removeEventListener("abort", stop);
-        await Promise.allSettled([...(astra ? [astra.stop()] : []), ...(sol ? [sol.stop()] : [])]);
+        const stopped = await Promise.allSettled(([ ["astra", astra], ["sol", sol] ] as const)
+          .filter((entry) => entry[1] !== null).map(async ([role, provider]) => {
+            await provider!.stop();await owner.exited(role, provider!.pid);
+          }));
+        const failed = stopped.find((item) => item.status === "rejected");
+        if (failed?.status === "rejected") throw failed.reason;
       }
-    } });
+    } }); } finally { if (!hooks?.executionOwner) await owner.finish(); }
 }

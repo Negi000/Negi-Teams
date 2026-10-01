@@ -10,7 +10,13 @@ export async function recordUnknownProviderTurn(
   eventKey: string,
   maxPages = 20,
 ): Promise<TaskSnapshot> {
-  const { state } = await ledger.read();
+  const { state, events } = await ledger.read();
+  const existing=events.find(event=>event.key===eventKey);
+  if(existing){
+    if(existing.action.type!=="observe_provider"||existing.action.attemptId!==attemptId)
+      throw Error("Provider observation request identity was reused");
+    return state!;
+  }
   const attempt = state?.attempts.find((item) => item.id === attemptId);
   if (!eventKey || state?.status !== "needs_reconciliation" ||
       attempt?.state !== "unknown" || !attempt.threadId || !attempt.turnId) {

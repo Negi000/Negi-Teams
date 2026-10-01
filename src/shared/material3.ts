@@ -60,6 +60,8 @@ export const material3Styles = String.raw`
 .negi-ui label { display:block; font-size:14px; font-weight:550 }
 .negi-ui label :is(input,select,textarea) { margin-top:6px }
 .negi-ui input[type=checkbox] { width:20px; height:20px; accent-color:var(--md-primary) }
+.negi-ui .md-check { display:flex; align-items:center; gap:12px; min-height:48px }
+.negi-ui .md-check input[type=checkbox] { flex:none; margin:0 }
 .negi-ui h1 { margin:0; font-size:clamp(26px,3vw,38px); letter-spacing:-.04em; line-height:1.25; font-weight:680 }
 .negi-ui h2 { margin:0 0 12px; font-size:22px; letter-spacing:-.025em; line-height:1.4 }
 .negi-ui h3 { margin:0 0 8px; font-size:16px }

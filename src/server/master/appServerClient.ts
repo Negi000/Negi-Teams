@@ -1,6 +1,7 @@
 // Version-sensitive Codex App Server client, checked against locally generated
 // 0.158.0-alpha.2.1 types and 0.159.2 experimental dynamic tools. It owns streams, never spawns a process.
 import type { Readable, Writable } from "node:stream";
+import { createHash } from "node:crypto";
 import { AppServerTransport } from "./appServerTransport.ts";
 
 type RecordValue = Record<string, unknown>;
@@ -321,7 +322,7 @@ export class CodexAppServerClient {
 
   /** Read provider metadata only. This never clears reconciliation or accepts artifacts. */
   async inspectProviderTurn(threadId: string, turnId: string,
-                            maxPages = 20): Promise<CodexProviderTurnInspection> {
+                            maxPages = 20, expected?: {cwd:string;modelProvider:string}): Promise<CodexProviderTurnInspection> {
     this.requireInitialized();
     if (!threadId || !turnId || !Number.isSafeInteger(maxPages) || maxPages < 1 || maxPages > 100 ||
         this.closedReason || this.threadRequestPending || this.turnRequestPending ||
@@ -334,6 +335,11 @@ export class CodexAppServerClient {
     if (requiredString(record(read?.thread)?.id, "thread.id") !== threadId) {
       throw new Error("provider thread/read identity mismatch");
     }
+    const thread=record(read?.thread);
+    const normalized=(value:string)=>{const path=(process.platform==="win32"?value.replace(/\\/g,"/"):value).replace(/\/$/,"");return process.platform==="win32"?path.toLowerCase():path};
+    if(expected && (thread?.modelProvider!==expected.modelProvider ||
+      typeof thread.cwd!=="string" || normalized(thread.cwd)!==normalized(expected.cwd)))
+      throw new Error("provider thread checkout or provider differs from registered Task");
     let cursor: string | null = null;
     const seenCursors = new Set<string>();
     for (let page = 1; page <= maxPages; page++) {
@@ -367,6 +373,36 @@ export class CodexAppServerClient {
     }
     return { threadId, turnId, found: false, status: null, pagesRead: maxPages,
       completeSearch: false, observedAtMs: this.now(), source: "thread/turns/list" };
+  }
+
+  /** Reconciliation is external and must compare provider state and local artifacts first. */
+  async inspectProviderTurnProcessSafety(threadId:string,turnId:string,expected:{cwd:string;modelProvider:string}):Promise<CodexProviderTurnInspection & {
+    processSafety:{source:"thread/items/list";complete:boolean;pagesRead:number;itemCount:number;itemTypes:string[];sha256:string;noExecutableItems:boolean}
+  }>{
+    const before=await this.inspectProviderTurn(threadId,turnId,20,expected);
+    const types=new Set<string>(),ids=new Set<string>(),cursors=new Set<string>(),metadata:unknown[]=[];
+    let cursor:string|null=null,complete=false,pagesRead=0,noExecutableItems=true;
+    const passive=new Set(["agentMessage","userMessage","reasoning","plan","contextCompaction"]);
+    if(before.found&&before.completeSearch){
+      for(let page=1;page<=20;page++){
+        const result=record(await this.transport.request("thread/items/list",{threadId,turnId,cursor,limit:100,sortDirection:"asc"}));
+        if(!Array.isArray(result?.data)||result.data.length>100||!(result.nextCursor===null||string(result.nextCursor)))throw Error("Provider item inspection schema mismatch");
+        pagesRead=page;
+        for(const raw of result.data){const entry=record(raw),item=record(entry?.item);
+          if(entry?.turnId!==turnId)throw Error("Provider item belongs to another turn");
+          const id=requiredString(item?.id,"item.id"),type=requiredString(item?.type,"item.type");
+          if(ids.has(id))throw Error("Provider item inspection duplicated an item");
+          ids.add(id);types.add(type);metadata.push([id,type]);if(!passive.has(type))noExecutableItems=false;
+        }
+        if(result.nextCursor===null){complete=true;break}
+        cursor=result.nextCursor as string;if(cursors.has(cursor))throw Error("Provider item cursor repeated");cursors.add(cursor);
+      }
+    }
+    const after=await this.inspectProviderTurn(threadId,turnId,20,expected);
+    if(after.found!==before.found||after.status!==before.status||!after.completeSearch)complete=false;
+    // This is an absence check, not a claim that a tool's descendants exited.
+    return {...after,processSafety:{source:"thread/items/list",complete,pagesRead,itemCount:ids.size,itemTypes:[...types].sort(),
+      sha256:createHash("sha256").update(JSON.stringify(metadata)).digest("hex"),noExecutableItems:complete&&noExecutableItems}};
   }
 
   /** Reconciliation is external and must compare provider state and local artifacts first. */

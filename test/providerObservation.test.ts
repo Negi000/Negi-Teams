@@ -45,6 +45,9 @@ test("provider observation is bound and durable but does not reconcile a run", a
       pagesRead: 2, completeSearch: true, observedAtMs: 1000,
       source: "thread/turns/list" } }]);
     assert.deepEqual((await ledger.read()).state?.providerObservations, state.providerObservations);
+    assert.deepEqual(await recordUnknownProviderTurn(ledger, "attempt-a", client, "observation-1"),state);
+    assert.equal(calls,1,"the same persisted observation does not contact the provider again");
+    await recordUnknownProviderTurn(ledger,"attempt-a",client,"observation-2");assert.equal(calls,2);
     await assert.rejects(ledger.append({ key: "retry", at: "2026-09-30T00:00:01Z",
       action: { type: "start_attempt", attemptId: "attempt-b", role: "astra",
         requestedModel: "gpt-6-astra" } }), /role or status/);

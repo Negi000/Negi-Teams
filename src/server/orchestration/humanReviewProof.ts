@@ -8,7 +8,7 @@ export interface HumanReviewReceipt {
   id: string;
   at: string;
   source: "authenticated-browser";
-  action: "accept" | "feedback" | "revoke" | "operation";
+  action: "accept" | "feedback" | "revoke" | "operation" | "task-inspect" | "task-close";
   caseId: string;
   runId: string;
   artifactSha256: string;
@@ -27,9 +27,11 @@ async function writeNew(path: string, bytes: Buffer): Promise<void> {
 }
 
 export class HumanReviewProofStore {
-  private constructor(readonly root: string, private readonly key: Buffer) {}
+  private constructor(readonly root: string, private readonly key: Buffer,private readonly maxReceiptBytes:number) {}
 
-  static async open(directory: string): Promise<HumanReviewProofStore> {
+  static async open(directory: string,maxReceiptBytes=24_000): Promise<HumanReviewProofStore> {
+    if(!Number.isSafeInteger(maxReceiptBytes)||maxReceiptBytes<24_000||maxReceiptBytes>2_000_000)
+      throw Error("Review receipt bound invalid");
     const target = resolve(directory);
     await mkdir(target, { recursive: true });
     if ((await lstat(target)).isSymbolicLink()) throw new Error("Review storage cannot be a symlink");
@@ -42,7 +44,7 @@ export class HumanReviewProofStore {
     const entry = await lstat(path);
     if (!entry.isFile() || entry.isSymbolicLink() || entry.size !== 32)
       throw new Error("Review signing key is invalid");
-    return new HumanReviewProofStore(root, await readFile(path));
+    return new HumanReviewProofStore(root, await readFile(path),maxReceiptBytes);
   }
 
   private signature(receipt: HumanReviewReceipt): Buffer {
@@ -58,9 +60,10 @@ export class HumanReviewProofStore {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw error;
     }
-    if (!entry.isFile() || entry.isSymbolicLink() || entry.size > 24_000)
+    if (!entry.isFile() || entry.isSymbolicLink() || entry.size > this.maxReceiptBytes)
       throw new Error("Review receipt file is invalid");
-    const envelope = JSON.parse(await readFile(path, "utf8")) as
+    const bytes=await readFile(path);if(bytes.length>this.maxReceiptBytes)throw Error("Review receipt grew");
+    const envelope = JSON.parse(bytes.toString("utf8")) as
       { receipt?: HumanReviewReceipt; signature?: string };
     const receipt = envelope.receipt;
     if (!receipt || receipt.schema !== "negi-human-review/1" || receipt.id !== id.toLowerCase() ||
@@ -88,7 +91,7 @@ export class HumanReviewProofStore {
       schema: "negi-human-review/1", at: new Date().toISOString(), source: "authenticated-browser" };
     const bytes = Buffer.from(JSON.stringify({ receipt,
       signature: this.signature(receipt).toString("hex") }) + "\n");
-    if (bytes.length > 24_000) throw new Error("Review receipt exceeds storage limit");
+    if (bytes.length > this.maxReceiptBytes) throw new Error("Review receipt exceeds storage limit");
     try { await writeNew(join(this.root, `${id}.json`), bytes); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
