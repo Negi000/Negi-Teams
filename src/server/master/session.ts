@@ -229,6 +229,10 @@ export interface MasterChatDelivery {
   kind: "reply" | "idle" | "message";
 }
 
+function brainSupportsCost(brain: MasterBrain | null): boolean {
+  return brain?.capabilities.cost === true;
+}
+
 export class MasterSession {
   readonly id: string;
   private readonly opts: MasterSessionOptions;
@@ -254,6 +258,8 @@ export class MasterSession {
   private restartTimer: NodeJS.Timeout | null = null;
   private stopping = false;
   private pid: number | null = null;
+  /** Codex App Server accepts one turn at a time; keep this set until turnEnd. */
+  private codexTurnPending = false;
 
   constructor(opts: MasterSessionOptions) {
     this.opts = opts;
@@ -395,6 +401,7 @@ export class MasterSession {
         break;
       }
       case "turnEnd": {
+        if (this.opts.brainId === "codex") this.codexTurnPending = false;
         this.costLedger.noteProcessTotal(this.processKey(), ev.costUsd);
         // PR-M6: usage を出す**前に**状態を落とす。contextGuard の「キリが良いか」判定は
         // registry の master status（= this.stateValue）を読むので、busy のまま usage を
@@ -403,7 +410,7 @@ export class MasterSession {
         if (ev.usage) {
           this.handlers.onUsage(this.id, {
             model: this.lastModel ?? this.opts.model,
-            costUsd: this.costLedger.total(),
+            costUsd: brainSupportsCost(this.brain) ? this.costLedger.total() : null,
             contextUsedPct: ev.usage.contextUsedPct,
             contextSize: ev.usage.contextSize,
             tokens: {
@@ -454,6 +461,7 @@ export class MasterSession {
   }
 
   private onExit(code: number | null, signal: string | null): void {
+    this.codexTurnPending = false;
     this.brain = null;
     this.pid = null;
     this.pending = 0;
@@ -475,6 +483,13 @@ export class MasterSession {
   /** プロセス死亡 → `--resume <sessionId>` で自動復帰（設計書 §8-R1）。 */
   private scheduleRestart(): void {
     if (this.stopping || this.restartTimer) return;
+    if (this.opts.brainId === "codex") {
+      // Codex App Server may have completed writes after the last observed
+      // event. Resume only after provider turn and checkout reconciliation.
+      this.handlers.onNotice(this.id,
+        "Codex master は自動復帰しません。直前のturn、成果差分、承認状態を照合してから手動で再開してください");
+      return;
+    }
     if (this.consecutiveFailures >= this.policy.maxConsecutiveFailures) {
       this.handlers.onNotice(
         this.id,
@@ -520,6 +535,31 @@ export class MasterSession {
   ): Promise<{ accepted: boolean; reason?: string }> {
     const brain = this.brain;
     if (!brain) return { accepted: false, reason: "master（chat）が起動していません" };
+    if (this.opts.brainId === "codex") {
+      if (this.codexTurnPending || this.stateValue !== "idle") {
+        return { accepted: false, reason: "Codex master は実行中です。turn の終了を待ってください" };
+      }
+      if ((opts.images?.length ?? 0) > 0 || (opts.attachments?.length ?? 0) > 0) {
+        return { accepted: false, reason: "Codex master の画像・添付ファイル入力は未対応です" };
+      }
+      this.codexTurnPending = true;
+      this.markBusy();
+      try {
+        const delivery = await brain.send({ text: [
+          ...(opts.replyTo ? [replyQuoteLine(opts.replyTo)] : []), text,
+        ].join("\n") });
+        if (!delivery.acked) throw new Error("App Server did not acknowledge turn/start");
+      } catch (err) {
+        // An errored request may still have reached the provider. Hold this
+        // session until the process exits; never allow an automatic resend.
+        if (this.brain === brain) this.setState("stopped");
+        return { accepted: false,
+          reason: `Codex turn 投入に失敗し、再送前に照合が必要です: ${(err as Error).message}` };
+      }
+      this.emitChat({ kind: "user", text,
+        ...(opts.replyTo ? { replyTo: opts.replyTo } : {}) });
+      return { accepted: true };
+    }
     const attachments = opts.attachments ?? [];
     const replyTo = opts.replyTo;
     this.emitChat({
@@ -554,6 +594,8 @@ export class MasterSession {
   async deliverFromEbi(d: MasterChatDelivery): Promise<{ ok: boolean; confirmed: boolean }> {
     const brain = this.brain;
     if (!brain) return { ok: false, confirmed: false };
+    // The read-only Codex bridge has no ebi-control delivery contract yet.
+    if (this.opts.brainId === "codex") return { ok: false, confirmed: false };
     this.emitChat({ kind: "inbound", from: d.from, tag: d.kind, text: d.message });
     this.markBusy();
     try {
@@ -632,6 +674,9 @@ export class MasterSession {
    * 自動復帰（scheduleRestart）と競合しないよう、停止中は stopping を立てて exit を吸収する。
    */
   async newConversation(): Promise<void> {
+    if (this.opts.brainId === "codex") {
+      throw new Error("Codex master の新しい会話は結果照合とrun台帳の接続後に利用できます");
+    }
     if (this.restartTimer) {
       clearTimeout(this.restartTimer);
       this.restartTimer = null;
@@ -701,7 +746,7 @@ export class MasterSession {
   }
 
   private emit(ev: MasterEvent): void {
-    const chat = toChatEvent(ev, this.costLedger.total());
+    const chat = toChatEvent(ev, brainSupportsCost(this.brain) ? this.costLedger.total() : null);
     if (chat) this.emitChat(chat);
   }
 

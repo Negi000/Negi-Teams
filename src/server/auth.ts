@@ -87,7 +87,10 @@ export function parseCookie(header: string | undefined, name: string): string | 
     const eq = part.indexOf("=");
     if (eq < 0) continue;
     const k = part.slice(0, eq).trim();
-    if (k === name) return decodeURIComponent(part.slice(eq + 1).trim());
+    if (k === name) {
+      try { return decodeURIComponent(part.slice(eq + 1).trim()); }
+      catch { return null; }
+    }
   }
   return null;
 }
@@ -172,7 +175,8 @@ export function delay(ms: number): Promise<void> {
  * Vite のマルチページビルドに依存させず、本番 Node 配信・dev いずれでも同じものを返す。
  * トークンを入力→POST /login→サーバが Cookie をセット→ "/" へ遷移、の一枚。
  */
-export function loginPageHtml(): string {
+export function loginPageHtml(returnTo = "/"): string {
+  const destination = ["/reviews", "/tasks"].includes(returnTo) ? returnTo : "/";
   return `<!doctype html>
 <html lang="ja">
 <head>
@@ -225,8 +229,8 @@ export function loginPageHtml(): string {
   var t = document.getElementById("t");
   var b = document.getElementById("b");
   var e = document.getElementById("e");
-  // 前回入力トークンの補助表示（利便性。Cookie は HttpOnly なので JS からは読めない）。
-  try { var saved = localStorage.getItem("ebi_auth_token"); if (saved) t.value = saved; } catch (_) {}
+  // Remove credentials stored by older versions of this page.
+  try { localStorage.removeItem("ebi_auth_token"); } catch (_) {}
   f.addEventListener("submit", function (ev) {
     ev.preventDefault();
     e.textContent = "";
@@ -237,8 +241,9 @@ export function loginPageHtml(): string {
       body: JSON.stringify({ token: t.value }),
     }).then(function (r) {
       if (r.ok) {
-        try { localStorage.setItem("ebi_auth_token", t.value); } catch (_) {}
-        location.href = "/";
+        // The server's HttpOnly cookie persists the session. Do not copy the
+        // shared secret to JavaScript-readable browser storage.
+        location.href = "${destination}";
         return;
       }
       b.disabled = false;

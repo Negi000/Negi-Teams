@@ -1,5 +1,23 @@
 # 🦐 ebi-team
 
+Negi-Teamsの[Phase 0〜8実装・受入の現在地](docs/negi-teams-implementation-status.md)に、実証済みの範囲と残る判断をまとめています。
+
+Negi-Teams Phase 0–1 の読み取り専用 Codex 履歴診断は [導入・検証手順](docs/negi-teams-phase0-phase1.md) を参照してください。既存の実行機能とは独立したローカル CLI です。
+
+Phase 2 の最小Vault連携は [Vaultの利用手順](docs/negi-teams-phase2.md) を参照してください。ID付きMarkdownの検証、ローカル検索、Context Pack生成を行います。
+
+Phase 3 の[単一タスク台帳とCodex通信層](docs/negi-teams-phase3-offline.md)はmockで検証し、[隔離checkoutでの実接続記録](docs/negi-teams-phase3-live.md)でAstra→Solの1件を確認しました。[Vault Task実行画面](docs/negi-teams-task-ui.md)から開始・停止・操作承認・成果レビューを行えます。旧worker経路の全面移行と実成果の人間受入は未完了です。
+
+Phase 4 の[単一スケジューラと差分統合](docs/negi-teams-phase4.md)は、実行枠・依存・書込競合・結果不明の停止を管理します。登録Taskの並行実行CLIと、最新の検証済み成果を別clean checkoutへ統合するCLIを実文書で確認しました。既存起動経路への全面接続は未完了です。
+
+Phase 5 の[Jev shadow 接続の初期検証](docs/negi-teams-phase5.md)では、実際のJevへの小規模な判定と、外部送信・予算・重複送信を制限するローカル経路を確認しました。人間校正とactive化は未完了です。
+
+Phase 6 の[レビューと知識循環の初期経路](docs/negi-teams-phase6.md)は成果の修正履歴とVaultのLesson候補を結びます。認証付きレビュー画面で自由文・明示受入・取消を記録できます。指摘から通常workerへの差戻しと承認済みPolicyへの昇格は未完了です。
+
+Phase 7 の[限定比較とPolicy版管理の基礎](docs/negi-teams-phase7.md)は、同一条件での実モデル比較と人間承認を要する設定版の遷移を記録します。2件の比較では時間の改善方向が分かれ、Policyは有効化していません。
+
+Phase 8 の[モバイル表示とローカル認証の限定修正](docs/negi-teams-phase8.md)では、狭幅で隠れていた入力補助キーを表示し、共有トークンのブラウザ保存を廃止しました。読み取り専用Codex Masterのチャット1turnと、合成Taskの操作承認・成果受入・取消をChromiumで確認しました。実機と実成果の人間受入は未確認です。
+
 Claude Code CLI の上に複数のエージェント（本プロジェクトでは「エビ」と呼びます）をオーケストレーションし、localhost の Web UI から一括で見て・触れて・操作できるようにする開発支援ツールです。
 
 各エビは `claude` プロセスを [node-pty](https://github.com/microsoft/node-pty) で直接 spawn したもので、ブラウザ上の xterm.js タイルへ PTY 出力をそのままストリームします。宣言的な設定ファイルで常駐エージェント（例: 統括役・作業役）を定義でき、エージェント同士のメッセージのやり取りは MCP 経由の制御ツールで行います。tmux 等には依存しない、シンプルな構成です。

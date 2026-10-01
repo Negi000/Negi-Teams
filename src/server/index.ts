@@ -3,7 +3,7 @@ import { loadedEnvKeys } from "./env.ts";
 import { createServer, type IncomingMessage } from "node:http";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { dirname, join, extname, normalize } from "node:path";
+import { dirname, isAbsolute, join, extname, normalize } from "node:path";
 import { WebSocketServer, WebSocket } from "ws";
 import {
   Registry,
@@ -56,6 +56,12 @@ import {
   applyMasterUiOverride,
 } from "./fixedEbi.ts";
 import { MasterSession, sanitizeReplyRef } from "./master/session.ts";
+import { CodexAppServerBrain } from "./master/codexAppServerBrain.ts";
+import { codexMasterLaunchOptions } from "./master/codexMasterLaunch.ts";
+import { LocalReviewService } from "./orchestration/reviewService.ts";
+import { createReviewHttp } from "./orchestration/reviewHttp.ts";
+import { LocalTaskService } from "./orchestration/taskService.ts";
+import { createTaskHttp } from "./orchestration/taskHttp.ts";
 import { ChatAttachmentStore, MAX_ATTACHMENTS_PER_TURN } from "./chatAttachments.ts";
 import { shareChatImage } from "./chatImages.ts";
 import { configureFixedEbiLog, fixedEbiLogPath, logFixedEbi } from "./fixedEbiLog.ts";
@@ -99,6 +105,27 @@ const HOST = process.env.EBI_HOST ?? "127.0.0.1";
 // 未設定なら token=null（＝非 loopback からのアクセスは全拒否の安全側デフォルト）。
 // loopback（母艦ローカル・内部 MCP 呼び）は token の有無に関わらず常に無認証で通す。
 const authConfig = loadAuthConfig();
+const reviewConfigPath = process.env.NEGI_REVIEW_CONFIG;
+let reviewService: LocalReviewService | null = null;
+if (reviewConfigPath) {
+  if (!isAbsolute(reviewConfigPath) || !authConfig.token)
+    throw new Error("NEGI_REVIEW_CONFIG requires an absolute config path and EBI_AUTH_TOKEN");
+  const bytes = await readFile(reviewConfigPath);
+  if (bytes.length > 256_000) throw new Error("Review config exceeds local size limit");
+  reviewService = await LocalReviewService.open(JSON.parse(bytes.toString("utf8")));
+}
+const taskConfigPath = process.env.NEGI_TASK_CONFIG;
+let taskService: LocalTaskService | null = null;
+if (taskConfigPath) {
+  if (!isAbsolute(taskConfigPath) || !authConfig.token)
+    throw new Error("NEGI_TASK_CONFIG requires an absolute config path and EBI_AUTH_TOKEN");
+  const bytes = await readFile(taskConfigPath);
+  if (bytes.length > 256_000) throw new Error("Task config exceeds local size limit");
+  taskService = await LocalTaskService.open(JSON.parse(bytes.toString("utf8")));
+}
+const taskApi = createTaskHttp(taskService, authConfig);
+if (taskService && reviewService) await taskService.connectReviews(reviewService);
+const reviewApi = createReviewHttp(reviewService, authConfig);
 // spawn する対象コマンド。claude が PATH に無い環境では EBI_COMMAND=bash 等で fallback。
 const COMMAND = process.env.EBI_COMMAND ?? "claude";
 // config 由来のバックエンド既定（top-level "defaultBackend" / "backends"）。
@@ -395,6 +422,9 @@ let masterSession: MasterSession | null = null;
 
 /** MasterSession を作って起動し、registry へ chat 配送先として登録する。 */
 async function startMasterChatSession(spec: FixedEbiSpec): Promise<void> {
+  const codexReadOnly = spec.brain === "codex"
+    ? codexMasterLaunchOptions({ model: spec.launch.model, extraArgs: spec.extraArgs })
+    : null;
   // config の args に --mcp-config を手書きしている場合はそちらを尊重する
   //（applyMasterMcpConfig と同じ方針。二重指定を作らない）。
   const hasManualMcp = spec.extraArgs.includes("--mcp-config");
@@ -403,11 +433,12 @@ async function startMasterChatSession(spec: FixedEbiSpec): Promise<void> {
     brainId: spec.brain,
     cwd: spec.launch.cwd,
     model: spec.launch.model,
-    permissionMode: spec.permissionMode,
+    permissionMode: codexReadOnly ? "plan" : spec.permissionMode,
     systemPrompt: spec.launch.systemPrompt ?? null,
-    mcpConfigPath: hasManualMcp ? null : ROLE_MCP_CONFIG.master,
-    extraArgs: spec.extraArgs,
+    mcpConfigPath: codexReadOnly || hasManualMcp ? null : ROLE_MCP_CONFIG.master,
+    extraArgs: codexReadOnly ? [] : spec.extraArgs,
     logPath: MASTER_CHAT_LOG_PATH,
+    ...(codexReadOnly ? { createBrain: () => new CodexAppServerBrain(codexReadOnly) } : {}),
     handlers: {
       onEvent: (id, envelope) => {
         broadcast({ type: "chatEvent", id, seq: envelope.seq, ts: envelope.ts, event: envelope.event });
@@ -721,7 +752,7 @@ const httpServer = createServer(async (req, res) => {
   // GET /login: トークン入力ページを返す。POST /login: 照合して Cookie を発行する。
   if (urlPath === "/login" && (req.method ?? "GET") === "GET") {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-    res.end(loginPageHtml());
+    res.end(loginPageHtml(url.searchParams.get("returnTo") ?? "/"));
     return;
   }
   if (urlPath === "/login" && req.method === "POST") {
@@ -761,6 +792,10 @@ const httpServer = createServer(async (req, res) => {
     res.end(JSON.stringify({ error: "invalid token" }));
     return;
   }
+
+  // Reviews require an authenticated browser cookie, even on loopback.
+  if (await reviewApi(req, res, url)) return;
+  if (await taskApi(req, res, url)) return;
 
   // ---- 認証ゲート（loopback は常に素通り／非 loopback は token 必須）----
   const auth = authorize(req, loopback, authConfig, url.searchParams);
@@ -824,7 +859,7 @@ const wss = new WebSocketServer({
 wss.on("connection", (ws) => {
   clients.add(ws);
   // 接続直後にサーバ能力（監督が有効か）を送る。クライアントはこれで要約 UI の出し分けをする。
-  send(ws, { type: "capabilities", supervisor: supervisor.enabled });
+  send(ws, { type: "capabilities", supervisor: supervisor.enabled, reviews: reviewService !== null, tasks: taskService !== null });
   // master が ui:"chat" なら、registry より**先に** state と直近の会話を送る。
   // クライアントは「chatState を受けた id＝chat モードの master」と判定して xterm ペインを
   // 作らない分岐に入るので、registry を先に送ると一瞬だけ PTY ペインが生えてしまう。
@@ -1847,6 +1882,7 @@ httpServer.listen(PORT, HOST, () => {
 });
 
 function shutdown(): void {
+  void taskService?.close();
   console.log("\n[ebi-team] 終了処理: 全 agent を kill します");
   // 固定エビの監視を先に止め、kill による exit で再起動が走らないようにする。
   fixedEbi.stop();

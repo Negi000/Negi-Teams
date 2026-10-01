@@ -1,5 +1,5 @@
 // Registry の配送（deliver / resolveAndInject / reverseInject）の到達確認・フォールバックを、
-// 実 PTY エージェント（bash cat・実 claude 不要）で deterministic に検証する統合テスト。
+// 実 PTY エージェント（Node製fixture・実 claude 不要）で検証する統合テスト。
 //
 // これは 2026-07-20 のインシデント（master 宛が「delivered と報告されるのに実際は届かない」）の
 // 根治の回帰ガードである。核心:
@@ -11,11 +11,11 @@
 //
 // 実行: node --import tsx --test test/delivery.test.ts
 
-import { test, before, after, afterEach } from "node:test";
+import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { ptyFixtureLaunch, readyPtyFixture, stopRegistry } from "./helpers/ptyFixture.ts";
 
 // deliver の ACK 待ちタイムアウトを短くしてテストを速くする（registry.ts はモジュール読込時に
 // この env を読むので、動的 import より前に設定する）。
@@ -32,8 +32,8 @@ import { deliveryText } from "../src/shared/deliveryTag.ts";
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 const spawnConfig: SpawnConfig = {
-  command: "bash",
-  args: ["-c", "cat"],
+  command: process.execPath,
+  args: ptyFixtureLaunch(".").args,
   idleThresholdMs: 150,
   scrollbackBytes: 64 * 1024,
   devChannelsAllowlist: [],
@@ -45,7 +45,7 @@ const handlers: AgentHandlers = {
   onNotice() {},
 };
 
-const launch = (cwd: string) => ({ command: "bash", args: ["-c", "cat"], cwd, model: null });
+const launch = (cwd: string) => ptyFixtureLaunch(cwd);
 
 // 各テストで生成した Registry を後始末する（PTY を残さない）。
 const registries: InstanceType<typeof Registry>[] = [];
@@ -55,15 +55,15 @@ function makeRegistry(mb: InstanceType<typeof Mailbox>) {
   registries.push(r);
   return r;
 }
-afterEach(() => {
-  for (const r of registries.splice(0)) r.killAll();
+afterEach(async () => {
+  for (const r of registries.splice(0)) await stopRegistry(r);
 });
 
 test("回帰: 購読が live でない相手へは黙って消さず PTY へフォールバックする（インシデント本丸）", async () => {
   // liveness window を極小にして「過去に購読したが今は dead」を作る。
   const mb = new Mailbox(30);
   const reg = makeRegistry(mb);
-  const agent = reg.spawn(".", handlers, { id: "master", launch: launch(".") });
+  const agent = await readyPtyFixture(reg.spawn(".", handlers, { id: "master", launch: launch(".") }));
 
   // 一度だけ購読 → 直後に window を過ぎて dead 化（everSubscribed は true のまま）。
   await mb.subscribe("master", 1);
@@ -83,7 +83,7 @@ test("回帰: 購読が live でない相手へは黙って消さず PTY へフ�
 test("live + ACK あり → notify 到達確認（via:notify・PTY へは載せない）", async () => {
   const mb = new Mailbox();
   const reg = makeRegistry(mb);
-  reg.spawn(".", handlers, { id: "ebi-1", launch: launch(".") });
+  await readyPtyFixture(reg.spawn(".", handlers, { id: "ebi-1", launch: launch(".") }));
 
   // ブリッジ役: 購読し、届いたメッセージを即 ack する（notification emit 後の ACK を模す）。
   let acked: number[] = [];
@@ -104,7 +104,7 @@ test("live + ACK あり → notify 到達確認（via:notify・PTY へは載せ�
 test("live だが ACK が来ない → PTY フォールバック（via:pty-fallback）し pending を回収する", async () => {
   const mb = new Mailbox();
   const reg = makeRegistry(mb);
-  reg.spawn(".", handlers, { id: "ebi-1", launch: launch(".") });
+  await readyPtyFixture(reg.spawn(".", handlers, { id: "ebi-1", launch: launch(".") }));
 
   // live にするため一度購読して打刻（ただし ack を返すブリッジは動かさない＝転送不能を模す）。
   await mb.subscribe("ebi-1", 1);
@@ -120,7 +120,7 @@ test("live だが ACK が来ない → PTY フォールバック（via:pty-fallb
 test("notifySubscribe:false は live でも常に PTY 注入", async () => {
   const mb = new Mailbox();
   const reg = makeRegistry(mb);
-  reg.spawn(".", handlers, { id: "mina", launch: launch("."), notifySubscribe: false });
+  await readyPtyFixture(reg.spawn(".", handlers, { id: "mina", launch: launch("."), notifySubscribe: false }));
   await mb.subscribe("mina", 1); // live にしても…
 
   const out = await reg.deliver("mina", "master", "外部チャンネル待機セッション");
@@ -140,7 +140,7 @@ test("agent 不在は ok:false / via:none", async () => {
 test("resolveAndInject は details（via/confirmed）を返す", async () => {
   const mb = new Mailbox();
   const reg = makeRegistry(mb);
-  reg.spawn(".", handlers, { id: "ebi-1", launch: launch(".") });
+  await readyPtyFixture(reg.spawn(".", handlers, { id: "ebi-1", launch: launch(".") }));
 
   const res = await reg.resolveAndInject("ebi-1", "user", "hi");
   assert.deepEqual(res.delivered, ["ebi-1"]);
@@ -152,7 +152,7 @@ test("resolveAndInject は details（via/confirmed）を返す", async () => {
 test("reverseInject も details を返す（エビ → master 経路）", async () => {
   const mb = new Mailbox();
   const reg = makeRegistry(mb);
-  reg.spawn(".", handlers, { id: "master", launch: launch(".") });
+  await readyPtyFixture(reg.spawn(".", handlers, { id: "master", launch: launch(".") }));
 
   const res = await reg.reverseInject("ebi-1", "master", "報告", "reply");
   assert.deepEqual(res.delivered, ["master"]);
@@ -163,8 +163,8 @@ test("reverseInject も details を返す（エビ → master 経路）", async 
 test("@all ブロードキャストは connected 各宛先の details を返し isolated を除く", async () => {
   const mb = new Mailbox();
   const reg = makeRegistry(mb);
-  reg.spawn(".", handlers, { id: "ebi-1", launch: launch(".") });
-  reg.spawn(".", handlers, { id: "ebi-2", launch: launch(".") });
+  await readyPtyFixture(reg.spawn(".", handlers, { id: "ebi-1", launch: launch(".") }));
+  await readyPtyFixture(reg.spawn(".", handlers, { id: "ebi-2", launch: launch(".") }));
   reg.setMode("ebi-2", "isolated");
 
   const res = await reg.resolveAndInject("all", "master", "全員へ");
@@ -180,27 +180,15 @@ test("@all ブロードキャストは connected 各宛先の details を返し 
 // deliver は ACK 後に「セッションが本文を描画したか」を scrollback で確認し、
 // 取れなければ PTY 注入へフォールバックする。
 //
-// 実 claude は使わず、`claude` という名前の cat スクリプト（＝ hasControlBridge を満たし、
-// PTY へ書いた内容がそのまま scrollback に出る）で channel 描画の有無を模す。
+// 明示したClaude backendのNode製fixtureでchannel描画の有無を模す。
 
-const fakeClaudeDir = mkdtempSync(join(tmpdir(), "ebi-fake-claude-"));
-const fakeClaude = join(fakeClaudeDir, "claude");
-writeFileSync(fakeClaude, "#!/bin/sh\nexec cat\n", { mode: 0o755 });
+const bridgeLaunch = (cwd: string) => ptyFixtureLaunch(cwd, true);
 
-/** hasControlBridge を満たす起動パラメータ（command 名が claude ＋ --mcp-config）。 */
-const bridgeLaunch = (cwd: string) => ({
-  command: fakeClaude,
-  args: ["--mcp-config", "/dev/null"],
-  cwd,
-  model: null,
-});
-
-after(() => rmSync(fakeClaudeDir, { recursive: true, force: true }));
 
 test("回帰: ACK は取れたがセッションに本文が描画されない → PTY フォールバック（spawn 直後の消失根治）", async () => {
   const mb = new Mailbox();
   const reg = makeRegistry(mb);
-  reg.spawn(".", handlers, { id: "ebi-1", launch: bridgeLaunch(".") });
+  await readyPtyFixture(reg.spawn(".", handlers, { id: "ebi-1", launch: bridgeLaunch(".") }));
 
   // ブリッジ役: ack は返すが、セッション（TUI）は本文を描画しない＝harness に捨てられた状態。
   const bridge = (async () => {
@@ -217,7 +205,7 @@ test("回帰: ACK は取れたがセッションに本文が描画されない �
 test("ACK＋セッションが本文を描画 → via:notify（以降は確認をスキップ＝channelProven）", async () => {
   const mb = new Mailbox();
   const reg = makeRegistry(mb);
-  const agent = reg.spawn(".", handlers, { id: "ebi-2", launch: bridgeLaunch(".") });
+  const agent = await readyPtyFixture(reg.spawn(".", handlers, { id: "ebi-2", launch: bridgeLaunch(".") }));
 
   // ブリッジ役: ack を返し、さらに「セッションが channel 本文を描画した」状態を
   // PTY へのエコー（fake claude = cat）で作る。
@@ -248,7 +236,7 @@ test("ACK＋セッションが本文を描画 → via:notify（以降は確認�
 test("エコー照合は push 以降の出力だけを見る（過去の同一本文を到達と誤認しない）", async () => {
   const mb = new Mailbox();
   const reg = makeRegistry(mb);
-  const agent = reg.spawn(".", handlers, { id: "ebi-3", launch: bridgeLaunch(".") });
+  const agent = await readyPtyFixture(reg.spawn(".", handlers, { id: "ebi-3", launch: bridgeLaunch(".") }));
 
   // push より「前」に**同じ照合キー（msgId=1 のタグ）**が scrollback に出ている状況を作る。
   // この Mailbox は新規なので最初の push は msgId=1 になり、mark が効かなければ誤検知する。

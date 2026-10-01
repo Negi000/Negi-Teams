@@ -83,6 +83,7 @@ export class ChatPanel {
   /** items と 1:1 で並ぶ描画済み要素（増分更新のため index で引く）。 */
   private readonly rendered: HTMLElement[] = [];
   private state: MasterChatState = "stopped";
+  private codexReadOnly = false;
   private pending = 0;
   private visible = false;
   /** 最下部に張り付いているか（false のとき新着で勝手にスクロールしない）。 */
@@ -134,7 +135,7 @@ export class ChatPanel {
     this.newBtn.title =
       "頭脳プロセスを resume 無しで起動し直し、文脈をリセットします（これまでの表示は残ります）";
     this.newBtn.addEventListener("click", () => {
-      if (!this.masterId) return;
+      if (!this.masterId || this.codexReadOnly) return;
       if (!window.confirm("新しい会話を始めます（いまの文脈はリセットされます）。よろしいですか？")) return;
       // 会話が切り替わるとコスト累計も文脈も 0 からなので、次の turnEnd まで「—」に戻す。
       this.transcript.resetStats();
@@ -227,6 +228,16 @@ export class ChatPanel {
     this.syncControls();
   }
 
+  /** registry may arrive before or after chatState. */
+  setCodexReadOnly(enabled: boolean): void {
+    this.codexReadOnly = enabled;
+    this.newBtn.title = enabled
+      ? "Codex master の新しい会話は結果照合と run 台帳の接続後に利用できます"
+      : "頭脳プロセスを resume 無しで起動し直し、文脈をリセットします（これまでの表示は残ります）";
+    this.syncControls();
+    this.updateStats();
+  }
+
   /** WS `chatSnapshot`（接続直後・再接続時の一括復元）。 */
   applySnapshot(envelopes: readonly MasterChatEnvelope[], hasMore: boolean): void {
     this.transcript.reset(envelopes);
@@ -317,11 +328,16 @@ export class ChatPanel {
 
   private onSendClick(): void {
     if (!this.masterId) return;
+    if (this.codexReadOnly && this.state === "busy") return;
     // busy 中も送れる（走行中ターンに合流する）。送れないのは頭脳が居ないときだけ。
     if (!sendEnabled(this.state)) return;
     const text = this.input.value.trim();
     // 添付だけで送るケース（画像を貼って Enter）も許す。
     if (!text && this.attachments.length === 0) return;
+    if (this.codexReadOnly && this.attachments.length > 0) {
+      this.showHint("Codex master の添付ファイル入力は未対応です", "error");
+      return;
+    }
     this.onSend(this.masterId, text, [...this.attachments], this.replyTo);
     this.history.push(text);
     this.attachments.length = 0;
@@ -360,6 +376,10 @@ export class ChatPanel {
     const images = Array.from(dt.files ?? []).filter((f) => f.type.startsWith("image/"));
     if (images.length > 0) {
       e.preventDefault();
+      if (this.codexReadOnly) {
+        this.showHint("Codex master の画像入力は未対応です", "error");
+        return;
+      }
       void this.attachFiles(images);
       return;
     }
@@ -375,6 +395,10 @@ export class ChatPanel {
     const files = Array.from(e.dataTransfer?.files ?? []).filter((f) => f.type.startsWith("image/"));
     if (files.length === 0) return;
     e.preventDefault();
+    if (this.codexReadOnly) {
+      this.showHint("Codex master の画像入力は未対応です", "error");
+      return;
+    }
     void this.attachFiles(files);
   }
 
@@ -463,16 +487,18 @@ export class ChatPanel {
 
   /** 状態に応じて送信ボタン・入力欄・pending バーを更新する。 */
   private syncControls(): void {
-    const blocked = !sendEnabled(this.state);
+    const blocked = !sendEnabled(this.state) || (this.codexReadOnly && this.state === "busy");
     this.sendBtn.disabled = blocked;
     this.stopBtn.disabled = !stopEnabled(this.state);
     this.input.disabled = blocked;
     this.input.placeholder = blocked
-      ? "master（chat）が起動していません…"
+      ? this.codexReadOnly && this.state === "busy"
+        ? "Codex master の turn が終了するまでお待ちください"
+        : "master（chat）が起動していません…"
       : this.state === "busy"
         ? "実行中でも送れます（Enter で送信 / 中断は ⏹）"
         : "master に話しかける（Enter で送信 / Shift+Enter で改行）";
-    this.newBtn.disabled = this.state === "starting";
+    this.newBtn.disabled = this.codexReadOnly || this.state === "starting";
     if (this.pending > 0) {
       this.pendingBar.hidden = false;
       this.pendingBar.textContent =
@@ -593,7 +619,11 @@ export class ChatPanel {
       if (i > 0) this.statsEl.appendChild(span("chat-stat-sep", "/"));
       const el = span(`chat-stat lv-${m.level}`, m.text);
       el.dataset.metric = m.key;
-      el.title = m.title;
+      el.title = this.codexReadOnly && m.key === "cost"
+        ? "Codex App Server の金額は取得できません"
+        : this.codexReadOnly && m.key === "ctx"
+          ? "App Server で観測した文脈入力 / context window。新しい会話はこの統合では未対応です"
+          : m.title;
       this.statsEl.appendChild(el);
     });
   }

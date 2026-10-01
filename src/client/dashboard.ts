@@ -12,7 +12,8 @@ import {
  * REGISTRY 最上段「📊 ダッシュボード」を選んだときにメイン領域へ描画する DOM。
  * - アカウント枠: 5h / 7d のレート制限（使用率バー＋解除カウントダウン）。
  * - エビ別テーブル: id / backend / model / context% / 推定コスト$ / token 内訳。
- *   usage を報告しない backend（codex / gemini）の行は cost/context を「—（未対応）」と明示する
+ *   PTY の codex / gemini は cost/context を「—（未対応）」と明示する。
+ *   読み取り専用 Codex chat master は App Server の context/tokens を表示し、cost は不明。
  *   （空欄にすると「壊れている」と誤読されるため。設計 §4.5 / Q-8）。
  * - 合計推定コスト。
  * データは WS `usage` で受信し、最新スナップショットを保持して再描画する。
@@ -90,8 +91,8 @@ export class Dashboard {
     const note = document.createElement("p");
     note.className = "dash-note";
     note.textContent =
-      "コストは推定額（Max サブスクは実質サブスク内・実請求とは別）。値は各エビの statusLine 更新時に反映され、idle のエビは古くなることがあります。" +
-      "codex / gemini は statusLine 相当の報告経路が無いため cost / context は「—（未対応）」と表示されます（欠測であって異常ではありません）。";
+      "コストは推定額で、サブスクリプションの実請求ではありません。値は観測された時点のものです。" +
+      "PTY の codex / gemini は cost / context 未対応です。Codex chat master は App Server の文脈・token観測値を表示し、金額は不明です。";
     this.el.appendChild(note);
   }
 
@@ -188,16 +189,18 @@ export class Dashboard {
         const a = row.usage;
         const bb = backendBadge(row.backend);
         const tr = document.createElement("tr");
-        if (!bb.reportsUsage) tr.className = "dash-row-unsupported";
+        if (!bb.reportsUsage && !row.chatMaster) tr.className = "dash-row-unsupported";
         tr.appendChild(td(row.id));
         tr.appendChild(td(`${bb.emoji} ${bb.label}`));
-        tr.appendChild(td(a?.model ?? "-"));
-        tr.appendChild(usageTd(row.backend, a?.contextUsedPct ?? null, (v) => `${v}%`));
-        tr.appendChild(usageTd(row.backend, a?.costUsd ?? null, (v) => `$${v.toFixed(2)}`));
-        tr.appendChild(usageTd(row.backend, a?.tokens.input ?? null, formatCount));
-        tr.appendChild(usageTd(row.backend, a?.tokens.output ?? null, formatCount));
-        tr.appendChild(usageTd(row.backend, a?.tokens.cacheRead ?? null, formatCount));
-        tr.appendChild(usageTd(row.backend, a?.tokens.cacheCreation ?? null, formatCount));
+        tr.appendChild(td(a?.model ?? row.model ?? "-"));
+        const observedBackend = row.chatMaster ? undefined : row.backend;
+        tr.appendChild(usageTd(observedBackend, a?.contextUsedPct ?? null, (v) => `${v}%`));
+        tr.appendChild(row.chatMaster ? td("—（不明）") :
+          usageTd(row.backend, a?.costUsd ?? null, (v) => `$${v.toFixed(2)}`));
+        tr.appendChild(usageTd(observedBackend, a?.tokens.input ?? null, formatCount));
+        tr.appendChild(usageTd(observedBackend, a?.tokens.output ?? null, formatCount));
+        tr.appendChild(usageTd(observedBackend, a?.tokens.cacheRead ?? null, formatCount));
+        tr.appendChild(usageTd(observedBackend, a?.tokens.cacheCreation ?? null, formatCount));
         tbody.appendChild(tr);
       }
     }
@@ -206,7 +209,13 @@ export class Dashboard {
 
     const total = document.createElement("p");
     total.className = "dash-total";
-    total.textContent = `合計推定コスト: $${u.totalCostUsd.toFixed(2)}（推定）`;
+    const unknownCost = rows.some((row) => row.chatMaster || !backendReportsUsage(row.backend));
+    const observedCost = rows.some((row) => !row.chatMaster && row.usage?.costUsd != null);
+    total.textContent = unknownCost
+      ? observedCost
+        ? `確認できた推定コスト: $${u.totalCostUsd.toFixed(2)}（金額不明の行を除く）`
+        : "確認できた推定コスト: —（金額不明）"
+      : `合計推定コスト: $${u.totalCostUsd.toFixed(2)}（推定）`;
     box.appendChild(total);
 
     return box;
@@ -221,6 +230,8 @@ export interface UsageRow {
   id: string;
   /** registry 由来の backend id（registry に居ないエビ＝ kill 済み等は undefined）。 */
   backend?: string;
+  model?: string | null;
+  chatMaster: boolean;
   usage: UsageAgent | null;
 }
 
@@ -232,17 +243,22 @@ export interface UsageRow {
  * - usage 対応 backend でまだ届いていないエビは行を起こさない（従来どおり「データ待ち」）。
  */
 export function mergeUsageRows(usage: UsageAgent[], agents: AgentRecord[]): UsageRow[] {
-  const backendOf = new Map(agents.map((a) => [a.id, a.backend]));
+  const registryOf = new Map(agents.map((a) => [a.id, a]));
   const seen = new Set<string>();
   const rows: UsageRow[] = [];
   for (const u of usage) {
     seen.add(u.id);
-    rows.push({ id: u.id, backend: backendOf.get(u.id), usage: u });
+    const a = registryOf.get(u.id);
+    rows.push({ id: u.id, backend: a?.backend, model: a?.model,
+      chatMaster: a?.kind === "master" && a.mode === "connected" &&
+        a.backend === "codex", usage: u });
   }
   for (const a of agents) {
     if (seen.has(a.id)) continue;
     if (backendReportsUsage(a.backend)) continue;
-    rows.push({ id: a.id, backend: a.backend, usage: null });
+    rows.push({ id: a.id, backend: a.backend, model: a.model,
+      chatMaster: a.kind === "master" && a.mode === "connected" &&
+        a.backend === "codex", usage: null });
   }
   return rows;
 }

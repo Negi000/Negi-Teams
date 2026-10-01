@@ -11,6 +11,10 @@ import {
 } from "../shared/protocol.ts";
 import { backendBadge } from "../shared/backendBadge.ts";
 
+// Older login pages copied the shared secret into JavaScript-readable storage.
+// The HttpOnly cookie is sufficient; clear the old copy on the normal app path.
+try { window.localStorage.removeItem("ebi_auth_token"); } catch { /* storage unavailable */ }
+
 // ===== DOM 参照 =====
 const stage = document.getElementById("stage") as HTMLElement;
 const spawnBtn = document.getElementById("spawn-btn") as HTMLButtonElement;
@@ -178,6 +182,8 @@ function handleServerMessage(msg: ServerMessage): void {
   switch (msg.type) {
     case "registry":
       registry = sortAgents(msg.agents);
+      chatPanel.setCodexReadOnly(registry.some((a) => a.id === chatMasterId() &&
+        a.kind === "master" && a.backend === "codex"));
       // ダッシュボードは registry の backend を見て「—（未対応）」行を出す（PR-E）。
       dashboard.updateAgents(registry);
       syncPanes();
@@ -222,6 +228,8 @@ function handleServerMessage(msg: ServerMessage): void {
       addNotice("system", `エラー: ${msg.text}`);
       break;
     case "capabilities":
+      (document.getElementById("review-link") as HTMLAnchorElement).hidden = !msg.reviews;
+      (document.getElementById("task-link") as HTMLAnchorElement).hidden = !msg.tasks;
       // サーバ能力に応じて要約 UI の有無を切り替える。
       // 既存ペインは再生成して要約ボタンの有無を反映する（接続/再接続時のみ・低頻度）。
       if (msg.supervisor !== supervisorEnabled) {
@@ -266,6 +274,8 @@ function handleServerMessage(msg: ServerMessage): void {
     case "chatState":
       // chat モードの master が居ることの判定材料も兼ねる（registry には情報が無い）。
       chatPanel.applyState(msg.id, msg.state, msg.pending);
+      chatPanel.setCodexReadOnly(registry.some((a) => a.id === msg.id &&
+        a.kind === "master" && a.backend === "codex"));
       // registry より先に届くのが通常だが、後から届いたときは PTY ペインを畳んで chat に寄せる。
       if (panes.has(msg.id)) {
         const wasActive = activeId === msg.id;
@@ -483,7 +493,9 @@ function renderRegistry(): void {
       const badge = document.createElement("span");
       badge.className = `backend-badge backend-${bb.id}`;
       badge.textContent = bb.emoji;
-      badge.title = bb.reportsUsage
+      badge.title = a.kind === "master" && a.mode === "connected" && a.backend === "codex"
+        ? `backend: codex（App Server: cost不明 / context観測）${a.model ? ` / model: ${a.model}` : ""}`
+        : bb.reportsUsage
         ? `backend: ${bb.label}${a.model ? ` / model: ${a.model}` : ""}`
         : `backend: ${bb.label}（cost / context は未対応）${a.model ? ` / model: ${a.model}` : ""}`;
       idTd.append(document.createTextNode(" "), badge);

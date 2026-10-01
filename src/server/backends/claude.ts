@@ -6,6 +6,7 @@
 // 挙動は集約前と完全に同一（外形ゼロ差分）であること。
 
 import { CLAUDE_TRAITS } from "./profiles.ts";
+import { matchesCommandName } from "./commandName.ts";
 import type {
   BackendEnvInput,
   BackendLaunchInput,
@@ -141,7 +142,7 @@ export const CLAUDE_BACKEND: EbiBackend = {
   defaultCommand: "claude",
 
   matches(command: string): boolean {
-    return command === "claude" || command.endsWith("/claude");
+    return matchesCommandName(command, "claude");
   },
 
   /**

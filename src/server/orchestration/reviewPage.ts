@@ -1,0 +1,37 @@
+export function reviewPageHtml(): string {
+  return `<!doctype html>
+<html lang="ja"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Negi-Teams 成果レビュー</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#0f1115;color:#e6e8ee;font:16px/1.6 system-ui,sans-serif;padding:24px;padding-top:max(24px,env(safe-area-inset-top));padding-bottom:max(24px,env(safe-area-inset-bottom))}main{max-width:1060px;margin:auto}a{color:#ffb695}h1{font-size:25px;margin:12px 0}h2{font-size:18px;margin:0 0 8px}p{margin:8px 0}.muted{color:#aab2c6;font-size:14px}.card{border:1px solid #3a4151;border-radius:12px;background:#181c25;padding:20px;margin:16px 0;min-width:0}.row{display:flex;gap:12px;align-items:end;flex-wrap:wrap}label{display:block;flex:1;min-width:180px}input,select,textarea,button{font:inherit}select,textarea,input{width:100%;background:#242a36;color:#e6e8ee;border:1px solid #596177;border-radius:7px;padding:10px}textarea{min-height:120px;resize:vertical}button{min-height:44px;padding:10px 16px;border:1px solid #6c768f;border-radius:7px;background:#2a3140;color:#e6e8ee;cursor:pointer}button.primary{background:#ff976b;color:#24130c;border-color:#ff976b;font-weight:700}button:disabled{opacity:.5;cursor:default}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:14px/1.7 ui-monospace,monospace;margin:0}code{overflow-wrap:anywhere;font-size:13px}#message{min-height:26px;color:#ffba98}#status{font-weight:700}.feedback{border-top:1px solid #3a4151;padding:12px 0;white-space:pre-wrap;overflow-wrap:anywhere}[hidden]{display:none!important}@media(max-width:600px){body{padding:12px;padding-top:max(12px,env(safe-area-inset-top));padding-bottom:max(12px,env(safe-area-inset-bottom))}.card{padding:14px}.row{display:block}.row>*{margin-top:10px}label{min-width:0}button{width:100%}h1{font-size:22px}pre{font-size:13px}}
+</style></head><body><main>
+<a href="/">← チーム画面</a><h1>成果レビュー</h1>
+<div class="row"><label>レビュー対象<select id="cases" aria-label="レビュー対象"></select></label><button id="reload" type="button">更新</button></div>
+<p id="message" role="status" aria-live="polite"></p>
+<section id="review" hidden>
+<div class="card"><h2 id="title"></h2><p id="status"></p><p id="verification"></p><p id="limits" class="muted"></p><p id="integrity"></p>
+<details><summary>対象の版と作業</summary><p>作業: <code id="run"></code></p><p>対象の版: <code id="sha"></code></p><p id="previous"></p></details></div>
+<div class="card"><h2>成果の内容</h2><pre id="content"></pre></div>
+<div class="card"><h2>指摘・反応を残す</h2><p class="muted">自然な文章で入力できます。分類は未確定のまま保存できます。反応の保存と成果の受入は別の操作です。</p>
+<form id="feedback-form"><label>この版へのコメント<textarea id="feedback-text" maxlength="6000" required></textarea></label>
+<div class="row"><label>分類（任意）<select id="kind"><option value="unclear">未確定</option><option value="praise">良かった点</option><option value="correction">修正してほしい点</option><option value="new_requirement">追加の要件</option></select></label>
+<label>適用する範囲<select id="scope"><option value="current_task">今回の作業</option><option value="future_preference">今後の希望</option><option value="unspecified">未指定</option></select></label><button id="feedback-submit" type="submit">コメントを保存</button></div></form>
+<div id="feedback-list"></div></div>
+<div class="card"><h2>この版の受入</h2><p class="muted">上に表示した版を受け入れます。検証に残る範囲は、検証結果の説明を確認してください。</p><button id="accept" type="button" class="primary">この版を受け入れる</button>
+<div id="revoke-area" hidden><label>受入を取り消す理由<input id="revoke-reason" maxlength="2000"></label><button id="revoke" type="button">受入を取り消す</button></div></div>
+</section></main>
+<script>
+const el=id=>document.getElementById(id);let current=null;let busy=false;
+const kindNames={unclear:"未確定",praise:"良かった点",correction:"修正してほしい点",new_requirement:"追加の要件"};
+const scopeNames={current_task:"今回の作業",future_preference:"今後の希望",unspecified:"未指定"};
+function requestId(){const b=crypto.getRandomValues(new Uint8Array(16));b[6]=(b[6]&15)|64;b[8]=(b[8]&63)|128;const s=Array.from(b,n=>n.toString(16).padStart(2,"0")).join("");return s.slice(0,8)+"-"+s.slice(8,12)+"-"+s.slice(12,16)+"-"+s.slice(16,20)+"-"+s.slice(20);}
+async function api(path,body){const r=await fetch(path,body?{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}:{});const value=await r.json();if(!r.ok)throw new Error(value.error||"操作に失敗しました");return value;}
+function controls(){el("cases").disabled=busy;el("reload").disabled=busy;el("feedback-submit").disabled=busy||!current;el("accept").disabled=busy||!current?.canAccept;el("revoke").disabled=busy||current?.status!=="accepted";}
+function render(value){current=value;el("review").hidden=false;el("title").textContent=value.title;el("status").textContent=({awaiting_review:"レビュー待ち",accepted:"この版を受入済み",revoked:"受入取消済み"})[value.status];el("verification").textContent="検証結果: "+value.verificationSummary;el("limits").textContent="残る範囲: "+value.limits;el("integrity").textContent=value.integrityError||"";el("run").textContent=value.runId;el("sha").textContent=value.artifactSha256;el("previous").textContent=value.previousSha256?"修正前の版: "+value.previousSha256:"";el("content").textContent=value.content;el("accept").hidden=value.status!=="awaiting_review";el("revoke-area").hidden=value.status!=="accepted";
+const list=el("feedback-list");list.replaceChildren();for(const item of value.feedback){const p=document.createElement("div");p.className="feedback";const meta=document.createElement("p");meta.className="muted";meta.textContent=(kindNames[item.kind]||item.kind)+" / "+(scopeNames[item.scope]||item.scope)+" / "+(item.authenticated?"利用者の操作":item.source==="agent"?"エージェントの指摘":"既存記録");const text=document.createElement("p");text.textContent=item.text||"本文は別の根拠に記録されています。";p.append(meta,text);list.append(p);}controls();}
+async function load(){busy=true;controls();el("message").textContent="読み込み中…";try{render(await api("/api/reviews/"+encodeURIComponent(el("cases").value)));el("message").textContent="";}catch(e){current=null;el("review").hidden=true;el("message").textContent=e.message;}finally{busy=false;controls();}}
+async function mutate(action,extra){if(!current||busy)return;busy=true;controls();el("message").textContent="保存中…";try{render(await api("/api/reviews/"+encodeURIComponent(current.id)+"/"+action,{artifactSha256:current.artifactSha256,requestId:requestId(),...extra}));el("message").textContent="保存しました。";return true;}catch(e){el("message").textContent=e.message;return false;}finally{busy=false;controls();}}
+el("reload").onclick=load;el("cases").onchange=load;el("accept").onclick=()=>mutate("accept",{});el("revoke").onclick=()=>mutate("revoke",{reason:el("revoke-reason").value});el("feedback-form").onsubmit=async event=>{event.preventDefault();if(await mutate("feedback",{text:el("feedback-text").value,kind:el("kind").value,scope:el("scope").value}))el("feedback-text").value="";};
+api("/api/reviews").then(items=>{for(const item of items){const option=document.createElement("option");option.value=item.id;option.textContent=item.title;el("cases").append(option);}if(!items.length){el("message").textContent="検証済みのレビュー対象はまだありません。";el("cases").disabled=true;controls();return;}const requested=new URLSearchParams(location.search).get("case");if(items.some(item=>item.id===requested))el("cases").value=requested;return load();}).catch(e=>{el("message").textContent=e.message;});
+</script></body></html>`;
+}

@@ -1,0 +1,426 @@
+import assert from "node:assert/strict";
+import { createHash, randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { createServer } from "node:http";
+import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+import { Script } from "node:vm";
+import { LocalTaskService } from "../src/server/orchestration/taskService.ts";
+import { createTaskHttp } from "../src/server/orchestration/taskHttp.ts";
+import { taskPageHtml } from "../src/server/orchestration/taskPage.ts";
+import { FileScheduler } from "../src/server/orchestration/scheduler.ts";
+import { FileTaskLedger, type TaskAction } from "../src/server/orchestration/singleTask.ts";
+import { submitVaultRun, type PreparedVaultRun, type TaskExecutionHooks, type TaskOperationApproval } from "../src/server/orchestration/vaultTaskExecution.ts";
+import type { VaultRunConfig } from "../src/server/orchestration/vaultRunConfig.ts";
+import type { VaultTaskContract } from "../src/server/orchestration/vaultTaskContract.ts";
+import { LocalReviewService } from "../src/server/orchestration/reviewService.ts";
+import { FileReviewChain } from "../src/server/orchestration/reviewChain.ts";
+
+async function fixture(run: (data: { dir: string; config: VaultRunConfig; catalog: unknown;
+  contract: VaultTaskContract; prepare: (config: VaultRunConfig) => Promise<PreparedVaultRun> }) => Promise<void>) {
+  const dir = await mkdtemp(join(tmpdir(), "negi-task-ui-"));
+  try {
+    const checkout = join(dir, "checkout"), vault = join(dir, "vault");
+    await mkdir(checkout); await mkdir(vault);
+    const contract: VaultTaskContract = { schemaVersion: "negi-task-contract/1",
+      vaultId: "NT-TASK-SYNTHETIC", version: 1, sha256: "a".repeat(64), project: "fixture",
+      objective: "Synthetic one-file result", acceptance: ["Explicit review required"],
+      baseSha: "b".repeat(40), scope: { in: ["one file"], out: ["no publishing"], allowedPaths: ["docs/result.md"] },
+      invariants: ["No auth changes"], verification: ["focused check"], escalation: ["Stop outside scope"],
+      limits: { maxAttempts: 1, timeLimitMinutes: 5 }, sourceNotes: [] };
+    const snapshot = join(dir, "snapshot.json");
+    await writeFile(snapshot, JSON.stringify(contract));
+    const config: VaultRunConfig = { executable: process.execPath, checkout, vault, snapshot,
+      outputDir: join(dir, "output"), schedulerPath: join(dir, "scheduler.jsonl"), runId: "synthetic-run",
+      astra: { model: "gpt-6-astra", effort: "low" }, sol: { model: "gpt-6.1-sol", effort: "low" },
+      resources: [], verification: [{ requirement: "focused check", program: "node", args: ["--version"], timeoutMs: 5000 }] };
+    const catalog = { stateRoot: join(dir, "task-state"), runs: [{ title: "合成Task", config }] };
+    await run({ dir, config, contract, catalog, prepare: async (config) => ({ config, contract }) });
+  } finally { await rm(dir, { recursive: true, force: true }); }
+}
+async function completed(prepared: PreparedVaultRun, scheduler: FileScheduler,
+  evidenceRef = "synthetic:check") {
+  const { config, contract } = prepared;
+  await scheduler.claim(config.runId, `${config.runId}:dispatch`);
+  const ledger = new FileTaskLedger(join(config.outputDir, "run.jsonl"));
+  let i = 0;
+  const append = (action: TaskAction) => ledger.append({ key: `event-${i++}`, at: new Date().toISOString(), action });
+  await append({ type: "create", runId: config.runId, contract });
+  for (const role of ["astra", "sol"] as const) {
+    await append({ type: "start_attempt", attemptId: role, role, requestedModel: config[role].model });
+    await append({ type: "bind_provider", attemptId: role, threadId: `thread-${role}`, turnId: `turn-${role}` });
+    await append({ type: "complete_attempt", attemptId: role, resolvedModel: config[role].model,
+      threadId: `thread-${role}`, turnId: `turn-${role}`, outputRef: "synthetic:output" });
+  }
+  const state = await append({ type: "verify", outcome: "passed", evidenceRef });
+  await scheduler.append({ key: `${config.runId}:settle`, at: new Date().toISOString(), action: {
+    type: "settle", workId: config.runId, outcome: "verified", evidenceRef, actualCostUsd: null } });
+  return state;
+}
+async function until(predicate: () => Promise<boolean>) {
+  const deadline = Date.now() + 5000;
+  while (!await predicate()) {
+    if (Date.now() > deadline) throw new Error("Synthetic runner did not settle");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+test("authenticated Task requests dispatch once and stop at review, including concurrent retries", async () => {
+  await fixture(async ({ catalog, prepare }) => {
+    let count = 0;
+    const service = await LocalTaskService.open(catalog, { prepare, submit: submitVaultRun,
+      execute: async (...args) => { count++; return completed(args[0], args[1]); } });
+    try {
+      const view = await service.snapshot("synthetic-run"), id = randomUUID();
+      assert.equal(view.canStart, true);
+      await Promise.all([service.start(view.id, view.configSha256, id), service.start(view.id, view.configSha256, id)]);
+      await until(async () => (await service.snapshot(view.id)).status === "ready_for_review");
+      const result = await service.snapshot(view.id);
+      assert.equal(count, 1); assert.equal(result.canStart, false); assert.equal(result.acceptedBy, null);
+      assert.equal(result.attempts.length, 2);
+      await service.start(view.id, view.configSha256, id);
+      assert.equal(count, 1);
+      await assert.rejects(service.start(view.id, view.configSha256, randomUUID()), /already requested/);
+    } finally { await service.close(); }
+  });
+});
+
+test("a changed fixed snapshot fails before dispatch and is not automatically retried", async () => {
+  await fixture(async ({ catalog, config, prepare, dir }) => {
+    let count = 0;
+    const service = await LocalTaskService.open(catalog, { prepare: async (config) => { count++; return prepare(config); },
+      submit: submitVaultRun, execute: completed });
+    const view = await service.snapshot("synthetic-run");
+    await writeFile(config.snapshot, "{}");
+    const result = await service.start(view.id, view.configSha256, randomUUID());
+    assert.equal(result.status, "preflight_failed"); assert.equal(result.canStart, false); assert.equal(count, 0);
+    assert.match(await readFile(join(dir, "task-state", `${view.id}.request.json`), "utf8"), /configSha256/);
+    await service.close();
+  });
+});
+
+test("unknown provider outcomes retain the slot, and reopening never redispatches them", async () => {
+  await fixture(async ({ catalog, config, prepare, contract }) => {
+    let count = 0;
+    const runtime = { prepare, submit: submitVaultRun, execute: async (run: PreparedVaultRun, scheduler: FileScheduler, signal?: AbortSignal) => {
+      count++;
+      await scheduler.claim(config.runId, "synthetic:dispatch");
+      const ledger = new FileTaskLedger(join(config.outputDir, "run.jsonl"));
+      await ledger.append({ key: "create", at: new Date().toISOString(), action: { type: "create", runId: config.runId, contract } });
+      await ledger.append({ key: "start", at: new Date().toISOString(), action: {
+        type: "start_attempt", attemptId: "astra", role: "astra", requestedModel: run.config.astra.model } });
+      assert.ok(signal);
+      await new Promise<void>((resolve) => {
+        // The HTTP stop can arrive during the ledger append above.
+        if (signal.aborted) resolve();
+        else signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+      throw new Error("Synthetic connection closed");
+    } };
+    const service = await LocalTaskService.open(catalog, runtime);
+    const view = await service.snapshot(config.runId), requestId = randomUUID();
+    await service.start(view.id, view.configSha256, requestId);
+    await until(async () => (await service.snapshot(view.id)).status === "planning");
+    assert.equal((await service.stop(view.id, view.configSha256)).stopRequested, true);
+    await service.close();
+    const reloaded = await LocalTaskService.open(catalog, runtime);
+    try {
+      const result = await reloaded.snapshot(view.id);
+      assert.equal(result.live, false); assert.equal(result.status, "needs_reconciliation");
+      await reloaded.start(view.id, view.configSha256, requestId);
+      assert.equal(count, 1);
+      assert.equal((await new FileScheduler(config.schedulerPath).read()).state?.entries[0].status, "needs_reconciliation");
+      await assert.rejects(reloaded.stop(view.id, view.configSha256), /No live process handle/);
+    } finally { await reloaded.close(); }
+  });
+});
+
+test("queued Tasks can be cancelled without a provider handle and are not restarted after reload", async () => {
+  await fixture(async ({ catalog, config, prepare }) => {
+    const scheduler = new FileScheduler(config.schedulerPath);
+    await scheduler.append({ key: "init", at: new Date().toISOString(), action: { type: "configure", maxConcurrent: 1, budgetUsd: 0 } });
+    await scheduler.append({ key: "block", at: new Date().toISOString(), action: { type: "submit", work: {
+      id: "existing", parentId: null, dependencies: [], role: "sol", checkout: config.checkout,
+      checkoutMode: "write", resources: [], reserveUsd: 0 } } });
+    await scheduler.claim("existing", "existing-dispatch");
+    let count = 0;
+    const runtime = { prepare, submit: submitVaultRun, execute: async (prepared: PreparedVaultRun, scheduler: FileScheduler) => { count++; return completed(prepared, scheduler); } };
+    const service = await LocalTaskService.open(catalog, runtime), view = await service.snapshot(config.runId);
+    const requestId = randomUUID();
+    await service.start(view.id, view.configSha256, requestId);
+    assert.equal((await service.snapshot(view.id)).status, "queued");
+    await service.close();
+    const reloaded = await LocalTaskService.open(catalog, runtime);
+    try {
+      await reloaded.start(view.id, view.configSha256, requestId);
+      assert.equal(count, 0);
+      assert.equal((await reloaded.stop(view.id, view.configSha256)).status, "cancelled");
+    } finally { await reloaded.close(); }
+  });
+});
+
+test("catalog requires one scheduler and keeps state outside every registered writable tree", async () => {
+  await fixture(async ({ catalog, config, prepare, dir }) => {
+    const runtime = { prepare, submit: submitVaultRun, execute: completed };
+    await assert.rejects(LocalTaskService.open({ ...(catalog as object), stateRoot: join(config.checkout, "state") }, runtime), /outside/);
+    const other = { ...config, runId: "other", outputDir: join(config.vault, "out"), schedulerPath: join(config.vault, "scheduler") };
+    await assert.rejects(LocalTaskService.open({ ...(catalog as object), runs: [
+      { title: "first", config }, { title: "second", config: other } ] }, runtime), /outside/);
+    await assert.rejects(LocalTaskService.open({ ...(catalog as object), runs: [
+      { title: "first", config }, { title: "second", config: { ...config,
+        runId: "other", outputDir: join(config.outputDir, "nested"), schedulerPath: join(config.vault, "..", "other-scheduler") } } ] }, runtime));
+    const otherVault = join(dir, "other-vault");
+    await mkdir(otherVault);
+    await assert.rejects(LocalTaskService.open({ ...(catalog as object), runs: [
+      { title: "first", config: { ...config, outputDir: join(otherVault, "first-output") } },
+      { title: "second", config: { ...config, vault: otherVault, runId: "other", outputDir: join(dir, "other-output") } }
+    ] }, runtime), /outside every checkout and Vault/);
+  });
+});
+
+test("Task HTTP requires cookie authentication and same-origin, pinned mutations", async () => {
+  await fixture(async ({ catalog, prepare }) => {
+    let count = 0;
+    const service = await LocalTaskService.open(catalog, { prepare, submit: submitVaultRun,
+      execute: async (...args) => { count++; return completed(args[0], args[1]); } });
+    const handler = createTaskHttp(service, { token: "synthetic-task-login" });
+    const server = createServer(async (req, res) => {
+      if (!await handler(req, res, new URL(req.url ?? "/", "http://localhost"))) { res.writeHead(404); res.end(); }
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address(); assert.ok(address && typeof address === "object");
+    const url = `http://127.0.0.1:${address.port}`, cookie = { Cookie: "ebi_auth=synthetic-task-login" };
+    try {
+      assert.equal((await fetch(`${url}/api/tasks`)).status, 401);
+      assert.equal((await fetch(`${url}/api/tasks`, { headers: { Authorization: "Bearer synthetic-task-login" } })).status, 401);
+      const view = await (await fetch(`${url}/api/tasks/synthetic-run`, { headers: cookie })).json();
+      const input = { configSha256: view.configSha256, requestId: randomUUID() };
+      const post = (origin: string | null, value = input) => fetch(`${url}/api/tasks/synthetic-run/start`, {
+        method: "POST", headers: { ...cookie, "Content-Type": "application/json", ...(origin ? { Origin: origin } : {}) },
+        body: JSON.stringify(value) });
+      assert.equal((await post(null)).status, 403);
+      assert.equal((await post("https://outside.example")).status, 403);
+      assert.equal((await post(url, { ...input, configSha256: "0".repeat(64) })).status, 409);
+      assert.equal(count, 0);
+      assert.equal((await post(url)).status, 200);
+      await until(async () => (await service.snapshot(view.id)).status === "ready_for_review");
+      assert.equal(count, 1);
+    } finally { await service.close(); await new Promise<void>((resolve) => server.close(() => resolve())); }
+  });
+});
+
+test("Task page script parses and keeps model output out of HTML interpolation", () => {
+  const html = taskPageHtml();
+  const script = html.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+  assert.ok(script); assert.doesNotThrow(() => new Script(script));
+  assert.doesNotMatch(script, /innerHTML|localStorage/);
+  assert.match(html, /min-height:44px/);
+});
+
+test("a frozen Git review binds signed acceptance and revocation to the corresponding Task", async () => {
+  await fixture(async ({ dir, config, contract, catalog, prepare }) => {
+    const git = (args: string[]) => execFileSync("git", args, { cwd: config.checkout,
+      encoding: "utf8", windowsHide: true }).trim();
+    git(["init", "--quiet"]); git(["config", "user.name", "Synthetic Test"]);
+    git(["config", "user.email", "synthetic@example.invalid"]);
+    await mkdir(join(config.checkout, "docs"));
+    await writeFile(join(config.checkout, "docs", "base.md"), "Synthetic base\n");
+    git(["add", "."]); git(["commit", "--quiet", "-m", "synthetic baseline"]);
+    contract.baseSha = git(["rev-parse", "HEAD"]);
+    await writeFile(config.snapshot, JSON.stringify(contract));
+    const runtime = { prepare, submit: submitVaultRun,
+      execute: async (prepared: PreparedVaultRun, scheduler: FileScheduler) => {
+        await writeFile(join(config.checkout, "docs", "result.md"), "# Synthetic result\nVerified fixture only.\n");
+        const bytes = Buffer.from('{"synthetic":true,"mechanicalChecksPassed":true}\n');
+        const evidence = join(config.outputDir, "verification.json");
+        await writeFile(evidence, bytes);
+        return completed(prepared, scheduler, `${evidence}#sha256=${createHash("sha256").update(bytes).digest("hex")}`);
+      } };
+    const reviews = await LocalReviewService.open({ storageRoot: join(dir, "human-reviews"), writableRoots: [], cases: [] });
+    const service = await LocalTaskService.open(catalog, runtime);
+    await service.connectReviews(reviews);
+    const view = await service.snapshot(config.runId);
+    await service.start(view.id, view.configSha256, randomUUID());
+    await until(async () => (await service.snapshot(view.id)).reviewId !== null);
+    try {
+      const result = await service.snapshot(view.id);
+      assert.equal(result.status, "ready_for_review"); assert.ok(result.reviewId);
+      const review = await reviews.snapshot(result.reviewId);
+      assert.match(review.content, /New file: docs\/result.md/);
+      assert.equal(review.canAccept, true);
+      await writeFile(join(config.checkout, "docs", "result.md"), "Changed after verification\n");
+      assert.equal((await service.snapshot(view.id)).status, "artifact_changed");
+      await assert.rejects(reviews.accept(review.id, review.artifactSha256, randomUUID()), /changed/);
+      await writeFile(join(config.checkout, "docs", "result.md"), "# Synthetic result\nVerified fixture only.\n");
+      const id = randomUUID();
+      await reviews.accept(review.id, review.artifactSha256, id);
+      assert.equal((await service.snapshot(view.id)).status, "accepted");
+      assert.equal((await service.snapshot(view.id)).acceptedBy, `user:http-review:${id}`);
+      // Forward slashes from a Windows CLI identify the same physical output root.
+      const manifestPath = join(config.outputDir, "review-manifest.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+      manifest.review.artifactRoot = manifest.review.artifactRoot.replaceAll("\\", "/");
+      await writeFile(manifestPath, JSON.stringify(manifest));
+      const reloadedReviews = await LocalReviewService.open({ storageRoot: join(dir, "human-reviews"), writableRoots: [], cases: [] });
+      const reloaded = await LocalTaskService.open(catalog, runtime);
+      await reloaded.connectReviews(reloadedReviews);
+      assert.equal((await reloaded.snapshot(view.id)).status, "accepted");
+      await reloadedReviews.revoke(review.id, review.artifactSha256, randomUUID(), "Synthetic withdrawal");
+      assert.equal((await reloaded.snapshot(view.id)).status, "review_revoked");
+      assert.equal((await reloaded.snapshot(view.id)).acceptedBy, null);
+      await reloaded.close();
+    } finally { await service.close(); }
+  });
+});
+
+test("live operation approvals bind the full target, expire, and require signed proof on reload", async () => {
+  await fixture(async ({ catalog, config, contract, prepare, dir }) => {
+    let providerResponses = 0;
+    const runtime = { prepare, submit: submitVaultRun,
+      execute: async (_run: PreparedVaultRun, scheduler: FileScheduler, signal?: AbortSignal, hooks?: TaskExecutionHooks) => {
+        assert.ok(hooks);
+        await scheduler.claim(config.runId, "approval-dispatch");
+        const ledger = new FileTaskLedger(join(config.outputDir, "run.jsonl"), Date.now, undefined, undefined, hooks.verifyApproval);
+        const append = (key: string, action: TaskAction, at = new Date().toISOString()) => ledger.append({ key, action, at });
+        await append("create", { type: "create", runId: config.runId, contract });
+        await append("start", { type: "start_attempt", role: "astra", attemptId: "attempt-a", requestedModel: config.astra.model });
+        await append("bind", { type: "bind_provider", attemptId: "attempt-a", threadId: "thread-a", turnId: "turn-a" });
+        const approval: TaskOperationApproval = { id: "operation-a", attemptId: "attempt-a", threadId: "thread-a", turnId: "turn-a",
+          operation: "item/commandExecution/requestApproval", target: "Synthetic command\nCwd: fixture", targetKnown: true,
+          expiresAt: new Date(Date.now() + 15_000).toISOString() };
+        await append("request", { type: "request_approval", approval });
+        let release!: () => void;
+        const response = new Promise<void>((resolve) => { release = resolve; });
+        signal?.addEventListener("abort", () => release(), { once: true });
+        hooks.onApproval(approval, async (allow, approvalRef, at, id) => {
+          await append(`task-operation:${id}`, { type: "decide_approval", approvalId: approval.id,
+            attemptId: approval.attemptId, threadId: approval.threadId, turnId: approval.turnId,
+            operation: approval.operation, target: approval.target, decision: allow ? "allow" : "deny", approvalRef }, at);
+          providerResponses++; release();
+        });
+        await response;
+        const state = await append("failed", { type: "fail_attempt", attemptId: "attempt-a", reason: "Synthetic provider response observed" });
+        await scheduler.append({ key: "settle", at: new Date().toISOString(), action: {
+          type: "settle", workId: config.runId, outcome: "failed", evidenceRef: "synthetic:operation-complete", actualCostUsd: null } });
+        return state;
+      } };
+    const service = await LocalTaskService.open(catalog, runtime), view = await service.snapshot(config.runId);
+    try {
+      await service.start(view.id, view.configSha256, randomUUID());
+      await until(async () => (await service.snapshot(view.id)).approvals[0]?.canDecide === true);
+      const pending = (await service.snapshot(view.id)).approvals[0];
+      await assert.rejects(service.decideApproval(view.id, view.configSha256, randomUUID(),
+        pending.id, "0".repeat(64), "allow"), /changed/);
+      assert.equal(providerResponses, 0);
+      const requestId = randomUUID();
+      await service.decideApproval(view.id, view.configSha256, requestId, pending.id, pending.approvalSha256, "deny");
+      await until(async () => !(await service.snapshot(view.id)).live);
+      assert.equal(providerResponses, 1);
+      await assert.rejects(service.decideApproval(view.id, view.configSha256, requestId,
+        pending.id, pending.approvalSha256, "deny"), /no live provider handle/);
+      const reloaded = await LocalTaskService.open(catalog, runtime);
+      assert.equal((await reloaded.snapshot(view.id)).approvals.length, 0);
+      await reloaded.close();
+      const proofPath = join(dir, "task-state", "operation-proofs", `${requestId}.json`);
+      const proof = JSON.parse(await readFile(proofPath, "utf8"));
+      proof.receipt.data.decision = "allow";
+      await writeFile(proofPath, JSON.stringify(proof));
+      await assert.rejects(service.snapshot(view.id), /signature/);
+    } finally { await service.close(); }
+  });
+});
+
+for (const revisionMode of ["success", "partial-evidence", "outside-scope"] as const)
+test(`local revision ${revisionMode}: immutable evidence, recovery and no model redispatch`, async () => {
+  await fixture(async ({ dir, config, contract, catalog, prepare }) => {
+    const git = (args: string[]) => execFileSync("git", args, { cwd: config.checkout, encoding: "utf8", windowsHide: true }).trim();
+    git(["init", "--quiet"]); git(["config", "user.name", "Synthetic Revision"]);
+    git(["config", "user.email", "synthetic@example.invalid"]); git(["config", "core.autocrlf", "false"]);
+    await mkdir(join(config.checkout, "docs")); await writeFile(join(config.checkout, "docs/base.md"), "Synthetic baseline\n");
+    git(["add", "."]); git(["commit", "--quiet", "-m", "synthetic revision baseline"]);
+    contract.baseSha = git(["rev-parse", "HEAD"]); await writeFile(config.snapshot, JSON.stringify(contract));
+    let dispatches = 0;
+    const runtime = { prepare, submit: submitVaultRun, prepareRevision: async (config: VaultRunConfig) => ({ config, contract }),
+      execute: async (prepared: PreparedVaultRun, scheduler: FileScheduler) => {
+        dispatches++;
+        await writeFile(join(config.checkout, "docs/result.md"), "# Synthetic A\nNeeds correction.\n");
+        const bytes = Buffer.from('{"synthetic":true,"mechanicalChecksPassed":true}\n');
+        const evidence = join(config.outputDir, "verification.json"); await writeFile(evidence, bytes);
+        return completed(prepared, scheduler, `${evidence}#sha256=${createHash("sha256").update(bytes).digest("hex")}`);
+      } };
+    const reviewConfig = { storageRoot: join(dir, "human-reviews"), writableRoots: [], cases: [] };
+    const reviews = await LocalReviewService.open(reviewConfig), service = await LocalTaskService.open(catalog, runtime);
+    await service.connectReviews(reviews);
+    const before = await service.snapshot(config.runId); await service.start(before.id, before.configSha256, randomUUID());
+    await until(async () => (await service.snapshot(before.id)).reviewId !== null);
+    const viewA = await service.snapshot(before.id), reviewA = await reviews.snapshot(viewA.reviewId!);
+    const previewA = await readFile(join(config.outputDir, "review-result.md"));
+    const originalManifestPath = join(config.outputDir, "review-manifest.json");
+    const originalManifest = JSON.parse(await readFile(originalManifestPath, "utf8"));
+    originalManifest.review.artifactRoot = originalManifest.review.artifactRoot.replaceAll("\\", "/");
+    await writeFile(originalManifestPath, JSON.stringify(originalManifest));
+    const note = join(config.outputDir, "agent-note.md"), text = "Synthetic targeted correction.\n";
+    await writeFile(note, text);
+    await new FileReviewChain(join(config.outputDir, "review.jsonl")).append({ key: "agent-correction", at: new Date().toISOString(),
+      action: { type: "feedback", feedback: { id: "agent-correction", source: "agent", kind: "correction", scope: "current_task",
+        targetSha256: reviewA.artifactSha256, textRef: `local-agent:${note}#sha256=${createHash("sha256").update(text).digest("hex")}` } } });
+    await new FileScheduler(config.schedulerPath).append({ key: "audit", at: new Date().toISOString(), action: {
+      type: "invalidate", workId: config.runId, evidenceRef: "synthetic:content-audit", reason: "Synthetic correction required" } });
+    assert.equal((await service.snapshot(before.id)).status, "quality_issue");
+    await writeFile(join(config.checkout, "docs/result.md"), "# Synthetic B\nCorrected locally.\n");
+    if (revisionMode !== "success") {
+      if (revisionMode === "partial-evidence") await writeFile(join(config.outputDir, "verification-r1.json"), "partial evidence\n");
+      else await writeFile(join(config.checkout, "outside.md"), "Outside the contract\n");
+      await assert.rejects(service.registerResultRevision(before.id, before.configSha256, ["agent-correction"]),
+        revisionMode === "partial-evidence" ? /EEXIST/ : /verification failed/);
+      const scheduler = new FileScheduler(config.schedulerPath);
+      const child = (await scheduler.read()).state!.entries.find((entry) => entry.work.id.endsWith(":local-revision-1"))!;
+      assert.equal(child.status, revisionMode === "partial-evidence" ? "needs_reconciliation" : "failed");
+      assert.deepEqual(await readFile(join(config.outputDir, "review-result.md")), previewA);
+      assert.equal((await reviews.snapshot(viewA.reviewId!)).canAccept, false);
+      await service.close();
+      const reloaded = await LocalTaskService.open(catalog, runtime);
+      try {
+        await reloaded.connectReviews(await LocalReviewService.open(reviewConfig));
+        assert.equal((await reloaded.snapshot(before.id)).resultRevisionCount, 0);
+        assert.equal(dispatches, 1);
+      } finally { await reloaded.close(); }
+      return;
+    }
+    const results = await Promise.all([service.registerResultRevision(before.id, before.configSha256, ["agent-correction"]),
+      service.registerResultRevision(before.id, before.configSha256, ["agent-correction"])]);
+    assert.equal(results[0].resultRevisionCount, 1); assert.equal(results[0].acceptedBy, null); assert.equal(dispatches, 1);
+    assert.deepEqual(await readFile(join(config.outputDir, "review-result.md")), previewA);
+    await assert.rejects(new FileTaskLedger(join(config.outputDir, "run.jsonl")).read(), /trusted result revision unavailable/);
+    await service.close();
+    // Simulate a crash after the local journal but before the final metadata writes.
+    await unlink(join(config.outputDir, "review-current.json"));
+    const taskPath = join(config.outputDir, "run.jsonl"), taskBytes = await readFile(taskPath, "utf8");
+    await writeFile(taskPath, taskBytes.split("\n").filter((line) => !line.includes('"reverify_result"')).join("\n"));
+    const scheduleBytes = await readFile(config.schedulerPath, "utf8");
+    await writeFile(config.schedulerPath, scheduleBytes.split("\n").filter((line) => {
+      if (!line) return true; const event = JSON.parse(line);
+      return !event.key.startsWith("task-revision:");
+    }).join("\n"));
+    const reloadedReviews = await LocalReviewService.open(reviewConfig), reloaded = await LocalTaskService.open(catalog, runtime);
+    try {
+      await reloaded.connectReviews(reloadedReviews);
+      const viewB = await reloaded.snapshot(before.id), reviewB = await reloadedReviews.snapshot(viewB.reviewId!);
+      assert.equal(viewB.status, "ready_for_review"); assert.equal(viewB.resultRevisionCount, 1); assert.equal(dispatches, 1);
+      assert.equal(reviewB.previousSha256, reviewA.artifactSha256); assert.equal(reviewB.canAccept, true);
+      const integrationSource = await reloaded.integrationSource(before.id);
+      assert.equal((await integrationSource.readManifest!()).revision, 1);
+      assert.match((await integrationSource.readState()).verification!.evidenceRef, /verification-r1\.json#sha256=[a-f0-9]{64}$/);
+      await assert.rejects(reloadedReviews.accept(reviewB.id, reviewA.artifactSha256, randomUUID()), /版/);
+      await reloadedReviews.accept(reviewB.id, reviewB.artifactSha256, randomUUID());
+      assert.equal((await reloaded.snapshot(before.id)).status, "accepted");
+      const journalPath = join(config.outputDir, "revision-1.json"), journalBytes = await readFile(journalPath);
+      const journal = JSON.parse(journalBytes.toString()); journal.manifestSha256 = "0".repeat(64);
+      await writeFile(journalPath, JSON.stringify(journal));
+      await assert.rejects(reloaded.snapshot(before.id), /manifest bytes changed/);
+      await writeFile(journalPath, journalBytes);
+    } finally { await reloaded.close(); }
+  });
+});

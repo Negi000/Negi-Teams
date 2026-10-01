@@ -17,7 +17,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
 
 import { isRunningFromSrc, mcpConfigPathFor } from "../src/server/mcpConfigPath.ts";
@@ -58,7 +58,7 @@ test("gen-master-mcp.mjs の生成ファイル名と解決規約が一致して�
   const script = readFileSync(new URL("../scripts/gen-master-mcp.mjs", import.meta.url), "utf8");
   for (const fromSrc of [true, false]) {
     for (const role of ["master", "engineer"] as const) {
-      const name = mcpConfigPathFor(role, { fromSrc, baseDir: "/x" }).split("/").pop()!;
+      const name = basename(mcpConfigPathFor(role, { fromSrc, baseDir: "/x" }));
       assert.ok(
         script.includes(`"${name}"`),
         `gen-master-mcp.mjs が ${name} を生成すること（サーバ側の解決名と一致）`,

@@ -13,7 +13,8 @@ import {
   type MasterSessionHandlers,
   type MasterUsageSnapshot,
 } from "../src/server/master/session.ts";
-import type { MasterBrain, MasterBrainInput, MasterEvent } from "../src/server/master/brain.ts";
+import type { MasterBrain, MasterBrainCapabilities, MasterBrainId, MasterBrainInput,
+  MasterEvent } from "../src/server/master/brain.ts";
 import type {
   MasterChatEnvelope,
   MasterChatState,
@@ -22,8 +23,10 @@ import type {
 
 /** 手で MasterEvent を流し込めるブレイン。プロセスも時計も持たない。 */
 class FakeBrain implements MasterBrain {
-  readonly id = "claude" as const;
-  readonly capabilities = {
+  constructor(readonly id: MasterBrainId = "claude") {
+    this.capabilities = { ...this.capabilities, cost: id === "claude" };
+  }
+  readonly capabilities: MasterBrainCapabilities = {
     partialText: true,
     thinking: true,
     permissionPrompt: true,
@@ -39,6 +42,7 @@ class FakeBrain implements MasterBrain {
   /** createBrain に渡ってきたオプション（PR-M3 の partial 有効化の検証用）。 */
   createOpts: { includePartialMessages: boolean } | null = null;
   started: { resumeSessionId: string | null } | null = null;
+  failStart = false;
   readonly sent: string[] = [];
   /** send() に渡った入力そのもの（PR-M4 の画像添付検証用）。 */
   readonly inputs: MasterBrainInput[] = [];
@@ -52,6 +56,7 @@ class FakeBrain implements MasterBrain {
 
   start(opts: { resumeSessionId: string | null }): Promise<void> {
     this.started = { resumeSessionId: opts.resumeSessionId };
+    if (this.failStart) return Promise.reject(new Error("synthetic startup failure"));
     this.closed = false;
     return Promise.resolve();
   }
@@ -128,7 +133,8 @@ interface Harness {
   rateLimits: Partial<UsageRateLimits>[];
 }
 
-function makeSession(opts: { snapshotLimit?: number } = {}): Harness {
+function makeSession(opts: { snapshotLimit?: number; brainId?: MasterBrainId;
+  failStart?: boolean } = {}): Harness {
   const brains: FakeBrain[] = [];
   const h: Omit<Harness, "session" | "brains"> = {
     events: [],
@@ -153,7 +159,7 @@ function makeSession(opts: { snapshotLimit?: number } = {}): Harness {
   };
   const session = new MasterSession({
     id: "master",
-    brainId: "claude",
+    brainId: opts.brainId ?? "claude",
     cwd: "/tmp",
     model: "opus",
     permissionMode: "auto",
@@ -164,8 +170,9 @@ function makeSession(opts: { snapshotLimit?: number } = {}): Harness {
     handlers,
     ...(opts.snapshotLimit === undefined ? {} : { snapshotLimit: opts.snapshotLimit }),
     restartPolicy: { baseDelayMs: 5, maxDelayMs: 10, maxConsecutiveFailures: 3, minHealthyMs: 10_000 },
-    createBrain: (_id, o) => {
-      const b = new FakeBrain();
+    createBrain: (id, o) => {
+      const b = new FakeBrain(id);
+      b.failStart = opts.failStart ?? false;
       b.createOpts = { includePartialMessages: o.includePartialMessages };
       brains.push(b);
       return b;
@@ -357,6 +364,83 @@ test("プロセス死亡 → --resume <sessionId> で自動復帰する（R1）"
   assert.equal(h.brains.length, 2, "2 本目のプロセスが起動する");
   assert.equal(h.brains[1]!.started?.resumeSessionId, "sess-abc");
   assert.equal(h.session.state, "idle");
+  await h.session.stop();
+});
+
+test("Codex master の終了後は結果照合まで自動 resume しない", async () => {
+  const h = makeSession({ brainId: "codex" });
+  await h.session.start();
+  h.brains[0]!.emit({ kind: "session", sessionId: "codex-thread-a",
+    model: "gpt-6-astra", apiKeySource: null, mcpServers: [], capabilities: [] });
+  await waitEvents(h, 1);
+  h.brains[0]!.emit({ kind: "exit", code: 1, signal: null });
+  h.brains[0]!.close();
+  await sleep(50);
+  assert.equal(h.brains.length, 1);
+  assert.equal(h.session.state, "stopped");
+  assert.equal(h.notices.some((text) => text.includes("Codex master は自動復帰しません")), true);
+  await h.session.stop();
+});
+
+test("Codex master の起動失敗は自動再試行しない", async () => {
+  const h = makeSession({ brainId: "codex", failStart: true });
+  await h.session.start();
+  await sleep(50);
+  assert.equal(h.brains.length, 1);
+  assert.equal(h.session.state, "stopped");
+  assert.equal(h.notices.some((text) => text.includes("Codex master は自動復帰しません")), true);
+  await h.session.stop();
+});
+
+test("Codex master の手動新規会話は結果照合経路ができるまで拒否する", async () => {
+  const h = makeSession({ brainId: "codex" });
+  await h.session.start();
+  await assert.rejects(h.session.newConversation(), /結果照合とrun台帳/);
+  assert.equal(h.brains.length, 1);
+  assert.equal(h.session.state, "idle");
+  await h.session.stop();
+});
+
+test("Codex master は実行中の二重送信を拒否し、turn終了後に受け付ける", async () => {
+  const h = makeSession({ brainId: "codex" });
+  await h.session.start();
+  assert.equal((await h.session.sendUserText("first")).accepted, true);
+  const second = await h.session.sendUserText("second");
+  assert.equal(second.accepted, false);
+  assert.equal(h.brains[0]!.sent.length, 1);
+  assert.equal(h.events.filter((e) => e.event.kind === "user").length, 1);
+  h.brains[0]!.emit({ kind: "turnEnd", ok: true, aborted: false,
+    usage: null, costUsd: null, errorText: null });
+  await waitEvents(h, 2);
+  assert.equal((await h.session.sendUserText("third")).accepted, true);
+  assert.deepEqual(h.brains[0]!.sent, ["first", "third"]);
+  await h.session.stop();
+});
+
+test("Codex master の投入ACKが無いと発話を受入済みにせず停止する", async () => {
+  const h = makeSession({ brainId: "codex" });
+  await h.session.start();
+  h.brains[0]!.ackResult = false;
+  const result = await h.session.sendUserText("uncertain");
+  assert.equal(result.accepted, false);
+  assert.equal(h.session.state, "stopped");
+  assert.equal(h.events.some((e) => e.event.kind === "user"), false);
+  assert.equal((await h.session.sendUserText("retry")).accepted, false);
+  await h.session.stop();
+});
+
+test("Codex のusageは費用未取得を0 USDへ変換しない", async () => {
+  const h = makeSession({ brainId: "codex" });
+  await h.session.start();
+  h.brains[0]!.emit({ kind: "turnEnd", ok: true, aborted: false,
+    usage: { input: 10, output: 2, cacheRead: 3, cacheCreation: 0,
+      contextTokens: 10, contextSize: 100, contextUsedPct: 10 },
+    costUsd: null, errorText: null });
+  await waitEvents(h, 1);
+  assert.equal(h.usages.at(-1)?.costUsd, null);
+  const event = h.events.at(-1)?.event;
+  assert.equal(event?.kind, "turnEnd");
+  if (event?.kind === "turnEnd") assert.equal(event.totalCostUsd, null);
   await h.session.stop();
 });
 
