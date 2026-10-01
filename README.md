@@ -14,7 +14,7 @@ Phase 4 の[単一スケジューラと差分統合](docs/negi-teams-phase4.md)�
 
 Phase 5 の[Jev shadow 接続の初期検証](docs/negi-teams-phase5.md)では、実際のJevへの小規模な判定と、外部送信・予算・重複送信を制限するローカル経路を確認しました。人間校正とactive化は未完了です。
 
-Phase 6 の[レビューと知識循環の初期経路](docs/negi-teams-phase6.md)は成果の修正履歴とVaultのLesson候補を結びます。認証付きレビュー画面で自由文・明示受入・取消を記録できます。指摘から通常workerへの差戻しと承認済みPolicyへの昇格は未完了です。
+Phase 6 の[レビューと知識循環](docs/negi-teams-phase6.md)は、認証付き自由文からLesson候補を作り、別の明示知識承認を経て次のTaskへ参照を渡します。Material 3 Expressiveの知識画面で適用範囲・反例・失効を管理し、分類と根拠の版/hashを照合します。成果の受入・取消は別操作です。通常workerへの差戻し、複数事例の照合、Policyへの昇格は未完了です。
 
 Phase 7 の[限定比較とPolicy版管理の基礎](docs/negi-teams-phase7.md)は、同一条件での実モデル比較と人間承認を要する設定版の遷移を記録します。2件の比較では時間の改善方向が分かれ、Policyは有効化していません。
 

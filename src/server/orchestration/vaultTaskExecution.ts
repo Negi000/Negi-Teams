@@ -23,6 +23,7 @@ export interface TaskOperationApproval {
   targetKnown?: boolean;
 }
 export interface TaskExecutionHooks {
+  knowledgeProofDirectory?: string;
   onApproval: (approval: TaskOperationApproval,
     decide: (allow: boolean, approvalRef: string, at: string, requestId: string) => Promise<void>) => void;
   verifyApproval: ReconciliationVerifier;
@@ -160,6 +161,7 @@ export async function executeVaultRun(prepared: PreparedVaultRun, scheduler: Fil
             throw new Error("Task execution requires ChatGPT account authentication");
         }
         return await runSingleTaskFromVault({ ...options,
+          knowledgeProofDirectory: hooks?.knowledgeProofDirectory,
           astra: { client: astra.client, ...config.astra }, sol: { client: sol.client, ...config.sol },
           expectedModelProvider: "openai",
           onProviderBound: async (bound) => {

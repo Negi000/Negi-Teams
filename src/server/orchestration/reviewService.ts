@@ -37,6 +37,7 @@ export interface ReviewCaseView {
   status: "awaiting_review" | "accepted" | "revoked";
   canAccept: boolean;
   qualityIssue: boolean;
+  knowledge?: { candidates: Array<{ id: string; title: string; status: string }>; error: string | null };
   feedback: Array<{ id: string; kind: ReviewFeedback["kind"]; scope: ReviewFeedback["scope"];
     targetSha256: string | null; text: string | null; authenticated: boolean; source: ReviewFeedback["source"] }>;
 }
@@ -105,6 +106,13 @@ function pendingAgentCorrection(state: ReviewState): boolean {
 }
 
 export class LocalReviewService {
+  private knowledgeBridge?: {
+    capture: (view: ReviewCaseView, feedbackId: string) => Promise<void>;
+    links: (caseId: string) => Promise<NonNullable<ReviewCaseView["knowledge"]>>;
+  };
+  connectKnowledge(bridge: NonNullable<LocalReviewService["knowledgeBridge"]>): void {
+    this.knowledgeBridge = bridge;
+  }
   private readonly currentChecks = new Map<string, () => Promise<void>>();
   private readonly registrations = new Map<string, Promise<void>>();
   private constructor(private readonly config: ReviewServiceConfig,
@@ -163,6 +171,9 @@ export class LocalReviewService {
 
   list(): Array<{ id: string; title: string }> {
     return this.config.cases.map(({ id, title }) => ({ id, title }));
+  }
+  knowledgeWritableRoots(): string[] {
+    return [...this.config.writableRoots, ...this.config.cases.map(item => item.artifactRoot)];
   }
   /** Local server registration only. HTTP cannot register file paths. */
   async registerCase(item: RegisteredReviewCase): Promise<void> {
@@ -318,6 +329,8 @@ export class LocalReviewService {
       status: state.revoked ? "revoked" : state.acceptance ? "accepted" : "awaiting_review",
       canAccept: !integrityError && state.acceptance === null && state.revoked === null,
       qualityIssue: pendingAgentCorrection(state),
+      ...(this.knowledgeBridge ? { knowledge: await this.knowledgeBridge.links(id).catch(() => ({
+        candidates: [], error: "知識候補を読み取れません。知識画面で状態を確認してください。" })) } : {}),
       feedback: await Promise.all(state.feedback.map((feedback) => this.feedbackView(feedback, item, state.runId))) };
   }
 
@@ -353,7 +366,14 @@ export class LocalReviewService {
       action: { type: "feedback", feedback: { id: `http-feedback:${receipt.id}`, source: "user",
         kind: input.kind, scope: input.scope, targetSha256: input.artifactSha256,
         textRef: receiptRef(receipt.id) } } });
-    return this.snapshot(id);
+    const view = await this.snapshot(id);
+    if (this.knowledgeBridge) {
+      try { await this.knowledgeBridge.capture(view, `http-feedback:${receipt.id}`); }
+      catch { return { ...view, knowledge: { candidates: view.knowledge?.candidates ?? [],
+        error: "コメントは保存済みです。知識候補の作成に失敗しました。知識画面から再試行できます。" } }; }
+      return this.snapshot(id);
+    }
+    return view;
   }
 
   async revoke(id: string, artifactSha256: string, requestId: string, reason: string): Promise<ReviewCaseView> {

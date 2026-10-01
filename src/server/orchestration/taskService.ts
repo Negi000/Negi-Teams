@@ -78,6 +78,7 @@ export class LocalTaskService {
   private pumping = false;
   private closing = false;
   private reviews: LocalReviewService | null = null;
+  private knowledgeProofDirectory?: string;
   private readonly manifests = new Map<string, TaskReviewManifest>();
   private readonly reviewSyncs = new Map<string, Promise<void>>();
   private readonly manifestLoads = new Map<string, Promise<TaskReviewManifest | null>>();
@@ -135,6 +136,25 @@ export class LocalTaskService {
     return new LocalTaskService(root, runs, new FileScheduler(schedulerPath!), runtime, operationProofs);
   }
   list(): Array<{ id: string; title: string }> { return this.runs.map((run) => ({ id: run.config.runId, title: run.title })); }
+  /** Server configuration only; neither paths nor scope are supplied by HTTP. */
+  knowledgeRegistrations(): Array<{ vault: string; project: string; checkout: string }> {
+    return this.runs.map((run) => ({ vault: run.config.vault,
+      project: String(run.contract.project), checkout: run.config.checkout }));
+  }
+  connectKnowledge(proofDirectory: string): void {
+    if (this.knowledgeProofDirectory && this.knowledgeProofDirectory !== proofDirectory)
+      throw new Error("Knowledge authority cannot change during a server session");
+    this.knowledgeProofDirectory = proofDirectory;
+  }
+  async knowledgeSource(id: string): Promise<{ vault: string; project: string; taskClass: string;
+    sourceNotes: Array<{ id: string; version: number; sha256: string; path: string }> }> {
+    const run = this.registered(id);
+    if (hash(await readFile(run.config.snapshot)) !== run.snapshotSha256)
+      throw new Error("Knowledge source Task snapshot changed");
+    return { vault: run.config.vault, project: String(run.contract.project),
+      taskClass: typeof run.contract.taskClass === "string" ? run.contract.taskClass : "unclassified",
+      sourceNotes: structuredClone(run.contract.sourceNotes) as Array<{ id: string; version: number; sha256: string; path: string }> };
+  }
   /** Trusted readers for local integration; no provider dispatch or acceptance. */
   async integrationSource(id: string): Promise<IntegrationSource> {
     const run = this.registered(id);
@@ -509,6 +529,7 @@ export class LocalTaskService {
         if (this.active.has(id) || !entry || !schedulerWorkEligible(state, entry)) continue;
         const controller = new AbortController();
         const promise = Promise.resolve().then(() => this.runtime.execute(prepared, this.scheduler, controller.signal, {
+          knowledgeProofDirectory: this.knowledgeProofDirectory,
           verifyApproval: ({ event, state }) => this.verifyOperationDecision(this.registered(id), event, state),
           onApproval: (approval, decide) => {
             if (!this.approvals.has(id)) this.approvals.set(id, new Map());

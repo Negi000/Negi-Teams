@@ -127,6 +127,10 @@ class VaultTest(unittest.TestCase):
         self.assertIn("LESSON-REVIEW", included)
         self.assertIn("Applicability and counterexample remain visible.", included)
         self.assertIn("Required condition remains.", included)
+        by_class = vault.build_pack(vault.load_notes(self.vault), "negi", "sol", "別の日本語の目的文",
+                                    [], 16000, task_class="code-attribution")
+        self.assertIn("LESSON-REVIEW", by_class)
+        self.assertIn("Applicability and counterexample remain visible.", by_class)
         with self.assertRaisesRegex(vault.VaultError, "適用条件"):
             pack("other", required=["LESSON-REVIEW"])
         original = source.read_bytes()

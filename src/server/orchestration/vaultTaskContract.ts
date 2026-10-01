@@ -13,6 +13,7 @@ import { runSingleTask, type SingleTaskRunOptions } from "./singleTaskRunner.ts"
 
 export interface VaultTaskContract extends ContractRef {
   schemaVersion: "negi-task-contract/1";
+  taskClass?: string;
   scope: { in: string[]; out: string[]; allowedPaths: string[] };
   invariants: string[];
   verification: string[];
@@ -74,17 +75,20 @@ function currentVaultExport(vault: string, id: string, project: string): unknown
     env: { ...process.env, PYTHONIOENCODING: "utf-8" } }));
 }
 function compileContextPack(vault: string, contract: VaultTaskContract,
-                            role: "astra" | "sol", maxChars: number): string {
+                            role: "astra" | "sol", maxChars: number, knowledgeProofDirectory?: string): string {
   const script = bundledScript("negi_vault.py");
   const content = execFileSync("python", [script, "--vault", vault, "pack",
     "--project", contract.project, "--role", role, "--query", contract.objective,
-    "--require", contract.vaultId, "--max-chars", String(maxChars), "--stdout"],
+    "--require", contract.vaultId, "--max-chars", String(maxChars), "--stdout",
+    ...(contract.taskClass ? ["--task-class", contract.taskClass] : []),
+    ...(knowledgeProofDirectory ? ["--knowledge-proof-dir", knowledgeProofDirectory] : [])],
   { encoding: "utf8", windowsHide: true, maxBuffer: maxChars * 4 + 4096,
     env: { ...process.env, PYTHONIOENCODING: "utf-8" } });
   if (content.length > maxChars) throw new Error("Context Pack exceeds configured character limit");
   const match = content.match(/<!-- manifest: (\{[^\r\n]*\}); estimated_tokens=\d+ -->\r?\n?$/);
   const manifest = match ? object(JSON.parse(match[1])) : null;
   if (manifest?.project !== contract.project || manifest.role !== role ||
+      manifest.task_class !== (contract.taskClass ?? null) ||
       typeof manifest.compiler_version !== "string" || !Array.isArray(manifest.sources)) {
     throw new Error(`Context Pack manifest invalid for ${role}`);
   }
@@ -154,6 +158,7 @@ export async function loadVaultTaskContract(vaultDirectory: string, snapshotPath
       !Number.isSafeInteger(data.version) || (data.version as number) < 1 ||
       typeof data.sha256 !== "string" || !/^[0-9a-f]{64}$/i.test(data.sha256) ||
       typeof data.project !== "string" || !data.project ||
+      (data.taskClass !== undefined && (typeof data.taskClass !== "string" || !/^[a-z][a-z0-9_.-]{0,79}$/.test(data.taskClass))) ||
       typeof data.objective !== "string" || !data.objective.trim() ||
       typeof data.baseSha !== "string" || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i.test(data.baseSha) ||
       !scope || !limits || !Array.isArray(data.sourceNotes) || data.sourceNotes.length < 1 ||
@@ -239,16 +244,24 @@ export async function runSingleTaskFromVault(options: Omit<SingleTaskRunOptions,
   vaultDirectory: string;
   snapshotPath: string;
   maxContextChars?: number;
+  knowledgeProofDirectory?: string;
 }) {
   const contract = await loadVaultTaskContract(options.vaultDirectory, options.snapshotPath, options.cwd);
   const vault = await realpath(resolve(options.vaultDirectory));
   const checkout = await realpath(resolve(options.cwd));
+  if (options.knowledgeProofDirectory) {
+    const raw = resolve(options.knowledgeProofDirectory), proof = await realpath(raw);
+    if ((await lstat(raw)).isSymbolicLink() || proof === vault || inside(vault, proof) ||
+        proof === checkout || inside(checkout, proof))
+      throw new Error("Knowledge authority must be outside Vault and model checkout");
+  }
   const maxChars = options.maxContextChars ?? 16_000;
   if (!Number.isSafeInteger(maxChars) || maxChars < 1000 || maxChars > 64_000) {
     throw new Error("Context Pack character limit invalid");
   }
-  const astraContext = compileContextPack(vault, contract, "astra", maxChars);
-  const solContext = compileContextPack(vault, contract, "sol", maxChars);
+  const compile = (role: "astra" | "sol") => compileContextPack(vault, contract, role, maxChars, options.knowledgeProofDirectory);
+  const astraContext = compile("astra");
+  const solContext = compile("sol");
   const out = await artifactDirectory(options.artifactDir, vault, checkout);
   const astraPack = await savePack(out, options.runId, "astra", astraContext);
   const solPack = await savePack(out, options.runId, "sol", solContext);
@@ -259,8 +272,7 @@ export async function runSingleTaskFromVault(options: Omit<SingleTaskRunOptions,
       await options.beforeSol?.();
       const current = await loadVaultTaskContract(options.vaultDirectory, options.snapshotPath, options.cwd);
       if (!isDeepStrictEqual(current, contract)) throw new Error("Vault Task Contract changed before Sol");
-      if (compileContextPack(vault, contract, "astra", maxChars) !== astraContext ||
-          compileContextPack(vault, contract, "sol", maxChars) !== solContext) {
+      if (compile("astra") !== astraContext || compile("sol") !== solContext) {
         throw new Error("Context Pack changed before Sol");
       }
     },
@@ -269,8 +281,7 @@ export async function runSingleTaskFromVault(options: Omit<SingleTaskRunOptions,
         if (!isDeepStrictEqual(currentVaultExport(vault, contract.vaultId, contract.project), contract)) {
           return { outcome: "unknown" as const, evidenceRef: "vault:task-contract-changed-after-sol" };
         }
-        if (compileContextPack(vault, contract, "astra", maxChars) !== astraContext ||
-            compileContextPack(vault, contract, "sol", maxChars) !== solContext) {
+        if (compile("astra") !== astraContext || compile("sol") !== solContext) {
           return { outcome: "unknown" as const, evidenceRef: "vault:context-pack-changed-after-sol" };
         }
         if (gitCheckoutState(checkout).head.toLowerCase() !== contract.baseSha.toLowerCase()) {

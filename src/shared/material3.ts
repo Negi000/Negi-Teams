@@ -123,6 +123,8 @@ export const material3Styles = String.raw`
 .negi-ui .md-actions { display:flex; flex-wrap:wrap; align-items:center; gap:12px; margin-top:20px }
 .negi-ui .md-message { min-height:24px; color:var(--md-error); font-size:14px; overflow-wrap:anywhere }
 .negi-ui .md-message:empty { min-height:0; margin:0 }
+.negi-ui .md-message[data-tone=success] { color:var(--md-primary) }
+.negi-ui .md-message[data-tone=neutral] { color:var(--md-on-surface-variant) }
 .negi-ui .md-empty { padding:32px 24px; background:var(--md-surface-low); border-radius:28px; text-align:center; color:var(--md-on-surface-variant) }
 .negi-ui .md-empty strong { display:block; font-size:18px; margin-bottom:8px; color:var(--md-on-surface) }
 .negi-ui .md-list-detail { display:grid; grid-template-columns:280px minmax(0,1fr); gap:28px; align-items:start }

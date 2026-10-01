@@ -19,7 +19,7 @@ import sys
 import tempfile
 
 
-COMPILER_VERSION = "phase2-2"
+COMPILER_VERSION = "phase2-3"
 DIRECTORIES = (
     "00_System", "10_Projects", "20_Decisions", "30_Patterns", "40_Lessons",
     "50_Policies", "60_Evaluations", "70_Feedback", "80_Tasks", "85_Derived", "90_Archive",
@@ -217,7 +217,8 @@ def _eligible(note: Note, project: str, allow_private: bool = False) -> bool:
 
 
 def _required_closure(notes: dict[str, Note], seeds: set[str], project: str,
-                      allow_private: bool = False, task_class: str | None = None) -> set[str]:
+                      allow_private: bool = False, task_class: str | None = None,
+                      knowledge_authority=None) -> set[str]:
     selected = set()
     pending = list(seeds)
     while pending:
@@ -227,7 +228,7 @@ def _required_closure(notes: dict[str, Note], seeds: set[str], project: str,
         note = notes.get(key)
         if note is None or not _eligible(note, project, allow_private):
             raise VaultError(f"必須または依存IDが未取得・非active・権限外: {key}")
-        if not lesson_applies(note, notes, task_class, project, allow_private):
+        if not lesson_applies(note, notes, task_class, project, allow_private, knowledge_authority):
             raise VaultError(f"Lessonの適用条件または根拠版が一致しない: {key}")
         selected.add(key)
         pending.extend(ref.casefold() for ref in note.properties["depends_on"])
@@ -235,9 +236,17 @@ def _required_closure(notes: dict[str, Note], seeds: set[str], project: str,
 
 
 def lesson_applies(note: Note, notes: dict[str, Note], task_class: str | None,
-                   project: str, allow_private: bool = False) -> bool:
+                   project: str, allow_private: bool = False, knowledge_authority=None) -> bool:
     """A classified Lesson is withheld on unknown class, stale sources or revocation."""
-    if note.properties["kind"] != "Lesson" or not note.properties["task_classes"]:
+    if note.properties["kind"] != "Lesson":
+        return True
+    if note.properties["status"] == "active":
+        if knowledge_authority is not None:
+            if not knowledge_authority.allows(note):
+                return False
+        elif managed_knowledge_note(note):
+            return False
+    if not note.properties["task_classes"]:
         return True
     if task_class not in note.properties["task_classes"]:
         return False
@@ -249,6 +258,12 @@ def lesson_applies(note: Note, notes: dict[str, Note], task_class: str | None,
                 source.properties["version"] != version or source.sha256 != digest:
             return False
     return True
+
+
+def managed_knowledge_note(note: Note) -> bool:
+    return (bool(re.fullmatch(r"NT-LESSON-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", note.id, re.I)) or
+            str(note.properties.get("approval_ref", "")).startswith("user:http-knowledge:") or
+            any(ref.startswith("negi-knowledge:") for ref in note.properties["source_refs"]))
 
 
 def search_notes(notes: dict[str, Note], project: str, query: str,
@@ -312,7 +327,7 @@ def _render_pack(notes: dict[str, Note], selected: set[str], mandatory: set[str]
 
 def build_pack(notes: dict[str, Note], project: str, role: str, query: str,
                required_ids: list[str], max_chars: int, allow_private: bool = False,
-               task_class: str | None = None) -> str:
+               task_class: str | None = None, knowledge_authority=None) -> str:
     if role not in {"astra", "sol", "luna"} or max_chars < 1000:
         raise VaultError("roleまたはmax-charsが不正")
     required_notes = [note for note in notes.values()
@@ -328,20 +343,28 @@ def build_pack(notes: dict[str, Note], project: str, role: str, query: str,
         raise VaultError("必須ノートがない。--requireかactive/requiredな仕様を指定する")
     if task_class is not None and not re.fullmatch(r"[a-z][a-z0-9_.-]{0,79}", task_class):
         raise VaultError("task-classが不正")
-    mandatory = _required_closure(notes, seeds, project, allow_private, task_class)
+    mandatory = _required_closure(notes, seeds, project, allow_private, task_class, knowledge_authority)
     selected = set(mandatory)
     pack = _render_pack(notes, selected, mandatory, project, role, query, task_class)
     if len(pack) > max_chars:
         raise VaultError("必須ノートだけで上限超過。必須条件を削らず、上限拡大かタスク分割を行う")
-    for _score, note in search_notes(notes, project, query, allow_private=allow_private):
+    ranked = search_notes(notes, project, query, allow_private=allow_private)
+    ranked_ids = {note.id.casefold() for _, note in ranked}
+    # An explicitly scoped class is also a retrieval key. Japanese objectives
+    # need not contain an identical whitespace-delimited phrase from the Lesson.
+    ranked.extend((0, note) for note in sorted(notes.values(), key=lambda item: item.id)
+                  if note.id.casefold() not in ranked_ids and _eligible(note, project, allow_private) and
+                  note.properties["kind"] == "Lesson" and note.properties["task_classes"] and
+                  task_class in note.properties["task_classes"])
+    for _score, note in ranked:
         key = note.id.casefold()
         if key in selected:
             continue
         if note.properties["roles"] and role not in note.properties["roles"]:
             continue
-        if not lesson_applies(note, notes, task_class, project, allow_private):
+        if not lesson_applies(note, notes, task_class, project, allow_private, knowledge_authority):
             continue
-        group = _required_closure(notes, {key}, project, allow_private, task_class)
+        group = _required_closure(notes, {key}, project, allow_private, task_class, knowledge_authority)
         trial_selected = selected | group
         trial_mandatory = mandatory | (group - {key})
         trial = _render_pack(notes, trial_selected, trial_mandatory, project, role, query, task_class)
@@ -530,6 +553,7 @@ def main(argv=None) -> int:
     packing.add_argument("--max-chars", type=int, default=16000)
     packing.add_argument("--allow-private", action="store_true")
     packing.add_argument("--task-class")
+    packing.add_argument("--knowledge-proof-dir")
     pack_destination = packing.add_mutually_exclusive_group(required=True)
     pack_destination.add_argument("--out")
     pack_destination.add_argument("--stdout", action="store_true")
@@ -575,8 +599,10 @@ def main(argv=None) -> int:
                 raise VaultError(f"IDがない: {args.id}")
             print(note.path.read_text(encoding="utf-8-sig"), end="")
         elif args.command == "pack":
+            from negi_knowledge import KnowledgeAuthority
+            authority = KnowledgeAuthority(args.knowledge_proof_dir, root) if args.knowledge_proof_dir else None
             content = build_pack(notes, args.project, args.role, args.query,
-                                 args.require, args.max_chars, args.allow_private, args.task_class)
+                                 args.require, args.max_chars, args.allow_private, args.task_class, authority)
             if args.stdout:
                 sys.stdout.write(content)
             else:
@@ -614,4 +640,5 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
+    sys.modules["negi_vault"] = sys.modules[__name__]
     raise SystemExit(main())

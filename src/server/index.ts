@@ -60,6 +60,8 @@ import { CodexAppServerBrain } from "./master/codexAppServerBrain.ts";
 import { codexMasterLaunchOptions } from "./master/codexMasterLaunch.ts";
 import { LocalReviewService } from "./orchestration/reviewService.ts";
 import { createReviewHttp } from "./orchestration/reviewHttp.ts";
+import { LocalKnowledgeService } from "./orchestration/knowledgeService.ts";
+import { createKnowledgeHttp } from "./orchestration/knowledgeHttp.ts";
 import { LocalTaskService } from "./orchestration/taskService.ts";
 import { createTaskHttp } from "./orchestration/taskHttp.ts";
 import { ChatAttachmentStore, MAX_ATTACHMENTS_PER_TURN } from "./chatAttachments.ts";
@@ -125,6 +127,16 @@ if (taskConfigPath) {
 }
 const taskApi = createTaskHttp(taskService, authConfig);
 if (taskService && reviewService) await taskService.connectReviews(reviewService);
+const knowledgeConfigPath = process.env.NEGI_KNOWLEDGE_CONFIG;
+let knowledgeService: LocalKnowledgeService | null = null;
+if (knowledgeConfigPath) {
+  if (!isAbsolute(knowledgeConfigPath) || !authConfig.token || !taskService || !reviewService)
+    throw new Error("NEGI_KNOWLEDGE_CONFIG requires an absolute path, authenticated Tasks and reviews");
+  const bytes = await readFile(knowledgeConfigPath);
+  if (bytes.length > 16_000) throw new Error("Knowledge config exceeds local size limit");
+  knowledgeService = await LocalKnowledgeService.open(JSON.parse(bytes.toString("utf8")), taskService, reviewService);
+}
+const knowledgeApi = createKnowledgeHttp(knowledgeService, authConfig);
 const reviewApi = createReviewHttp(reviewService, authConfig);
 // spawn する対象コマンド。claude が PATH に無い環境では EBI_COMMAND=bash 等で fallback。
 const COMMAND = process.env.EBI_COMMAND ?? "claude";
@@ -795,6 +807,7 @@ const httpServer = createServer(async (req, res) => {
 
   // Reviews require an authenticated browser cookie, even on loopback.
   if (await reviewApi(req, res, url)) return;
+  if (await knowledgeApi(req, res, url)) return;
   if (await taskApi(req, res, url)) return;
 
   // ---- 認証ゲート（loopback は常に素通り／非 loopback は token 必須）----

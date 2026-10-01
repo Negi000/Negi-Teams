@@ -4,6 +4,8 @@
 
 ## 設定
 
+知識承認を使う場合は[Phase 6の設定](negi-teams-phase6.md)に従って`NEGI_KNOWLEDGE_CONFIG`を追加します。Taskノートの明示`task_class`をsnapshotへ固定すると、承認済みLessonの適用分類と照合されます。既存snapshotは上書きせず、新しいTask/版の登録として扱ってください。
+
 `NEGI_TASK_CONFIG`に絶対パスのJSON、`EBI_AUTH_TOKEN`にブラウザログイン用秘密を設定して既存サーバを起動します。JSONの`stateRoot`は操作記録と署名を保管する場所、`runs`は登録するTask一覧です。各`config`は[Vault実行CLIの設定](negi-teams-phase3-live.md)と同じ形式です。親ディレクトリを事前に作成してください。
 
 ```json

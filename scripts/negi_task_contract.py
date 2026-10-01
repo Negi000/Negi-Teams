@@ -87,7 +87,8 @@ def export_contract(notes: dict[str, vault.Note], note_id: str, project: str) ->
                 if note.properties["status"] == "active" and
                 note.properties.get("required") and
                 (note.properties["project"] == project or note.properties["scope"] == "global")}
-    selected = vault._required_closure(notes, required | {task.id.casefold()}, project)
+    task_class = task.properties.get("task_class")
+    selected = vault._required_closure(notes, required | {task.id.casefold()}, project, task_class=task_class)
     source_notes = [
         {"id": notes[key].id, "kind": notes[key].properties["kind"],
          "version": int(notes[key].properties["version"]), "sha256": notes[key].sha256,
@@ -106,6 +107,7 @@ def export_contract(notes: dict[str, vault.Note], note_id: str, project: str) ->
         "limits": {"maxAttempts": data["max_attempts"],
                    "timeLimitMinutes": data["time_limit_minutes"]},
         "sourceNotes": source_notes,
+        **({"taskClass": task_class} if task_class else {}),
     }
 
 
