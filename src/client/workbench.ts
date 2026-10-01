@@ -5,7 +5,7 @@ import { stateLabel } from "./chatModel.ts";
 import { taskResultDeliveryLabel, type TaskResultSummary } from "../shared/taskResults.ts";
 
 export class Workbench {
-  private capabilities: { tasks: boolean; reviews: boolean } | null = null;
+  private capabilities: { tasks: boolean; reviews: boolean; taskAuthoring?: boolean } | null = null;
   private tasks: TaskOverview[] | null = null;
   private reviews: ReviewOverview[] | null = null;
   private taskError: string | null = null;
@@ -23,7 +23,7 @@ export class Workbench {
   private readonly search: HTMLInputElement;
 
   constructor(private readonly el: HTMLElement, private readonly openTeam: () => void) {
-    this.el.innerHTML = `<div class="md-page-heading"><div><div class="md-eyebrow">WORKSPACE</div><h1>作業一覧</h1><p>現在の作業と、判断を待っている成果を確認します。</p></div><button id="wb-refresh" class="md-icon-button" aria-label="作業一覧を更新" title="作業一覧を更新">${materialIcon("refresh")}</button></div>
+    this.el.innerHTML = `<div class="md-page-heading"><div><div class="md-eyebrow">WORKSPACE</div><h1>作業一覧</h1><p>現在の作業と、判断を待っている成果を確認します。</p></div><div class="md-actions"><a id="wb-new-task" class="md-button md-primary" href="/task-plans" hidden>新しいTask</a><button id="wb-refresh" class="md-icon-button" aria-label="作業一覧を更新" title="作業一覧を更新">${materialIcon("refresh")}</button></div></div>
 <div class="wb-summary"><div class="wb-decision md-surface md-surface-tonal"><div class="wb-summary-copy"><span class="wb-summary-label">要確認の成果</span><div id="wb-review-count" class="wb-summary-number">—</div><p id="wb-review-hint">接続を確認しています。</p></div><div class="wb-summary-shape" aria-hidden="true">${materialIcon("review")}</div><a id="wb-review-action" class="md-button md-primary" href="/reviews" hidden>成果を確認</a></div>
 <div class="wb-activity"><div><span class="wb-summary-label">実行中</span><strong id="wb-running-count">—</strong></div><div><span class="wb-summary-label">登録されたTask</span><strong id="wb-task-count">—</strong></div><p id="wb-freshness" class="muted">状態を取得してから表示します。</p></div></div>
 <p id="wb-error" class="md-message" role="status" aria-live="polite"></p>
@@ -53,7 +53,7 @@ export class Workbench {
       clearInterval(this.timer); this.timer = null;
     }
   }
-  setCapabilities(value: { tasks: boolean; reviews: boolean }): void {
+  setCapabilities(value: { tasks: boolean; reviews: boolean; taskAuthoring?: boolean }): void {
     this.capabilities = value;
     this.render();
     if (this.visible) void this.load();
@@ -121,6 +121,7 @@ export class Workbench {
     this.text("wb-running-count", this.tasks && !this.tasks.some(t => t.status === "unknown") ? String(this.tasks.filter(t => t.live).length) : "—");
     this.text("wb-task-count", this.tasks ? String(this.tasks.length) : "—");
     this.node("wb-all-tasks").hidden = !this.capabilities?.tasks;
+    this.node("wb-new-task").hidden = !this.capabilities?.taskAuthoring;
     this.text("wb-error", [this.taskError, this.reviewError].filter(Boolean).filter((v,i,a) => a.indexOf(v) === i).join(" "));
     const signature = JSON.stringify({ tasks: this.tasks, reviews: this.reviews, results: this.results, capabilities: this.capabilities, taskError: this.taskError, reviewError: this.reviewError, resultError: this.resultError });
     if (signature === this.fingerprint) return;

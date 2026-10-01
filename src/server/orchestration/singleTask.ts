@@ -32,6 +32,7 @@ export interface ContractRef {
   limits?: { maxAttempts: number; timeLimitMinutes: number };
   sourceNotes?: Array<{ id: string; kind: string; version: number; sha256: string; path: string }>;
   contextPacks?: { astra: { sha256: string; path: string }; sol: { sha256: string; path: string } };
+  approvedPlan?: { approvalRef: string; threadId: string; turnId: string; callId: string };
 }
 export interface Attempt {
   id: string;
@@ -81,6 +82,7 @@ export interface TaskSnapshot {
 
 export type TaskAction =
   | { type: "create"; runId: string; contract: ContractRef }
+  | { type: "adopt_approved_plan"; approvalRef: string; outputRef: string }
   | { type: "start_attempt"; attemptId: string; role: TaskRole; requestedModel: string }
   | { type: "bind_thread"; attemptId: string; threadId: string }
   | { type: "bind_provider"; attemptId: string; threadId: string; turnId: string }
@@ -150,6 +152,14 @@ export function reduceTask(state: TaskSnapshot | null, event: TaskEvent): TaskSn
   const next = copy(state);
   const active = next.attempts.find((x) => x.state === "running");
   switch (a.type) {
+    case "adopt_approved_plan": {
+      requireState(next.status === "queued" && next.attempts.length === 0 &&
+        Boolean(next.contract.approvedPlan) && next.contract.approvedPlan!.approvalRef === a.approvalRef &&
+        a.approvalRef.startsWith("user:http-task-plan:") && /^.{1,4096}#sha256=[a-f0-9]{64}$/.test(a.outputRef),
+        "approved plan must match the pinned contract before any provider attempt");
+      next.status = "ready_for_worker";
+      return next;
+    }
     case "start_attempt": {
       requireState(!active, "another attempt is running");
       requireState(Boolean(a.attemptId) && Boolean(a.requestedModel) &&

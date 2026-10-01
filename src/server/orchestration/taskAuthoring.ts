@@ -1,0 +1,332 @@
+// Resident Astra drafts semantic work. Only an authenticated concrete approval
+// compiles a Vault contract and a server-owned isolated run; recovery never sends a model turn.
+import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
+import { lstat, mkdir, open, readFile, readdir, realpath, unlink } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify, isDeepStrictEqual } from "node:util";
+import { setTimeout as wait } from "node:timers/promises";
+import { HumanReviewProofStore, isReviewRequestId } from "./humanReviewProof.ts";
+import type { LocalTaskService, TaskRequestOrigin } from "./taskService.ts";
+import type { VaultRunConfig } from "./vaultRunConfig.ts";
+import { loadVaultTaskContract, type VaultTaskContract } from "./vaultTaskContract.ts";
+
+const exec = promisify(execFile), sha = (text: string) => createHash("sha256").update(text).digest("hex");
+const label = /^[a-zA-Z0-9._-]{1,100}$/, digest = /^[0-9a-f]{64}$/;
+const inside = (root: string, path: string) => {
+  const rel = relative(root.toLowerCase(), path.toLowerCase()); return !rel || (!rel.startsWith("..") && !isAbsolute(rel));
+};
+type Source = VaultTaskContract["sourceNotes"][number];
+interface References { sources: Source[]; context: string }
+export interface TaskPlanFields {
+  title: string; objective: string; inScope: string[]; outOfScope: string[]; allowedPaths: string[];
+  invariants: string[]; acceptance: string[]; escalation: string[]; implementationPlan: string[];
+  references: Array<{ id: string; version: number; sha256: string }>;
+  maxAttempts: number; timeLimitMinutes: number;
+}
+interface Profile { id: string; title: string; project: string; repository: string; worktreeRoot: string;
+  allowedPaths: string[]; maxAttempts: number; timeLimitMinutes: number; config: VaultRunConfig; hash: string }
+interface Draft { schema: "negi-task-plan/1"; id: string; createdAt: string; profileId: string;
+  profileHash: string; baseSha: string; sources: Source[]; fields: TaskPlanFields;
+  origin: Exclude<TaskRequestOrigin, { kind: "browser" }> & { model: string; effort: string }; hash: string }
+function planIdentity(origin:Draft["origin"]):string {
+  const bytes=createHash("sha256").update("negi-task-plan/1\n"+JSON.stringify(origin)).digest().subarray(0,16);
+  bytes[6]=(bytes[6]&15)|64;bytes[8]=(bytes[8]&63)|128;
+  const h=bytes.toString("hex");return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;
+}
+export interface TaskPlanView { id: string; createdAt: string; title: string; project: string; profileId: string;
+  hash: string; baseSha: string; fields: TaskPlanFields; sources: Source[]; verification: string[];
+  planner: VaultRunConfig["astra"]; worker: VaultRunConfig["sol"]; origin: Draft["origin"];
+  status: "draft" | "registered" | "attention"; canFinalize: boolean; runId: string | null; error: string | null }
+
+function text(value: unknown, maximum: number): string {
+  if (typeof value !== "string" || !value.trim() || value.length > maximum || value.includes("\0") || value.includes("```")) throw new Error("Task plan text invalid");
+  return value.trim();
+}
+function strings(value: unknown, maximum = 300): string[] {
+  if (!Array.isArray(value) || !value.length || value.length > 20) throw new Error("Task plan list invalid");
+  const result = value.map(v => text(v, maximum));
+  if (new Set(result).size !== result.length) throw new Error("Task plan list repeated"); return result;
+}
+function paths(value: unknown): string[] {
+  const result = strings(value, 300);
+  if (result.some(v => /[\\:*?\[\]{}\r\n]/.test(v) || v.split("/").some(p => !p || p === "." || p === "..")))
+    throw new Error("Task plan relative paths invalid"); return result;
+}
+function fields(raw: unknown, profile: Profile): TaskPlanFields {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Task plan fields invalid");
+  const v = raw as Record<string, unknown>, keys = ["title", "objective", "inScope", "outOfScope", "allowedPaths", "invariants", "acceptance", "escalation", "implementationPlan", "references", "maxAttempts", "timeLimitMinutes"];
+  if (Object.keys(v).length !== keys.length || Object.keys(v).some(k => !keys.includes(k))) throw new Error("Task plan fields differ");
+  const allowedPaths = paths(v.allowedPaths);
+  if (allowedPaths.some(p => !profile.allowedPaths.some(root => p === root || p.startsWith(root + "/"))))
+    throw new Error("Task plan exceeds configured project scope");
+  if (!Number.isSafeInteger(v.maxAttempts) || Number(v.maxAttempts) < 1 || Number(v.maxAttempts) > profile.maxAttempts ||
+      !Number.isSafeInteger(v.timeLimitMinutes) || Number(v.timeLimitMinutes) < 1 || Number(v.timeLimitMinutes) > profile.timeLimitMinutes)
+    throw new Error("Task plan exceeds configured limits");
+  if (!Array.isArray(v.references) || !v.references.length || v.references.length > 50) throw new Error("Task plan references required");
+  const references = v.references.map(raw => {
+    const r = raw as Record<string, unknown>;
+    if (!r || Object.keys(r).length !== 3 || typeof r.id !== "string" || !label.test(r.id) ||
+        !Number.isSafeInteger(r.version) || Number(r.version) < 1 || typeof r.sha256 !== "string" || !digest.test(r.sha256)) throw new Error("Task plan reference invalid");
+    return { id: r.id, version: Number(r.version), sha256: r.sha256 };
+  });
+  if (new Set(references.map(r => r.id.toLowerCase())).size !== references.length) throw new Error("Task plan references repeated");
+  const result = { title: text(v.title, 160), objective: text(v.objective, 2000), inScope: strings(v.inScope), outOfScope: strings(v.outOfScope),
+    allowedPaths, invariants: strings(v.invariants), acceptance: strings(v.acceptance), escalation: strings(v.escalation),
+    implementationPlan: strings(v.implementationPlan, 500), references, maxAttempts: Number(v.maxAttempts), timeLimitMinutes: Number(v.timeLimitMinutes) };
+  if (Buffer.byteLength(JSON.stringify(result)) > 8000 || result.implementationPlan.join("\n").length > 4000)
+    throw new Error("Task plan too large; decompose the work");
+  return result;
+}
+async function directory(raw: unknown): Promise<string> {
+  if (typeof raw !== "string" || !isAbsolute(raw)) throw new Error("Task authoring roots must be configured absolute paths");
+  const path = resolve(raw);
+  try { if ((await lstat(path)).isSymbolicLink()) throw new Error("Task authoring root cannot be a link"); return await realpath(path); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    const target = join(await realpath(dirname(path)), basename(path)); await mkdir(target); return await realpath(target); }
+}
+async function json(path: string): Promise<unknown> {
+  const file = await lstat(path);
+  if (!file.isFile() || file.isSymbolicLink() || file.size > 100_000) throw new Error("Task authoring file invalid");
+  return JSON.parse(await readFile(path, "utf8"));
+}
+async function save(path: string, value: unknown): Promise<void> {
+  const bytes = JSON.stringify(value) + "\n";
+  try { const file = await open(path, "wx", 0o600); try { await file.writeFile(bytes); await file.sync(); } finally { await file.close(); } }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    if (!isDeepStrictEqual(await json(path), value)) throw new Error("Task authoring write conflicts with previous evidence"); }
+}
+function markdown(draft: Draft, profile: Profile, requestId: string): string {
+  const f = draft.fields, body = { objective: f.objective, in_scope: f.inScope, out_of_scope: f.outOfScope,
+    allowed_paths: f.allowedPaths, invariants: f.invariants, acceptance: f.acceptance,
+    verification: profile.config.verification.map(v => v.requirement), escalation: f.escalation,
+    base_sha: draft.baseSha, max_attempts: f.maxAttempts, time_limit_minutes: f.timeLimitMinutes };
+  const scalar = (k: string, v: string) => k + ": " + JSON.stringify(v) + "\n";
+  const taskId = `NT-TASK-${draft.id}`;
+  return "---\n" + Object.entries({ id: taskId, kind: "Task", project: profile.project, scope: "project", status: "active",
+    version: "1", updated: draft.createdAt.slice(0, 10), sensitivity: "local", approval_ref: `user:http-task-plan:${requestId}` })
+    .map(([k,v]) => scalar(k,v)).join("") + "source_refs:\n" + [`master:${draft.origin.masterId}:${draft.origin.threadId}:${draft.origin.turnId}:${draft.origin.callId}`]
+    .map(v => "  - " + JSON.stringify(v) + "\n").join("") + "depends_on:\n" + draft.sources.map(s => "  - " + JSON.stringify(s.id) + "\n").join("") +
+    "---\n# " + f.title.replace(/[\r\n]/g, " ") + "\n\n```negi-task-contract\n" + JSON.stringify(body, null, 2) + "\n```\n\n## 実行計画\n" +
+    f.implementationPlan.map(v => "- " + v).join("\n") + "\n\n## 依存Task\nなし。この契約は独立して実行する。\n";
+}
+function snapshot(draft: Draft, profile: Profile, content: string): VaultTaskContract {
+  const f = draft.fields, taskId = `NT-TASK-${draft.id}`, hash = sha(content);
+  return { schemaVersion: "negi-task-contract/1", vaultId: taskId, version: 1, sha256: hash, project: profile.project,
+    objective: f.objective, acceptance: f.acceptance, baseSha: draft.baseSha,
+    scope: { in: f.inScope, out: f.outOfScope, allowedPaths: f.allowedPaths }, invariants: f.invariants,
+    verification: profile.config.verification.map(v => v.requirement), escalation: f.escalation,
+    limits: { maxAttempts: f.maxAttempts, timeLimitMinutes: f.timeLimitMinutes },
+    sourceNotes: [...draft.sources, { id: taskId, kind: "Task", version: 1, sha256: hash, path: `80_Tasks/${taskId}.md` }]
+      .sort((a,b) => a.id.toLowerCase() < b.id.toLowerCase() ? -1 : 1) };
+}
+
+export class LocalTaskAuthoringService {
+  private queue: Promise<unknown> = Promise.resolve();
+  private constructor(private readonly root: string, private readonly profiles: Profile[],
+    private readonly proofs: HumanReviewProofStore, private readonly tasks: LocalTaskService) {}
+  static async open(raw: unknown, tasks: LocalTaskService): Promise<LocalTaskAuthoringService> {
+    const value = raw as { storageRoot?: unknown; profiles?: unknown };
+    if (!value || !Array.isArray(value.profiles) || !value.profiles.length || value.profiles.length > 20) throw new Error("Task authoring profiles invalid");
+    const root = await directory(value.storageRoot), profiles: Profile[] = [];
+    for (const raw of value.profiles) {
+      const p = raw as Record<string, unknown>;
+      if (!p || typeof p.id !== "string" || !label.test(p.id) || typeof p.templateRunId !== "string") throw new Error("Task authoring profile identity invalid");
+      const template = tasks.authoringTemplate(p.templateRunId), config = template.config;
+      if (config.approvedPlan) throw new Error("Task authoring template must be a fixed trusted registration");
+      config.vault = await realpath(config.vault); config.executable = await realpath(config.executable);
+      const repository = await directory(p.repository), worktreeRoot = await directory(p.worktreeRoot);
+      const project = String(template.contract.project), allowedPaths = paths(p.allowedPaths);
+      if (!config.verification.length || !Number.isSafeInteger(p.maxAttempts) || Number(p.maxAttempts) < 1 || Number(p.maxAttempts) > 3 ||
+          !Number.isSafeInteger(p.timeLimitMinutes) || Number(p.timeLimitMinutes) < 1 || Number(p.timeLimitMinutes) > 480) throw new Error("Task authoring limits/checks invalid");
+      for (const writable of [...tasks.knowledgeRegistrations().flatMap(r => [r.vault,r.checkout]), repository])
+        for (const evidence of [root, worktreeRoot]) if (inside(writable,evidence) || inside(evidence,writable)) throw new Error("Task authoring roots overlap writable source roots");
+      if (inside(root,worktreeRoot) || inside(worktreeRoot,root)) throw new Error("Task plan storage and worktrees must be separate");
+      const top = (await exec("git", ["rev-parse", "--show-toplevel"], { cwd: repository, windowsHide: true })).stdout.trim();
+      if ((await realpath(top)).toLowerCase() !== repository.toLowerCase()) throw new Error("Project repository must be a Git root");
+      const core = { id: p.id, title: text(p.title, 160), project, repository, worktreeRoot, allowedPaths,
+        maxAttempts: Number(p.maxAttempts), timeLimitMinutes: Number(p.timeLimitMinutes), config };
+      profiles.push({ ...core, hash: sha(JSON.stringify(core)) });
+    }
+    if (new Set(profiles.map(p => p.id)).size !== profiles.length) throw new Error("Task authoring profiles repeated");
+    for (const a of profiles) for (const b of profiles)
+      if (inside(a.repository,b.worktreeRoot) || inside(a.config.vault,b.worktreeRoot) ||
+          inside(a.worktreeRoot,b.repository) || inside(a.worktreeRoot,b.config.vault)) throw new Error("Project worktree roots overlap source/Vault roots");
+    await mkdir(join(root,"drafts"), { recursive:true }); await mkdir(join(root,"runs"), { recursive:true });
+    const proofs = await HumanReviewProofStore.open(join(root,"approvals"));
+    const service = new LocalTaskAuthoringService(root,profiles,proofs,tasks);
+    await service.restoreRegistrations(); return service;
+  }
+  private serial<T>(fn: () => Promise<T>): Promise<T> { const pending = this.queue.catch(() => undefined).then(fn); this.queue = pending; return pending; }
+  private profile(id: string): Profile { const p = this.profiles.find(p => p.id === id); if (!p) throw new Error("Project execution profile missing"); return p; }
+  private async draftWriter() {
+    for(let attempt=0;attempt<20;attempt++)try{return await open(join(this.root,"draft-writer.lock"),"wx",0o600)}
+    catch(error){if((error as NodeJS.ErrnoException).code!=="EEXIST")throw error;await wait(100)}
+    throw new Error("Task draft writer is busy or requires reconciliation");
+  }
+  listProfiles() { return this.profiles.map(p => ({ id:p.id, title:p.title, project:p.project, allowedPaths:p.allowedPaths,
+    verification:p.config.verification.map(c=>c.requirement), planner:p.config.astra, worker:p.config.sol,
+    maxAttempts:p.maxAttempts, timeLimitMinutes:p.timeLimitMinutes, independentTasksOnly:true })); }
+  private async python(profile: Profile, args: string[]): Promise<unknown> {
+    const script = ["../../../scripts/negi_task_authoring.py", "../../../../scripts/negi_task_authoring.py"]
+      .map(p => fileURLToPath(new URL(p,import.meta.url))).find(existsSync);
+    if (!script) throw new Error("Bundled Task authoring compiler missing");
+    return JSON.parse((await exec("python", [script,"--vault",profile.config.vault,...args], { windowsHide:true,
+      timeout:20000,maxBuffer:300000,env:{...process.env,PYTHONIOENCODING:"utf-8"} })).stdout);
+  }
+  async readProject(id: string, references: string[] = []) {
+    const p = this.profile(id);
+    if (references.length > 50 || references.some(r=>!label.test(r))) throw new Error("Project references invalid");
+    const context = await this.python(p,["inspect","--project",p.project,...references.flatMap(r=>["--reference",r])]) as References;
+    return { ...this.listProfiles().find(row=>row.id===id)!, ...context };
+  }
+  async propose(profileId: string, raw: unknown, origin: Draft["origin"]): Promise<TaskPlanView> {
+    return this.serial(async () => {
+      const p = this.profile(profileId), f = fields(raw,p);
+      if (origin.kind !== "master" || origin.model !== p.config.astra.model || origin.effort !== p.config.astra.effort ||
+          ![origin.masterId,origin.threadId,origin.turnId,origin.callId].every(id=>typeof id === "string" && id.length>0 && id.length<=200 && !/[\r\n\0]/.test(id)))
+        throw new Error("Task drafts require the configured resident Astra");
+      const source = await this.readProject(profileId,f.references.map(r=>r.id));
+      for (const r of f.references) if (!source.sources.some(s=>s.id===r.id && s.version===r.version && s.sha256===r.sha256)) throw new Error("Task plan reference is stale");
+      const baseSha = (await exec("git", ["rev-parse","HEAD"], { cwd:p.repository,windowsHide:true })).stdout.trim().toLowerCase();
+      if (!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(baseSha)) throw new Error("Project base SHA invalid");
+      const core = { schema:"negi-task-plan/1" as const,id:planIdentity(origin),createdAt:new Date().toISOString(),
+        profileId,profileHash:p.hash,baseSha,sources:source.sources,fields:f,origin:structuredClone(origin) };
+      const draft = { ...core,hash:sha(JSON.stringify(core)) },lock=await this.draftWriter();let selected=draft;
+      try {
+        const drafts=await this.drafts(), previous=drafts.find(d=>isDeepStrictEqual(d.origin,origin));
+        if(previous){
+          if(previous.profileHash!==p.hash||!isDeepStrictEqual(previous.fields,f))throw new Error("Planner call reused for a different Task draft");
+          selected=previous;
+        }else{
+          if(drafts.length>=100)throw new Error("Task draft catalog limit reached");
+          await save(join(this.root,"drafts",`${draft.id}.json`),draft);
+        }
+      }finally{await lock.close();await unlink(join(this.root,"draft-writer.lock"))}
+      return this.view(selected);
+    });
+  }
+  private async drafts(): Promise<Draft[]> {
+    const result: Draft[] = [], entries = await readdir(join(this.root,"drafts"));
+    if (entries.length > 100) throw new Error("Task draft catalog limit reached");
+    for (const file of entries) {
+      if (!/^[0-9a-f-]{36}\.json$/.test(file)) throw new Error("Task draft file identity invalid");
+      const d = await json(join(this.root,"drafts",file)) as Draft, { hash,...core } = d;
+      if (d.schema!=="negi-task-plan/1" || !isReviewRequestId(d.id) || file!==d.id+".json" || hash!==sha(JSON.stringify(core))) throw new Error("Task draft integrity invalid");
+      result.push(d);
+    }
+    return result;
+  }
+  private async approval(draft: Draft) {
+    const receiptPath = join(this.root,"runs",`task-${draft.id}`,"approval.json");
+    try {
+      const pointer = await json(receiptPath) as { requestId:string };
+      const receipt = await this.proofs.read(pointer.requestId);
+      if (!receipt || receipt.data.draftHash!==draft.hash || receipt.data.draftId!==draft.id || receipt.data.domain!=="task-authoring") throw new Error("Task draft approval identity invalid");
+      return receipt;
+    } catch(error) {
+      if ((error as NodeJS.ErrnoException).code!=="ENOENT") throw error;
+      // A crash may occur after signing and before writing the pointer.
+      // Preserve that authorization as pending; never present the draft as unapproved.
+      const names=await readdir(this.proofs.root);
+      if(names.length>101)throw new Error("Task approval catalog limit reached");
+      let result:Awaited<ReturnType<HumanReviewProofStore["read"]>>=null;
+      for(const name of names)if(/^[0-9a-f-]{36}\.json$/.test(name)){
+        const receipt=await this.proofs.read(name.slice(0,-5));
+        if(receipt?.data.domain==="task-authoring"&&receipt.data.draftId===draft.id){
+          if(result||receipt.data.draftHash!==draft.hash)throw new Error("Task draft approval conflict");result=receipt;
+        }
+      }
+      return result;
+    }
+  }
+  private async freshness(d: Draft, p: Profile): Promise<void> {
+    if (d.profileHash!==p.hash || !isDeepStrictEqual(fields(d.fields,p),d.fields)) throw new Error("Task execution profile changed");
+    const refs = await this.readProject(p.id,d.sources.map(s=>s.id));
+    if (!isDeepStrictEqual(refs.sources,d.sources)) throw new Error("Task plan source references changed");
+    const head = (await exec("git",["rev-parse","HEAD"],{cwd:p.repository,windowsHide:true})).stdout.trim().toLowerCase();
+    if (head!==d.baseSha) throw new Error("Project base SHA changed");
+  }
+  private async view(d: Draft): Promise<TaskPlanView> {
+    const p = this.profile(d.profileId); let error:string|null=null;
+    const approval = await this.approval(d), runId = approval?.runId ?? null;
+    const registered = runId && this.tasks.list().some(r=>r.id===runId);
+    if (!registered) try { await this.freshness(d,p); } catch { error="参照仕様・プロジェクトの版・実行設定が変わりました。統括に新しい案を依頼してください。"; }
+    if(!registered&&!error)try{await lstat(join(this.root,"writer.lock"));error="契約の確定処理が進行中、または停止後の照合を待っています。状態を更新して確認してください。"}
+    catch(e){if((e as NodeJS.ErrnoException).code!=="ENOENT")throw e}
+    if (approval && !registered && !error) error="契約の確定処理を照合してください。実行はまだ開始していません。";
+    return { id:d.id,createdAt:d.createdAt,title:d.fields.title,project:p.project,profileId:p.id,hash:d.hash,baseSha:d.baseSha,
+      fields:d.fields,sources:d.sources,verification:p.config.verification.map(v=>v.requirement),planner:p.config.astra,worker:p.config.sol,
+      origin:d.origin,status:registered?"registered":error?"attention":"draft",canFinalize:!approval&&!error,runId,error };
+  }
+  async list(): Promise<TaskPlanView[]> {
+    const drafts=(await this.drafts()).sort((a,b)=>b.createdAt.localeCompare(a.createdAt)||a.id.localeCompare(b.id)), result:TaskPlanView[]=[];
+    // Bounded compiler/Git processes even with a full draft catalog.
+    for(let i=0;i<drafts.length;i+=4)result.push(...await Promise.all(drafts.slice(i,i+4).map(d=>this.view(d))));
+    return result;
+  }
+  async finalize(id: string, expectedHash: string, requestId: string): Promise<TaskPlanView> {
+    return this.serial(async () => {
+      if (!isReviewRequestId(id) || !digest.test(expectedHash) || !isReviewRequestId(requestId)) throw new Error("Task approval identity invalid");
+      const d = (await this.drafts()).find(d=>d.id===id); if (!d || d.hash!==expectedHash) throw new Error("Task plan version differs");
+      const p=this.profile(d.profileId),lock=await open(join(this.root,"writer.lock"),"wx",0o600);
+      try {
+      const prior=await this.approval(d);
+      if (prior) {
+        if (prior.id!==requestId) throw new Error("Task draft was already approved; inspect it");
+        return this.view(d); // A retry never creates or starts another worktree/provider.
+      }
+      await this.freshness(d,p);
+      const runId=`task-${d.id}`, out=join(this.root,"runs",runId); await mkdir(out,{recursive:true});
+      const config:VaultRunConfig={...structuredClone(p.config),runId,checkout:join(p.worktreeRoot,runId),snapshot:join(out,"contract.json"),
+        outputDir:join(out,"output"),approvedPlan:{proofDirectory:this.proofs.root,requestId}};
+      await mkdir(config.outputDir,{recursive:true});
+      if((await lstat(config.outputDir)).isSymbolicLink()||(await realpath(config.outputDir))!==config.outputDir)
+        throw new Error("Task output root changed");
+      const content=markdown(d,p,requestId), expected=snapshot(d,p,content);
+      await this.proofs.create({id:requestId,action:"operation",caseId:`task-plan:${d.id}`,runId,artifactSha256:sha(content),verificationRef:null,
+        data:{domain:"task-authoring",draftId:d.id,draftHash:d.hash,profileHash:p.hash,taskId:expected.vaultId,project:p.project,vault:p.config.vault,
+          content,sources:JSON.stringify(d.sources),config:JSON.stringify(config),snapshot:JSON.stringify(expected),plan:d.fields.implementationPlan.join("\n"),origin:JSON.stringify(d.origin)}});
+      await save(join(out,"approval.json"),{requestId});
+      const compiled=await this.python(p,["apply","--proof-dir",this.proofs.root,"--request-id",requestId]);
+      if (!isDeepStrictEqual(compiled,expected)) throw new Error("Task compiler differs from the exact approved contract");
+      await save(config.snapshot,compiled);
+      // Durable intent precedes Git mutation. A partial creation is held for inspection,
+      // and startup deliberately refuses to run worktree add again.
+        await this.freshness(d,p);
+        await save(join(out,"worktree-intent.json"),{configHash:sha(JSON.stringify(config)),baseSha:d.baseSha});
+        try { await lstat(config.checkout); throw new Error("Task worktree destination already exists"); }
+        catch(error) { if ((error as NodeJS.ErrnoException).code!=="ENOENT") throw error; }
+        await exec("git",["worktree","add","--detach",config.checkout,d.baseSha],{cwd:p.repository,windowsHide:true,timeout:120000,maxBuffer:100000});
+        await this.assertWorktree(config,p,d.baseSha,true);
+        await save(join(out,"worktree-created.json"),{configHash:sha(JSON.stringify(config)),baseSha:d.baseSha});
+        await loadVaultTaskContract(config.vault,config.snapshot,config.checkout);
+        await this.tasks.registerAuthoredRun(d.fields.title,config);
+      return this.view(d);
+      } finally { await lock.close(); await unlink(join(this.root,"writer.lock")); }
+    });
+  }
+  private async assertWorktree(config:VaultRunConfig,p:Profile,baseSha:string,clean:boolean):Promise<void> {
+    if ((await lstat(config.checkout)).isSymbolicLink() || !inside(p.worktreeRoot,await realpath(config.checkout))) throw new Error("Authored worktree root changed");
+    const common=async(cwd:string)=>(await realpath((await exec("git",["rev-parse","--path-format=absolute","--git-common-dir"],{cwd,windowsHide:true})).stdout.trim())).toLowerCase();
+    if (await common(config.checkout)!==await common(p.repository)) throw new Error("Authored worktree belongs to another Git repository");
+    const head=(await exec("git",["rev-parse","HEAD"],{cwd:config.checkout,windowsHide:true})).stdout.trim().toLowerCase();
+    if (head!==baseSha || (clean && (await exec("git",["status","--porcelain"],{cwd:config.checkout,windowsHide:true})).stdout.trim())) throw new Error("Authored worktree is not the fixed clean base");
+  }
+  private async restoreRegistrations():Promise<void> {
+    for (const d of await this.drafts()) {
+      const receipt=await this.approval(d); if (!receipt) continue;
+      const p=this.profile(d.profileId),config=JSON.parse(receipt.data.config) as VaultRunConfig;
+      // Changed profiles or partially created worktrees remain visible as attention.
+      if (receipt.data.profileHash!==p.hash) continue;
+      try {
+        const created=await json(join(this.root,"runs",config.runId,"worktree-created.json")) as {configHash:string;baseSha:string};
+        if (created.configHash!==sha(JSON.stringify(config)) || created.baseSha!==d.baseSha) throw new Error("Authored worktree creation record differs");
+        await this.assertWorktree(config,p,d.baseSha,false);
+        await this.tasks.registerAuthoredRun(d.fields.title,config);
+      } catch { /* signed approval remains visible; no automatic mutation or dispatch */ }
+    }
+  }
+}

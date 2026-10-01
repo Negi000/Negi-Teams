@@ -20,6 +20,8 @@ export interface VaultRunConfig {
   sol: { model: string; effort: string };
   verification: VerificationCommand[];
   resources: string[];
+  /** Server-signed human approval of a resident Astra plan. No new planning turn. */
+  approvedPlan?: { proofDirectory: string; requestId: string };
 }
 
 function object(value: unknown): Record<string, unknown> | null {
@@ -75,12 +77,20 @@ export function parseVaultRunConfig(value: unknown): VaultRunConfig {
   if (new Set(resources.map((resource) => resource.toLowerCase())).size !== resources.length) {
     throw new Error("Vault run resources repeated");
   }
+  let approvedPlan: VaultRunConfig["approvedPlan"];
+  if (row.approvedPlan !== undefined) {
+    const plan = object(row.approvedPlan);
+    if (!plan || Object.keys(plan).length !== 2 || typeof plan.requestId !== "string" ||
+        !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(plan.requestId))
+      throw new Error("Approved Task plan identity invalid");
+    approvedPlan = { proofDirectory: path(plan.proofDirectory, "approvedPlan.proofDirectory"), requestId: plan.requestId };
+  }
   return { executable: path(row.executable, "executable"),
     checkout: path(row.checkout, "checkout"), vault: path(row.vault, "vault"),
     snapshot: path(row.snapshot, "snapshot"), outputDir: path(row.outputDir, "outputDir"),
     schedulerPath: path(row.schedulerPath, "schedulerPath"),
     runId: label(row.runId, "runId"), astra: role(row.astra, "astra"),
-    sol: role(row.sol, "sol"), verification, resources };
+    sol: role(row.sol, "sol"), verification, resources, ...(approvedPlan ? { approvedPlan } : {}) };
 }
 
 /** A CLI run can only claim mechanical coverage for explicitly mapped contract checks. */

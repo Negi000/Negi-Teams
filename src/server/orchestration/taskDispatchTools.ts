@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import type { CodexDynamicToolCall, CodexDynamicToolDefinition, CodexDynamicToolResult } from "../master/appServerClient.ts";
 import type { LocalTaskService, TaskRunView, TaskRequestOrigin } from "./taskService.ts";
 import type { TaskResultContext } from "./taskResults.ts";
+import type { LocalTaskAuthoringService } from "./taskAuthoring.ts";
 
 const runId = { type: "string", pattern: "^[a-zA-Z0-9._-]{1,100}$" };
 const configHash = { type: "string", pattern: "^[a-f0-9]{64}$" };
@@ -18,10 +19,27 @@ const definitions = [
   definition("negi_dispatch_task", "登録済みの固定TaskだけをUIと同じschedulerへ委任する。契約、担当モデル、checkout、検証条件を変更しない。結果不明時は再委任せず現在のTaskを読む。", {
     run_id: runId, config_sha256: configHash }, ["run_id", "config_sha256"]),
 ];
+const planText = { type:"string", minLength:1, maxLength:300 };
+const planList = { type:"array", minItems:1, maxItems:20, items:planText };
+const authoringDefinitions = [
+  definition("negi_list_projects", "新しい独立Taskを作れる、利用者設定済みプロジェクトと実行条件を読む。保存先・コマンド・モデル・権限は変更できない。", {}, []),
+  definition("negi_read_project", "契約案を作る前に必須仕様と指定した参照の全文・版・hashを読む。未確認の仕様や依存Taskを推測せず、独立Taskだけを計画する。", {
+    profile_id:runId, reference_ids:{type:"array",maxItems:50,items:runId} },["profile_id"]),
+  definition("negi_propose_task", "利用者の新しい依頼について、読んだ仕様に基づく短い契約案とSolへの実行計画を保存する。実装・Vault active化・worktree作成・成果受入は行わない。契約画面URLを利用者に案内する。依存Taskが必要なら案を作らずその依存を解決する。", {
+    profile_id:runId, task:{type:"object",additionalProperties:false,properties:{
+      title:{type:"string",minLength:1,maxLength:160},objective:{type:"string",minLength:1,maxLength:2000},
+      inScope:planList,outOfScope:planList,allowedPaths:planList,invariants:planList,acceptance:planList,escalation:planList,
+      implementationPlan:{...planList,items:{type:"string",minLength:1,maxLength:500}},
+      references:{type:"array",minItems:1,maxItems:50,items:{type:"object",additionalProperties:false,properties:{id:runId,
+        version:{type:"integer",minimum:1},sha256:configHash},required:["id","version","sha256"]}},
+      maxAttempts:{type:"integer",minimum:1,maximum:3},timeLimitMinutes:{type:"integer",minimum:1,maximum:480}},
+      required:["title","objective","inScope","outOfScope","allowedPaths","invariants","acceptance","escalation","implementationPlan","references","maxAttempts","timeLimitMinutes"]} },["profile_id","task"]),
+];
 export interface RegisteredTaskTools {
   definitions: CodexDynamicToolDefinition[];
   invoke(call: CodexDynamicToolCall): Promise<CodexDynamicToolResult>;
   prepareResultContext?: (threadId: string, input: string) => Promise<TaskResultContext | null>;
+  authoring?: boolean;
 }
 function argumentsObject(value: unknown, allowed: string[]): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value) ||
@@ -44,16 +62,30 @@ function requestUuid(origin: TaskRequestOrigin): string {
   const hex = bytes.toString("hex");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
-export function registeredTaskTools(service: LocalTaskService, masterId: string): RegisteredTaskTools {
+export function registeredTaskTools(service: LocalTaskService, masterId: string,
+  authoring?: { service:LocalTaskAuthoringService; planner:{model:string;effort:string} }): RegisteredTaskTools {
   if (!/^[a-zA-Z0-9._-]{1,100}$/.test(masterId)) throw new Error("Task planner identity invalid");
-  return { definitions: structuredClone(definitions),
+  return { definitions: structuredClone([...definitions,...(authoring?authoringDefinitions:[])]), ...(authoring?{authoring:true}:{}),
     prepareResultContext: (threadId, input) => service.prepareResultContext(masterId, threadId, input), async invoke(call) {
     try {
       const origin: TaskRequestOrigin = { kind: "master", masterId, threadId: call.threadId, turnId: call.turnId, callId: call.callId };
       if (![call.threadId, call.turnId, call.callId].every(id => typeof id === "string" && id.length > 0 && id.length <= 200 && !/[\r\n\0]/.test(id)))
         throw new Error("Planner call identity invalid");
       let value: unknown;
-      if (call.tool === "negi_list_task_results") {
+      if (authoring && call.tool === "negi_list_projects") {
+        argumentsObject(call.arguments,[]); value = { projects:authoring.service.listProfiles() };
+      } else if (authoring && ["negi_read_project","negi_propose_task"].includes(call.tool)) {
+        const args=argumentsObject(call.arguments,call.tool==="negi_read_project"?["profile_id","reference_ids"]:["profile_id","task"]);
+        if (typeof args.profile_id!=="string" || !/^[a-zA-Z0-9._-]{1,100}$/.test(args.profile_id)) throw new Error("Project profile identity invalid");
+        if (call.tool==="negi_read_project") {
+          if (args.reference_ids!==undefined && (!Array.isArray(args.reference_ids) || args.reference_ids.some(id=>typeof id!=="string"))) throw new Error("Project references invalid");
+          value=await authoring.service.readProject(args.profile_id,args.reference_ids as string[]|undefined);
+        } else {
+          const draft=await authoring.service.propose(args.profile_id,args.task,{...origin,...authoring.planner});
+          value={draftId:draft.id,title:draft.title,hash:draft.hash,status:draft.status,
+            url:`/task-plans?draft=${draft.id}`,executionStarted:false,humanConfirmationRequired:true};
+        }
+      } else if (call.tool === "negi_list_task_results") {
         argumentsObject(call.arguments, []);
         value = { notifications: (await service.resultNotifications()).filter(n => n.origin.kind === "master" &&
           n.origin.masterId === masterId && n.origin.threadId === call.threadId).slice(0, 8), frozenAtNotification: true };
@@ -79,11 +111,11 @@ export function registeredTaskTools(service: LocalTaskService, masterId: string)
         } else throw new Error("Task tool not registered");
       }
       const text = JSON.stringify(value);
-      if (Buffer.byteLength(text) > 24_000) throw new Error("Complete Task response exceeds tool limit");
+      if (Buffer.byteLength(text) > (call.tool==="negi_read_project"?64_000:24_000)) throw new Error("Complete Task response exceeds tool limit");
       return { success: true, text };
     } catch {
       return { success: false, text: JSON.stringify({ error: "Taskの契約・版・現在の状態を照合できません。再委任せずTask画面で確認してください。",
-        nextTool: "negi_read_task", noAutomaticRetry: true }) };
+        nextTool: call.tool.includes("project")||call.tool==="negi_propose_task" ? "negi_read_project" : "negi_read_task", noAutomaticRetry: true }) };
     }
   } };
 }

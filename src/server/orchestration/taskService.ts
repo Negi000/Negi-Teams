@@ -217,6 +217,51 @@ export class LocalTaskService {
   }
   /** Complete pinned Task Contract; provider launch and verification commands stay server-owned. */
   dispatchContract(id: string): Record<string, unknown> { return structuredClone(this.registered(id).contract); }
+  /** Trusted server authoring configuration only. Never exposed as an HTTP/model tool. */
+  authoringTemplate(id: string): { config: VaultRunConfig; contract: Record<string, unknown> } {
+    const run = this.registered(id);
+    return { config: structuredClone(run.config), contract: structuredClone(run.contract) };
+  }
+  /** Recovered signed authoring outputs join the same catalog and scheduler. No dispatch. */
+  async registerAuthoredRun(title: string, raw: VaultRunConfig): Promise<void> {
+    if (this.closing || !title.trim() || title.length > 200 || !raw.approvedPlan) throw new Error("Authored Task registration invalid");
+    const config = parseVaultRunConfig(raw);
+    config.checkout = await realpath(config.checkout); config.vault = await realpath(config.vault);
+    config.outputDir = await localDestination(config.outputDir, true);
+    config.schedulerPath = await localDestination(config.schedulerPath, false);
+    if (config.schedulerPath.toLowerCase() !== this.runs[0].config.schedulerPath.toLowerCase())
+      throw new Error("Authored Task must use the shared scheduler");
+    // A recovered result may already have a dirty checkout or changed Vault.
+    // Registration restores visibility only; normal start/review preflight checks freshness.
+    const contract = await readJson(config.snapshot) as import("./vaultTaskContract.ts").VaultTaskContract;
+    if (!contract || contract.schemaVersion !== "negi-task-contract/1") throw new Error("Authored Task snapshot invalid");
+    const { loadApprovedTaskPlan } = await import("./approvedTaskPlan.ts");
+    await loadApprovedTaskPlan(config, contract);
+    assertVerificationCoverage(contract.verification, config.verification);
+    await assertVaultRunOutputPaths(config);
+    const snapshotSha256 = hash(await readFile(config.snapshot));
+    const candidate: CatalogRun = { title, config, snapshotSha256, contract: contract as unknown as Record<string, unknown>,
+      configSha256: hash(JSON.stringify({ config, snapshotSha256 })) };
+    const existing = this.runs.find(run => run.config.runId === config.runId);
+    if (existing) {
+      if (existing.configSha256 !== candidate.configSha256 || existing.title !== title)
+        throw new Error("Authored Task registration conflicts with current catalog");
+      return;
+    }
+    if (this.runs.length >= 100) throw new Error("Task catalog limit reached");
+    for (const run of [...this.runs, candidate]) {
+      for (const target of [this.root, config.snapshot, config.outputDir, config.schedulerPath, config.approvedPlan!.proofDirectory])
+        if (inside(run.config.checkout, target) || inside(run.config.vault, target)) throw new Error("Authored Task storage overlaps a writable root");
+      for (const target of [run.config.outputDir, run.config.snapshot, run.config.schedulerPath, this.root])
+        if (inside(config.checkout, target) || inside(config.vault, target)) throw new Error("New Task root overlaps catalog evidence");
+      if (run !== candidate && (inside(run.config.outputDir, config.outputDir) || inside(config.outputDir, run.config.outputDir)))
+        throw new Error("Authored Task output must be distinct");
+    }
+    await this.reviews?.registerWritableRoots([config.checkout]);
+    // Re-check after asynchronous validation: concurrent registration cannot duplicate an ID.
+    if (this.runs.some(run => run.config.runId === config.runId)) throw new Error("Concurrent Task registration; inspect current catalog");
+    this.runs.push(candidate);
+  }
   /** Server configuration only; neither paths nor scope are supplied by HTTP. */
   knowledgeRegistrations(): Array<{ vault: string; project: string; checkout: string }> {
     return this.runs.map((run) => ({ vault: run.config.vault,

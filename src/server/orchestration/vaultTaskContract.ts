@@ -42,9 +42,16 @@ function plainPath(path: string): boolean {
     !path.includes(":") && !path.split("/").some((part) => !part || part === "." || part === "..");
 }
 function frontmatterField(data: string, key: string): string | null {
-  const front = data.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)?.[1];
+  const front = data.match(/^\uFEFF?---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)?.[1];
   if (!front) return null;
-  return front.match(new RegExp(`^${key}:\\s*(.*?)\\r?$`, "m"))?.[1] ?? null;
+  const raw = front.match(new RegExp(`^${key}:[ \\t]*(.*?)\\r?$`, "m"))?.[1]?.trim();
+  if (raw === undefined) return null;
+  // Match the Vault compiler's supported scalar strings, including server-authored notes.
+  if (raw.startsWith('"')) {
+    try { const value:unknown=JSON.parse(raw);return typeof value==="string"?value:null; } catch { return null; }
+  }
+  if (raw.startsWith("'")&&raw.endsWith("'")&&raw.length>=2) return raw.slice(1,-1).replaceAll("''","'");
+  return raw;
 }
 
 interface CheckoutState { head: string; dirty: boolean }

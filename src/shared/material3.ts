@@ -100,7 +100,7 @@ export const material3Styles = String.raw`
 .negi-ui .md-section-heading { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:16px }
 .negi-ui .md-section-heading h2 { margin:0 }
 .negi-ui .md-section-heading a { font-size:13px; white-space:nowrap }
-.negi-ui .md-chip { display:inline-flex; align-items:center; gap:6px; border-radius:8px; padding:4px 10px; font-size:12px; font-weight:650; line-height:1.5; background:var(--md-surface-high); color:var(--md-on-surface-variant) }
+.negi-ui .md-chip { display:inline-flex; align-items:center; gap:6px; max-width:100%; overflow-wrap:anywhere; border-radius:8px; padding:4px 10px; font-size:12px; font-weight:650; line-height:1.5; background:var(--md-surface-high); color:var(--md-on-surface-variant) }
 .negi-ui .md-chip-success { background:var(--md-primary-container); color:var(--md-on-primary-container) }
 .negi-ui .md-chip-warning { background:var(--md-warning-container); color:var(--md-warning) }
 .negi-ui .md-chip-error { background:var(--md-error-container); color:var(--md-error) }
@@ -138,6 +138,7 @@ export const material3Styles = String.raw`
 .negi-ui .md-detail-header #objective { font-size:15px; color:var(--md-on-surface-variant) }
 .negi-ui .md-contract-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:24px }
 .negi-ui .md-contract-grid li { margin:8px 0; overflow-wrap:anywhere }
+.negi-ui li { overflow-wrap:anywhere }
 .negi-ui .md-contract-grid ul { margin:0; padding-left:20px }
 .negi-ui .md-key-values { display:grid; grid-template-columns:120px minmax(0,1fr); gap:8px 16px; margin:0 }
 .negi-ui .md-key-values dt { color:var(--md-on-surface-variant); font-size:13px }

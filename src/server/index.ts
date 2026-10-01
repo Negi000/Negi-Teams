@@ -66,6 +66,8 @@ import { createKnowledgeHttp } from "./orchestration/knowledgeHttp.ts";
 import { LocalIntegrationReviewService } from "./orchestration/integrationReviewService.ts";
 import { LocalTaskService } from "./orchestration/taskService.ts";
 import { createTaskHttp } from "./orchestration/taskHttp.ts";
+import { LocalTaskAuthoringService } from "./orchestration/taskAuthoring.ts";
+import { createTaskAuthoringHttp } from "./orchestration/taskAuthoringHttp.ts";
 import { ChatAttachmentStore, MAX_ATTACHMENTS_PER_TURN } from "./chatAttachments.ts";
 import { shareChatImage } from "./chatImages.ts";
 import { configureFixedEbiLog, fixedEbiLogPath, logFixedEbi } from "./fixedEbiLog.ts";
@@ -127,8 +129,16 @@ if (taskConfigPath) {
   if (bytes.length > 256_000) throw new Error("Task config exceeds local size limit");
   taskService = await LocalTaskService.open(JSON.parse(bytes.toString("utf8")));
 }
-const taskApi = createTaskHttp(taskService, authConfig);
 if (taskService && reviewService) await taskService.connectReviews(reviewService);
+let taskAuthoringService:LocalTaskAuthoringService|null=null;
+if(process.env.NEGI_TASK_AUTHORING_CONFIG){
+  const path=process.env.NEGI_TASK_AUTHORING_CONFIG;
+  if(!isAbsolute(path)||!authConfig.token||!taskService)throw new Error("Task authoring requires an absolute config path and authenticated Task service");
+  const bytes=await readFile(path);if(bytes.length>256000)throw new Error("Task authoring config exceeds local size limit");
+  taskAuthoringService=await LocalTaskAuthoringService.open(JSON.parse(bytes.toString("utf8")),taskService);
+}
+const taskAuthoringApi=createTaskAuthoringHttp(taskAuthoringService,authConfig);
+const taskApi=createTaskHttp(taskService,authConfig,taskAuthoringService!==null);
 const integrationConfigPath = process.env.NEGI_INTEGRATION_CONFIG;
 let integrationReviewService: LocalIntegrationReviewService | null = null;
 if (integrationConfigPath) {
@@ -473,7 +483,8 @@ async function startMasterChatSession(spec: FixedEbiSpec): Promise<void> {
     logPath: MASTER_CHAT_LOG_PATH,
     ...(codexReadOnly ? { createBrain: () => new CodexAppServerBrain({ ...codexReadOnly,
       admission: taskService!.masterTurnAdmission(spec.id),
-      ...(taskService ? { taskTools: registeredTaskTools(taskService, spec.id) } : {}) }) } : {}),
+      ...(taskService ? { taskTools: registeredTaskTools(taskService, spec.id,taskAuthoringService?{
+        service:taskAuthoringService,planner:{model:spec.launch.model??"",effort:codexReadOnly.effort}}:undefined) } : {}) }) } : {}),
     handlers: {
       onEvent: (id, envelope) => {
         broadcast({ type: "chatEvent", id, seq: envelope.seq, ts: envelope.ts, event: envelope.event });
@@ -838,6 +849,7 @@ const httpServer = createServer(async (req, res) => {
   // Reviews require an authenticated browser cookie, even on loopback.
   if (await reviewApi(req, res, url)) return;
   if (await knowledgeApi(req, res, url)) return;
+  if (await taskAuthoringApi(req, res, url)) return;
   if (await taskApi(req, res, url)) return;
 
   // ---- 認証ゲート（loopback は常に素通り／非 loopback は token 必須）----
@@ -902,7 +914,7 @@ const wss = new WebSocketServer({
 wss.on("connection", (ws) => {
   clients.add(ws);
   // 接続直後にサーバ能力（監督が有効か）を送る。クライアントはこれで要約 UI の出し分けをする。
-  send(ws, { type: "capabilities", supervisor: supervisor.enabled, reviews: reviewService !== null, tasks: taskService !== null });
+  send(ws, { type: "capabilities", supervisor: supervisor.enabled, reviews: reviewService !== null, tasks: taskService !== null,taskAuthoring:taskAuthoringService!==null });
   // master が ui:"chat" なら、registry より**先に** state と直近の会話を送る。
   // クライアントは「chatState を受けた id＝chat モードの master」と判定して xterm ペインを
   // 作らない分岐に入るので、registry を先に送ると一瞬だけ PTY ペインが生えてしまう。

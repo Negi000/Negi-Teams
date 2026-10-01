@@ -266,7 +266,7 @@ function handleServerMessage(msg: ServerMessage): void {
       document.getElementById("nav-review")!.setAttribute("aria-disabled", String(!msg.reviews));
       document.getElementById("nav-task")!.setAttribute("aria-disabled", String(!msg.tasks));
       for (const [id, available] of [["nav-review", msg.reviews], ["nav-task", msg.tasks]] as const) document.getElementById(id)!.tabIndex = available ? 0 : -1;
-      workbench.setCapabilities({ tasks: Boolean(msg.tasks), reviews: Boolean(msg.reviews) });
+      workbench.setCapabilities({ tasks: Boolean(msg.tasks), reviews: Boolean(msg.reviews),taskAuthoring:Boolean(msg.taskAuthoring) });
       // サーバ能力に応じて要約 UI の有無を切り替える。
       // 既存ペインは再生成して要約ボタンの有無を反映する（接続/再接続時のみ・低頻度）。
       if (msg.supervisor !== supervisorEnabled) {

@@ -1,7 +1,7 @@
 import { negiPageStart } from "../../shared/material3.ts";
 
-export function taskPageHtml(): string {
-  return negiPageStart("Task実行", "task") + String.raw`
+export function taskPageHtml(authoring=false): string {
+  return negiPageStart("Task実行", "task") + (authoring?'<div class="md-actions"><a class="md-button md-tonal" href="/task-plans">新しいTask・契約案を確認</a></div>':"") + String.raw`
 <div class="md-page-heading"><div><div class="md-eyebrow">TASKS</div><h1>Task実行</h1><p>契約を確認して開始。現在地と成果を追跡します。</p></div><button id="refresh" class="md-icon-button" aria-label="状態を更新" title="状態を更新">↻</button></div>
 <section class="md-surface md-section" aria-labelledby="capacity-title"><div class="md-section-heading"><h2 id="capacity-title">実行枠</h2><span class="md-chip">全プロジェクト</span></div><div id="capacity" class="md-actions" role="status" aria-live="polite"></div><p id="capacity-note" class="muted">状態を確認中…</p></section>
 <div class="md-compact-picker"><label for="runs">作業を切り替え<select id="runs"></select></label></div>

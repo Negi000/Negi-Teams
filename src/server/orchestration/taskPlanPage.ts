@@ -1,0 +1,37 @@
+import { negiPageStart } from "../../shared/material3.ts";
+
+export function taskPlanPageHtml(): string {
+  return negiPageStart("新しいTask", "task") + String.raw`
+<div class="md-page-heading"><div><div class="md-eyebrow">NEW TASK</div><h1>新しいTask</h1><p>統括が作った契約案を確認し、作業へ渡します。</p></div><button id="refresh" class="md-icon-button" aria-label="契約案を更新" title="契約案を更新">↻</button></div>
+<section class="md-surface md-surface-tonal"><div class="md-section-heading"><h2>まず、目的を統括へ</h2><a class="md-button md-primary" href="/?view=workspace">統括に依頼する</a></div><p>プロジェクト名と実現したいことを伝えてください。契約案はここに届きます。</p><div id="profiles" class="md-actions"></div></section>
+<p id="error" class="md-message" role="alert"></p>
+<div class="md-compact-picker md-section"><label for="drafts">契約案を切り替え<select id="drafts"></select></label></div>
+<div id="empty" class="md-empty md-section" hidden><strong>契約案はまだありません</strong>統括に依頼を送ると、目的・変更範囲・受入条件を整理した案が表示されます。</div>
+<div class="md-list-detail md-section"><aside class="md-list-pane" aria-label="契約案一覧"><h2>契約案</h2><div id="draft-list" class="md-list"></div></aside>
+<article id="detail" class="md-detail" hidden><div class="md-detail-header"><span id="project" class="md-chip"></span><h2 id="title"></h2><p id="objective"></p></div>
+<section class="md-surface md-surface-tertiary"><div class="md-section-heading"><h2>作業へ渡す</h2><span id="state" class="md-chip"></span></div><p id="state-copy" role="status" aria-live="polite"></p>
+<div class="md-actions"><button id="finalize" class="md-primary" disabled>この契約を確定</button><a id="task-link" class="md-button md-primary" hidden>実行するTaskを開く</a></div>
+<p class="muted">確定すると、この契約を保存して専用の作業場所を準備します。実行はTask画面から開始できます。</p></section>
+<section class="md-surface md-section"><h2>今回の契約</h2><div class="md-contract-grid"><div><h3>対象</h3><ul id="inScope"></ul></div><div><h3>対象外</h3><ul id="outOfScope"></ul></div><div><h3>変更可能な範囲</h3><ul id="allowedPaths"></ul></div><div><h3>保つべき条件</h3><ul id="invariants"></ul></div><div><h3>受入条件</h3><ul id="acceptance"></ul></div><div><h3>必要な検証</h3><ul id="verification"></ul></div><div><h3>統括に戻す条件</h3><ul id="escalation"></ul></div></div></section>
+<section class="md-surface md-section"><h2>Solへの実行計画</h2><ol id="plan"></ol><p>このTaskは独立して実行します。先行Taskが必要な場合は、統括へ伝えてください。</p></section>
+<details class="md-section"><summary>担当・制限・参照の版</summary><section class="md-surface"><dl id="metadata" class="md-key-values"></dl><h3>参照仕様</h3><ul id="sources"></ul></section></details>
+<p class="muted">修正したい内容は統括へ伝えてください。新しい案を確認してから確定できます。</p></article></div></main></div>
+<script>
+const $=id=>document.getElementById(id);let rows=[],selected=null,busy=false;
+const labels={draft:'契約の確認待ち',registered:'契約確定',attention:'確認が必要'};
+async function api(path,opts){const response=await fetch(path,Object.assign({credentials:'same-origin'},opts));if(response.status===401){location.href='/login?returnTo=/task-plans';throw Error('ログインが必要です')}const value=await response.json();if(!response.ok)throw Error(value.error||'状態を取得できません');return value}
+function list(id,values){$(id).replaceChildren();for(const text of values){const li=document.createElement('li');li.textContent=text;$(id).append(li)}}
+function uuid(){const b=new Uint8Array(16);crypto.getRandomValues(b);b[6]=(b[6]&15)|64;b[8]=(b[8]&63)|128;const h=Array.from(b,v=>v.toString(16).padStart(2,'0')).join('');return h.slice(0,8)+'-'+h.slice(8,12)+'-'+h.slice(12,16)+'-'+h.slice(16,20)+'-'+h.slice(20)}
+function render(){const v=rows.find(r=>r.id===selected);$('detail').hidden=!v;$('finalize').disabled=true;$('drafts').disabled=busy||!rows.length;$('refresh').disabled=busy;for(const b of $('draft-list').querySelectorAll('button')){b.disabled=busy;b.setAttribute('aria-current',String(b.dataset.id===selected))}if(!v)return;
+$('project').textContent=v.project;$('title').textContent=v.title;$('objective').textContent=v.fields.objective;$('state').textContent=labels[v.status]||v.status;$('state').className='md-chip '+(v.status==='attention'?'md-chip-warning':v.status==='registered'?'md-chip-success':'');
+$('state-copy').textContent=v.error||(v.status==='registered'?'契約と専用の作業場所を準備しました。Task画面で現在の作業を確認できます。':'目的・変更範囲・受入条件を確認してください。');$('finalize').hidden=v.status==='registered';$('finalize').disabled=busy||!v.canFinalize;$('task-link').hidden=v.status!=='registered';$('task-link').href='/tasks?run='+encodeURIComponent(v.runId||'');
+for(const key of ['inScope','outOfScope','allowedPaths','invariants','acceptance','escalation'])list(key,v.fields[key]);list('verification',v.verification);list('plan',v.fields.implementationPlan);list('sources',v.sources.map(s=>s.id+' v'+s.version+' · '+s.sha256));
+$('metadata').replaceChildren();for(const [name,value] of [['計画',v.planner.model+' / '+v.planner.effort],['実装',v.worker.model+' / '+v.worker.effort],['制限',v.fields.timeLimitMinutes+'分・最大試行 '+v.fields.maxAttempts+'回（自動再試行なし）'],['基準SHA',v.baseSha],['契約案',v.id],['起動元の統括',v.origin.masterId]]){const dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=name;dd.textContent=value;$('metadata').append(dt,dd)}}
+function select(id,update=true){selected=id;$('drafts').value=id||'';if(update){const url=new URL(location.href);if(id)url.searchParams.set('draft',id);else url.searchParams.delete('draft');history.replaceState({},'',url)}render()}
+async function load(){if(busy)return;busy=true;render();try{const values=await Promise.all([api('/api/task-plans'),api('/api/task-plans/profiles')]);rows=values[0];$('profiles').replaceChildren();for(const p of values[1]){const chip=document.createElement('span');chip.className='md-chip';chip.textContent=p.title+' · '+p.project;$('profiles').append(chip)}
+$('drafts').replaceChildren();$('draft-list').replaceChildren();for(const v of rows){const option=document.createElement('option');option.value=v.id;option.textContent=v.title;$('drafts').append(option);const b=document.createElement('button'),copy=document.createElement('span'),title=document.createElement('strong'),status=document.createElement('small');b.className='md-list-item';b.dataset.id=v.id;copy.className='md-list-copy';title.textContent=v.title;status.textContent=v.project+' · '+labels[v.status];copy.append(title,status);b.append(copy);b.onclick=()=>select(v.id);$('draft-list').append(b)}
+$('empty').hidden=!!rows.length;const requested=new URLSearchParams(location.search).get('draft');if(requested&&!rows.some(v=>v.id===requested)){selected=null;$('error').textContent='指定した契約案が見つかりません。一覧から選んでください。';$('drafts').selectedIndex=-1}else{select(requested||selected||rows[0]?.id,false);$('error').textContent=''}}catch(e){rows=[];selected=null;$('error').textContent=e.message;$('draft-list').replaceChildren();$('drafts').replaceChildren();$('empty').hidden=true}finally{busy=false;render()}}
+$('finalize').onclick=async()=>{const v=rows.find(r=>r.id===selected);if(!v||busy||!v.canFinalize)return;busy=true;render();try{const result=await api('/api/task-plans/'+encodeURIComponent(v.id)+'/finalize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({expectedHash:v.hash,requestId:uuid()})});rows=rows.map(r=>r.id===result.id?result:r);$('error').textContent=''}catch(e){$('error').textContent=e.message;v.canFinalize=false;v.error='確定処理の現在の状態を更新して確認してください。'}finally{busy=false;render()}};
+$('refresh').onclick=load;$('drafts').onchange=()=>select($('drafts').value);window.addEventListener('popstate',()=>select(new URLSearchParams(location.search).get('draft')||rows[0]?.id,false));void load();
+</script></body></html>`;
+}

@@ -5,6 +5,7 @@ import { mkdir, open } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { CodexAppServerClient, CodexThreadIdentity, CodexTurnObservation } from "../master/appServerClient.ts";
 import { FileTaskLedger, type AttemptUsage, type ContractRef, type TaskAction, type TaskSnapshot, type TaskRole } from "./singleTask.ts";
+import type { ApprovedTaskPlan } from "./approvedTaskPlan.ts";
 
 export interface SingleTaskClient {
   initialize: CodexAppServerClient["initialize"];
@@ -27,6 +28,7 @@ export interface SingleTaskRunOptions {
   deadlineAtMs?: number;
   beforeSol?: () => Promise<void>;
   astraContext?: string;
+  approvedPlan?: ApprovedTaskPlan;
   solContext?: string;
   expectedModelProvider?: string;
   onProviderBound?: (data: { role: TaskRole; attemptId: string; threadId: string; turnId: string }) => Promise<void>;
@@ -110,7 +112,10 @@ export async function runSingleTask(options: SingleTaskRunOptions): Promise<Task
   // An interrupted prior run is never silently restarted. The caller must inspect
   // its stored attempt/provider IDs and reconcile it first.
   if (existing.state !== null) throw new Error("run ledger already exists; inspect before resuming");
-  await append({ type: "create", runId: options.runId, contract: options.contract });
+  const pinnedContract = { ...options.contract, ...(options.approvedPlan ? { approvedPlan: {
+    approvalRef: options.approvedPlan.approvalRef, threadId: options.approvedPlan.threadId,
+    turnId: options.approvedPlan.turnId, callId: options.approvedPlan.callId } } : {}) };
+  await append({ type: "create", runId: options.runId, contract: pinnedContract });
   if (expired()) return append({ type: "stop", reason: "Task time limit expired before planning" });
 
   async function attempt(role: "astra" | "sol", settings: SingleTaskRunOptions["astra"],
@@ -191,9 +196,14 @@ export async function runSingleTask(options: SingleTaskRunOptions): Promise<Task
     return { state, text: result.finalText, ref };
   }
 
-  const plan = await attempt("astra", options.astra,
-    promptForAstra(options.contract, options.astraContext));
-  if (plan.state.status !== "ready_for_worker" || !plan.text || !plan.ref) return plan.state;
+  const plan = options.approvedPlan ? {
+    text: options.approvedPlan.text,
+    ref: await writeArtifact(out, `${options.runId}-approved-plan`, options.approvedPlan.text),
+    state: null as TaskSnapshot | null,
+  } : await attempt("astra", options.astra, promptForAstra(options.contract, options.astraContext));
+  if (options.approvedPlan) plan.state = await append({ type: "adopt_approved_plan",
+    approvalRef: options.approvedPlan.approvalRef, outputRef: plan.ref! });
+  if (!plan.state || plan.state.status !== "ready_for_worker" || !plan.text || !plan.ref) return plan.state!;
   if (plan.text.length > 20_000) {
     return append({ type: "stop", reason: "Astra plan exceeds the single-task handoff limit" });
   }

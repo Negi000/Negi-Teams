@@ -996,7 +996,7 @@ function buildItem(
       const sum = document.createElement("summary");
       const icon = item.state === "running" ? "⏳" : item.state === "ok" ? "✅" : "❌";
       const taskLabel = ({ negi_list_task_results: "Task結果を確認", negi_list_tasks: "Task一覧を取得", negi_read_task: "Task契約を確認",
-        negi_dispatch_task: "Taskを委任" } as Record<string, string>)[item.name];
+        negi_dispatch_task: "Taskを委任",negi_list_projects:"プロジェクトを確認",negi_read_project:"仕様と参照を読む",negi_propose_task:"契約案を作成" } as Record<string, string>)[item.name];
       sum.textContent = taskLabel ? `${taskLabel} ${icon}` : `🔧 ${item.name} ${icon} ${summarizeToolInput(item.input)}`.trimEnd();
       det.appendChild(sum);
       if (taskLabel) {
@@ -1018,6 +1018,15 @@ function buildItem(
         det.appendChild(pre);
       }
       row.appendChild(det);
+      if(item.name==="negi_propose_task"&&item.state==="ok"&&item.result){
+        try{const result=JSON.parse(item.result) as {draftId?:string;title?:string};
+          if(result.draftId&&/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(result.draftId)){
+            const card=div("md-surface md-surface-tertiary"),title=document.createElement("strong"),copy=document.createElement("p"),link=document.createElement("a");
+            title.textContent=result.title||"新しいTaskの契約案";copy.textContent="契約案を保存しました。内容を確認してから作業へ渡せます。";
+            link.className="md-button md-primary";link.href="/task-plans?draft="+result.draftId;link.textContent="この契約案を確認";card.append(title,copy,link);row.append(card);
+          }
+        }catch{/* tool evidence remains visible without a fabricated link */}
+      }
       return row;
     }
     case "pending": {

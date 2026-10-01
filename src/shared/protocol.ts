@@ -369,6 +369,7 @@ export interface CapabilitiesMessage {
   reviews?: boolean;
   /** Fixed Vault Task Contract execution is configured. */
   tasks?: boolean;
+  taskAuthoring?: boolean;
 }
 
 /** ダッシュボード: エビ 1 体分の使用状況（cost/context/model）。 */

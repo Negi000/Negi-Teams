@@ -13,10 +13,11 @@ import { runScheduledVaultTask } from "./scheduledVaultRun.ts";
 import { changedGitPaths, loadVaultTaskContract, pathsOutsideScope,
   runSingleTaskFromVault, type VaultTaskContract } from "./vaultTaskContract.ts";
 import { assertVaultRunOutputPaths, assertVerificationCoverage, type VaultRunConfig } from "./vaultRunConfig.ts";
+import { loadApprovedTaskPlan, type ApprovedTaskPlan } from "./approvedTaskPlan.ts";
 
 const exec = promisify(execFile);
 const hash = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
-export interface PreparedVaultRun { config: VaultRunConfig; contract: VaultTaskContract }
+export interface PreparedVaultRun { config: VaultRunConfig; contract: VaultTaskContract; approvedPlan?: ApprovedTaskPlan }
 export interface TaskOperationApproval {
   id: string; attemptId: string; threadId: string; turnId: string;
   operation: string; target: string; expiresAt: string;
@@ -41,7 +42,8 @@ export async function prepareVaultRun(raw: VaultRunConfig): Promise<PreparedVaul
   const contract = await loadVaultTaskContract(config.vault, config.snapshot, config.checkout);
   assertVerificationCoverage(contract.verification, config.verification);
   await assertVaultRunOutputPaths(config);
-  return { config, contract };
+  const approvedPlan = await loadApprovedTaskPlan(config, contract);
+  return { config, contract, ...(approvedPlan ? { approvedPlan } : {}) };
 }
 
 export async function submitVaultRun(prepared: PreparedVaultRun, scheduler: FileScheduler): Promise<void> {
@@ -53,7 +55,7 @@ export async function submitVaultRun(prepared: PreparedVaultRun, scheduler: File
   await scheduler.append({ key: `${config.runId}:submit`, at: new Date().toISOString(),
     action: { type: "submit", work: { id: config.runId, parentId: null, dependencies: [],
       role: "sol", checkout: config.checkout, checkoutMode: "write",
-      execution: "astra_to_sol",
+      execution: config.approvedPlan ? "direct" : "astra_to_sol",
       resources: config.resources.map((name) => ({ name, mode: "write" as const })), reserveUsd: 0 } } });
 }
 
@@ -107,13 +109,14 @@ export async function executeVaultRun(prepared: PreparedVaultRun, scheduler: Fil
       turnTimeoutMs: Math.min(600_000, contract.limits.timeLimitMinutes * 60_000),
       deadlineAtMs,
       astra: { client: null as never, ...config.astra }, sol: { client: null as never, ...config.sol },
+      ...(prepared.approvedPlan ? { approvedPlan: prepared.approvedPlan } : {}),
       verify: () => verifyVaultRun(prepared, signal) },
     execute: async (options) => {
       if (signal?.aborted) throw new Error("Run stopped before provider dispatch");
       const bindings = new Map<TaskRole, { attemptId: string; threadId: string; turnId: string }>();
       const queued: Array<{ role: TaskRole; request: CodexApprovalRequest }> = [];
       let approvalJobs: Promise<void> = Promise.resolve();
-      let astra: AppServerProcess;
+      let astra: AppServerProcess | null = null;
       let sol: AppServerProcess | null = null;
       const register = async (role: TaskRole, request: CodexApprovalRequest) => {
         const provider = role === "astra" ? astra : sol;
@@ -147,16 +150,16 @@ export async function executeVaultRun(prepared: PreparedVaultRun, scheduler: Fil
           try { provider?.client.answerApproval(request, false); } catch { /* provider may be gone */ }
         });
       } : undefined;
-      astra = AppServerProcess.launch({ executable: config.executable,
+      if (!prepared.approvedPlan) astra = AppServerProcess.launch({ executable: config.executable,
         args: boundedAppServerArgs(true), env: subscriptionChildEnv(), cwd: config.checkout,
         client: { transportTimeoutMs: 20_000, onApproval: onApproval("astra") } });
-      const stop = () => { void astra.stop(); if (sol) void sol.stop(); };
+      const stop = () => { if (astra) void astra.stop(); if (sol) void sol.stop(); };
       signal?.addEventListener("abort", stop, { once: true });
       try {
         sol = AppServerProcess.launch({ executable: config.executable,
           args: boundedAppServerArgs(true), env: subscriptionChildEnv(), cwd: config.checkout,
           client: { transportTimeoutMs: 20_000, onApproval: onApproval("sol") } });
-        for (const provider of [astra, sol]) {
+        for (const provider of [...(astra ? [astra] : []), sol]) {
           await provider.client.initialize();
           const account = await provider.client.readAccountMode();
           if (account.type !== "chatgpt" || !account.requiresOpenaiAuth)
@@ -164,7 +167,7 @@ export async function executeVaultRun(prepared: PreparedVaultRun, scheduler: Fil
         }
         return await runSingleTaskFromVault({ ...options,
           knowledgeProofDirectory: hooks?.knowledgeProofDirectory,
-          astra: { client: astra.client, ...config.astra }, sol: { client: sol.client, ...config.sol },
+          astra: { client: astra?.client ?? null as never, ...config.astra }, sol: { client: sol.client, ...config.sol },
           expectedModelProvider: "openai",
           onProviderBound: async (bound) => {
             bindings.set(bound.role, bound);
@@ -185,12 +188,14 @@ export async function executeVaultRun(prepared: PreparedVaultRun, scheduler: Fil
           },
           beforeSol: async () => {
             if (signal?.aborted) throw new Error("User requested stop");
+            if (prepared.approvedPlan && JSON.stringify(await loadApprovedTaskPlan(config, contract)) !== JSON.stringify(prepared.approvedPlan))
+              throw new Error("Approved Task plan changed before Sol");
             await options.beforeSol?.();
             if (signal?.aborted) throw new Error("User requested stop");
           } });
       } finally {
         signal?.removeEventListener("abort", stop);
-        await Promise.allSettled([astra.stop(), ...(sol ? [sol.stop()] : [])]);
+        await Promise.allSettled([...(astra ? [astra.stop()] : []), ...(sol ? [sol.stop()] : [])]);
       }
     } });
 }

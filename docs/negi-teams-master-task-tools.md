@@ -17,7 +17,7 @@
 
 ## 固定する境界
 
-- serverが登録した4操作だけをproviderへ渡す。workerには渡さない。
+- serverが登録した4操作だけを通常の固定Taskのproviderへ渡す。workerには渡さない。新規契約の明示設定がある場合は、[追加の3操作](./negi-teams-new-task-authoring.md)で計画参照と案の保存だけを許可する。
 - thread・turn・call IDを照合する。同じcallの再送は同じ結果を返し、異なる引数でのcall ID再利用は拒否する。
 - 起動要求は会話IDへ結び付けて永続化する。UIとの同時開始やサーバ再起動でも同じTaskを再実行しない。
 - 契約・担当モデル・コマンド・checkout・承認・成果受入をモデル入力から変更しない。
