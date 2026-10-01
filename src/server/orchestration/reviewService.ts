@@ -38,6 +38,8 @@ export interface ReviewCaseView {
   canAccept: boolean;
   qualityIssue: boolean;
   knowledge?: { candidates: Array<{ id: string; title: string; status: string }>; error: string | null };
+  integration?: { id: string; baseSha: string; sources: Array<{ runId: string; taskId: string; taskVersion: number;
+    revision: number; artifactSha256: string; evidenceSha256: string }> };
   feedback: Array<{ id: string; kind: ReviewFeedback["kind"]; scope: ReviewFeedback["scope"];
     targetSha256: string | null; text: string | null; authenticated: boolean; source: ReviewFeedback["source"] }>;
 }
@@ -106,6 +108,11 @@ function pendingAgentCorrection(state: ReviewState): boolean {
 }
 
 export class LocalReviewService {
+  private readonly integrationDetails = new Map<string, NonNullable<ReviewCaseView["integration"]>>();
+  bindIntegrationDetails(id: string, details: NonNullable<ReviewCaseView["integration"]>): void {
+    this.registered(id);
+    this.integrationDetails.set(id, structuredClone(details));
+  }
   private knowledgeBridge?: {
     capture: (view: ReviewCaseView, feedbackId: string) => Promise<void>;
     links: (caseId: string) => Promise<NonNullable<ReviewCaseView["knowledge"]>>;
@@ -174,6 +181,31 @@ export class LocalReviewService {
   }
   knowledgeWritableRoots(): string[] {
     return [...this.config.writableRoots, ...this.config.cases.map(item => item.artifactRoot)];
+  }
+  /** Trusted local result registration. Recovery uses this server's receipt verifier. */
+  async registerPinnedResult(item: RegisteredReviewCase, runId: string, artifactRef: string): Promise<void> {
+    if (![item.ledgerPath, item.artifactRoot, item.evidencePath, artifactRef].every(isAbsolute))
+      throw new Error("Pinned result paths must be absolute");
+    const root = await realpath(item.artifactRoot), parent = await realpath(dirname(item.ledgerPath));
+    const actualArtifact = await realpath(artifactRef), actualEvidence = await realpath(item.evidencePath);
+    const ledger = join(parent, basename(item.ledgerPath));
+    if (inside(root, this.proofs.root) || this.config.writableRoots.some(path =>
+      inside(path, ledger) || inside(path, actualEvidence) || inside(path, actualArtifact)))
+      throw new Error("Pinned result state must be outside model writable roots");
+    if (!inside(root, actualArtifact) || hash(await boundedFile(artifactRef, 100_000)) !== item.verifiedArtifactSha256 ||
+        hash(await boundedFile(item.evidencePath, 2_000_000)) !== item.evidenceSha256)
+      throw new Error("Pinned result bytes differ from registration");
+    try { await boundedFile(item.ledgerPath, 2_000_000); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    const chain = this.chain(item), current = (await chain.read()).state;
+    if (current && (current.caseId !== item.id || current.runId !== runId || current.artifacts.length !== 1 ||
+        current.artifacts[0].sha256 !== item.verifiedArtifactSha256 || current.artifacts[0].objectiveId !== runId ||
+        resolve(current.artifacts[0].ref) !== resolve(artifactRef))) throw new Error("Pinned result ledger identity differs");
+    if (!current) await chain.append({ key: "pinned-result:create", at: new Date().toISOString(), action: {
+      type: "create", caseId: item.id, runId, artifact: { ref: artifactRef, sha256: item.verifiedArtifactSha256, objectiveId: runId } } });
+    if (!current?.verification) await chain.append({ key: "pinned-result:verify", at: new Date().toISOString(), action: {
+      type: "verify", artifactSha256: item.verifiedArtifactSha256, evidenceRef: item.evidencePath, outcome: "passed" } });
+    await this.registerCase(item);
   }
   /** Local server registration only. HTTP cannot register file paths. */
   async registerCase(item: RegisteredReviewCase): Promise<void> {
@@ -329,7 +361,8 @@ export class LocalReviewService {
       status: state.revoked ? "revoked" : state.acceptance ? "accepted" : "awaiting_review",
       canAccept: !integrityError && state.acceptance === null && state.revoked === null,
       qualityIssue: pendingAgentCorrection(state),
-      ...(this.knowledgeBridge ? { knowledge: await this.knowledgeBridge.links(id).catch(() => ({
+      ...(this.integrationDetails.has(id) ? { integration: structuredClone(this.integrationDetails.get(id)!) } : {}),
+      ...(this.knowledgeBridge && !this.integrationDetails.has(id) ? { knowledge: await this.knowledgeBridge.links(id).catch(() => ({
         candidates: [], error: "知識候補を読み取れません。知識画面で状態を確認してください。" })) } : {}),
       feedback: await Promise.all(state.feedback.map((feedback) => this.feedbackView(feedback, item, state.runId))) };
   }
@@ -367,7 +400,7 @@ export class LocalReviewService {
         kind: input.kind, scope: input.scope, targetSha256: input.artifactSha256,
         textRef: receiptRef(receipt.id) } } });
     const view = await this.snapshot(id);
-    if (this.knowledgeBridge) {
+    if (this.knowledgeBridge && !this.integrationDetails.has(id)) {
       try { await this.knowledgeBridge.capture(view, `http-feedback:${receipt.id}`); }
       catch { return { ...view, knowledge: { candidates: view.knowledge?.candidates ?? [],
         error: "コメントは保存済みです。知識候補の作成に失敗しました。知識画面から再試行できます。" } }; }

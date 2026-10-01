@@ -9,7 +9,7 @@ export interface TaskReviewPresentation {
 }
 export function taskReviewPresentation(content: string): TaskReviewPresentation | null {
   const text = content.replace(/\r\n/g, "\n");
-  if (!/^# [^\n]+\n\nTask: [^\n]+\nObjective: [^\n]+\nBase SHA: [0-9a-f]{40}\n\n/.test(text)) return null;
+  if (!/^# [^\n]+\n\n(?:Task|Integration): [^\n]+\nObjective: [^\n]+\nBase SHA: [0-9a-f]{40}\n\n/.test(text)) return null;
   const acceptanceMarker = "\n\n## Acceptance criteria\n\n";
   const verificationMarker = "\n\n## Mechanical verification\n\n";
   const diffMarker = "\n\n## Git diff\n\n";

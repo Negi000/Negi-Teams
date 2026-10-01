@@ -62,6 +62,7 @@ import { LocalReviewService } from "./orchestration/reviewService.ts";
 import { createReviewHttp } from "./orchestration/reviewHttp.ts";
 import { LocalKnowledgeService } from "./orchestration/knowledgeService.ts";
 import { createKnowledgeHttp } from "./orchestration/knowledgeHttp.ts";
+import { LocalIntegrationReviewService } from "./orchestration/integrationReviewService.ts";
 import { LocalTaskService } from "./orchestration/taskService.ts";
 import { createTaskHttp } from "./orchestration/taskHttp.ts";
 import { ChatAttachmentStore, MAX_ATTACHMENTS_PER_TURN } from "./chatAttachments.ts";
@@ -127,6 +128,15 @@ if (taskConfigPath) {
 }
 const taskApi = createTaskHttp(taskService, authConfig);
 if (taskService && reviewService) await taskService.connectReviews(reviewService);
+const integrationConfigPath = process.env.NEGI_INTEGRATION_CONFIG;
+let integrationReviewService: LocalIntegrationReviewService | null = null;
+if (integrationConfigPath) {
+  if (!isAbsolute(integrationConfigPath) || !authConfig.token || !reviewService)
+    throw new Error("NEGI_INTEGRATION_CONFIG requires an absolute config path and authenticated reviews");
+  const bytes = await readFile(integrationConfigPath);
+  if (bytes.length > 256_000) throw new Error("Integration review config exceeds local size limit");
+  integrationReviewService = await LocalIntegrationReviewService.open(JSON.parse(bytes.toString("utf8")), reviewService);
+}
 const knowledgeConfigPath = process.env.NEGI_KNOWLEDGE_CONFIG;
 let knowledgeService: LocalKnowledgeService | null = null;
 if (knowledgeConfigPath) {
@@ -1896,6 +1906,7 @@ httpServer.listen(PORT, HOST, () => {
 
 function shutdown(): void {
   void taskService?.close();
+  void integrationReviewService?.close();
   console.log("\n[ebi-team] 終了処理: 全 agent を kill します");
   // 固定エビの監視を先に止め、kill による exit で再起動が走らないようにする。
   fixedEbi.stop();

@@ -156,7 +156,7 @@ export class LocalTaskService {
       sourceNotes: structuredClone(run.contract.sourceNotes) as Array<{ id: string; version: number; sha256: string; path: string }> };
   }
   /** Trusted readers for local integration; no provider dispatch or acceptance. */
-  async integrationSource(id: string): Promise<IntegrationSource> {
+  async integrationSource(id: string, preflight = true): Promise<IntegrationSource> {
     const run = this.registered(id);
     const readState = async () => {
       const manifest = await this.ensureReview(run);
@@ -168,7 +168,7 @@ export class LocalTaskService {
       if (!state) throw new Error("Integration source Task state unavailable");
       return state;
     };
-    await readState();
+    if (preflight) await readState();
     return { config: structuredClone(run.config), configSha256: run.configSha256, readState,
       readManifest: async () => { await readState(); return structuredClone((await this.ensureReview(run))!); } };
   }

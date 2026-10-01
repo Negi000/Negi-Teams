@@ -59,7 +59,38 @@
 
 - 既存Master/worker/UIの全起動経路を単一受付に統合していない。直接起動された外部CLIをスケジューラだけで阻止できない。Sol/Lunaのread-only並列と2つの別所有文書の実モデル書込・統合は確認したが、実コードの変更・競合解消・人間受入は未検証。
 - resource名は呼出側の申告に依存する。checkoutの相対パスを拒否し大小文字は正規化するが、シンボリックリンク等の別名と外部編集を完全には検出しない。共有DB・生成ディレクトリは明示的なclaimが必要。
-- 統合結果を署名付き人間レビューへ接続する必要がある。dirty worktreeの削除はしない。
+- 統合結果の署名付きレビュー画面は以下の登録経路へ接続した。実成果への人間受入は未実施。統合の実行自体はCLIで、競合解消や通常workerの全面接続は残る。dirty worktreeの削除はしない。
 - JSONLの不完全な末尾と残った`.lock`は自動修復しない。元ファイルと稼働中writerを確認してから対応する。
 
 ロールバックは`scheduler.ts`、`scheduledVaultRun.ts`、対応テストとこの文書の差分を確認して戻す。ローカル台帳は`.ebi-team/phase3-live/`に残るので、未受入・結果不明の証拠を保全した後に扱う。
+
+## 統合成果の署名付きレビュー（2026-10-01）
+
+`NEGI_INTEGRATION_CONFIG`を絶対パスで指定し、`EBI_AUTH_TOKEN`と`NEGI_REVIEW_CONFIG`を設定する。起動時に、既に検証済みの統合成果だけを登録する。ブラウザからcheckout、検証コマンド、source catalogを追加する入口はない。この登録ではモデル起動、差分適用、commit、pushを行わない。
+
+```json
+{
+  "integrations": [{
+    "id": "integration-1",
+    "title": "二つのTaskの統合成果",
+    "taskCatalog": "D:/runs/tasks.json",
+    "reviewCatalog": "D:/runs/reviews.json",
+    "sourceRunIds": ["task-a", "task-b"],
+    "baseSha": "実際の同一Git基準SHA（40桁）",
+    "checkout": "D:/worktrees/integration-1",
+    "outputDir": "D:/runs/integration-1",
+    "evidenceSha256": "integration-verification.jsonのSHA-256（64桁）",
+    "limits": "人間に確認してほしい範囲と未検証の経路"
+  }]
+}
+```
+
+`outputDir`は元Taskと統合のcheckout・Vaultから分離し、署名storageもmodel writable rootsと成果から分離する。元Taskは指定したcatalogの認証済み台帳readerで読む。統合schedulerの依存・基準SHA・固定された外側/検証programの根拠・元Taskの版/契約/成果/検証hash・所有ファイル・内容を照合する。ファイルのmode変更など、元の統合入口が対応しない変更は保留する。Windowsでは実行権限bitのOS検査を行わない。
+
+完全な差分、新規文書、元Taskの受入条件、検証記録、出典の版を`integration-review-result.md`とmanifestへ固定する。Material 3 Expressiveの共通`/reviews`画面では成果本文・検証・「統合元のTask」を確認できる。受入直前にも現在のcheckout、元Task、根拠を再照合し、原文のhashを署名する。元Taskの失効、新版、内容変更、余分な変更があれば受入を止め、表示済みの原文を保持する。HTMLを実行しない既存の表示規則も維持する。
+
+コメント保存、明示受入、理由付き取消は別操作である。受入・取消の正本は署名を検証するReviewChainで、元Taskを自動受入にしない。元の`integration-result.json`の`acceptedBy: null`は統合時点の機械記録として変更しない。schedulerの`verified`も人間受入とは別である。再起動は固定artifactと署名台帳を読み直し、createだけ保存された台帳も検証イベントを補って復旧する。署名鍵は個人SSOや同一OS権限のプロセスを隔離する仕組みではない。
+
+検証: 標準TS638件中636成功・2スキップ・失敗0。固定原文の再生成照合を加えた後の関連21件も成功。最終のmetadata/現在版/原文照合の3件、型検査、ビルドも成功。実モデルで作成済みの2文書の統合成果を通常サーバーから読取り、レビュー待ち・元Task2件・checkout不変を確認した。実成果の受入は行っていない。Chromiumの1440px/320px/375pxで合成果のコメント・受入・取消・レビューサービス再起動後の保持、変更時の受入停止、版の展開、ダークテーマを確認した。実機は未確認。新規モデル/Jev呼出はない。
+
+統合コメントは署名付きレビュー記録として保持する。複数の元TaskからLessonの適用範囲と根拠を決める経路は未実装で、現在はTask単位の知識候補化を使う。

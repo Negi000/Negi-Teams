@@ -626,7 +626,7 @@ export class Agent {
         mcpConfigPath: launch.mcpConfigPath ?? null,
         systemPrompt: launch.systemPrompt ?? null,
       }),
-      [...backend.envDenyList, "EBI_AUTH_TOKEN", "NEGI_REVIEW_CONFIG", "NEGI_TASK_CONFIG", "NEGI_KNOWLEDGE_CONFIG"],
+      [...backend.envDenyList, "EBI_AUTH_TOKEN", "NEGI_REVIEW_CONFIG", "NEGI_TASK_CONFIG", "NEGI_KNOWLEDGE_CONFIG", "NEGI_INTEGRATION_CONFIG"],
     );
     try {
       this.proc = pty.spawn(launch.command, launch.args, {

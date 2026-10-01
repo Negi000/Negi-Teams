@@ -40,10 +40,16 @@ CSS tokens、形、type scale、選択状態、motionはworkspace/Task/review/lo
 - キーボードでdrawer、資料/担当追加のnative dialog、Escで手前だけを閉じる操作とfocus復帰を確認。ライト/ダーク設定は非機密の`negi-theme`だけを保存し、旧認証tokenは削除する。reduced motionではanimationがnone、transitionが0sになることを確認した。
 - 標準TSテスト621成功・2スキップ・失敗0。Python36件、型検査、ビルドも成功。最後の画面調整後に関連52テストとブラウザ操作を再確認した。新規モデル/Jev turnは追加していない。
 
-スクリーンショットと合成QA台帳はローカルの`output/playwright/`と`.ebi-team/material3-ui/`に保存し、公開差分には含めない。実機iPhone/Androidのsafe-area・仮想キーボード、実ユーザーによる使いやすさの受入、全通常dispatchのTask Contract移行と統合/Jev画面は残る条件である。
+スクリーンショットと合成QA台帳はローカルの`output/playwright/`と`.ebi-team/material3-ui/`に保存し、公開差分には含めない。実機iPhone/Androidのsafe-area・仮想キーボード、実ユーザーによる使いやすさの受入、全通常dispatchのTask Contract移行、統合実行/Jev画面は残る条件である。
 
 ### 知識の承認画面
 
 [Phase 6の知識循環](../negi-teams-phase6.md)を`/knowledge`へ接続した。レビューの指摘原文→候補編集→限定的な参照の承認→理由付き失効の順に操作する。PCでは一覧・詳細・承認pane、スマホでは候補切替と単一詳細を使う。元の指摘と対象成果へ戻れる。途中の保存は同じ署名済み操作の再試行で回復し、手編集は上書きしない。成功・進行・エラーの表示色も分けた。
 
 Chromium1440px/320px/375pxで編集・承認・失効・テーマ再読込を確認した。320px/375pxのclient/scroll幅はそれぞれ320/375pxで一致し、ボタン48px以上、入力52px以上、右端は幅内だった。指摘のHTML文字列は実行されない。ブラウザのHTML pattern仕様でハイフンを含む分類欄がエラーになる問題を修正し、再読込後のエラーがないことを確認した。通常schedulerの次の合成Taskで参照と失効を確認し、実カタログは読み取り専用で開いた。実Taskの現在の版は未受入、実Vaultは変更していない。
+
+### 統合成果のレビュー
+
+[Phase 4の署名付き統合レビュー](../negi-teams-phase4.md)を同じ成果一覧とレビューpaneへ接続した。本文・受入条件・検証・折りたたんだ元Taskの版/hashを読み、明示受入と理由付き取消を行う。元Taskや統合checkoutが変われば受入を止め、表示した固定版を保持する。統合の実行は別のCLI操作である。
+
+合成果で1440px/320px/375pxを確認した。320pxはclient/scroll305px、375pxは360pxで一致し、版を展開しても右端が収まる。操作は48px、ダークテーマ・コメント保存・受入・取消・レビューサービス再起動後の保持も確認した。実統合成果は読取のみでレビュー待ちのまま。実機と実利用者の受入は残る。

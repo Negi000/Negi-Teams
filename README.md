@@ -10,7 +10,7 @@ Phase 2 の最小Vault連携は [Vaultの利用手順](docs/negi-teams-phase2.md
 
 Phase 3 の[単一タスク台帳とCodex通信層](docs/negi-teams-phase3-offline.md)はmockで検証し、[隔離checkoutでの実接続記録](docs/negi-teams-phase3-live.md)でAstra→Solの1件を確認しました。[Vault Task実行画面](docs/negi-teams-task-ui.md)から開始・停止・操作承認・成果レビューを行えます。旧worker経路の全面移行と実成果の人間受入は未完了です。
 
-Phase 4 の[単一スケジューラと差分統合](docs/negi-teams-phase4.md)は、実行枠・依存・書込競合・結果不明の停止を管理します。登録Taskの並行実行CLIと、最新の検証済み成果を別clean checkoutへ統合するCLIを実文書で確認しました。既存起動経路への全面接続は未完了です。
+Phase 4 の[単一スケジューラと差分統合](docs/negi-teams-phase4.md)は、実行枠・依存・書込競合・結果不明の停止を管理します。登録Taskの並行実行CLIと、最新の検証済み成果を別clean checkoutへ統合するCLIを実文書で確認しました。明示登録した統合成果も共通レビュー画面で固定版を確認し、署名付き受入・取消を行えます。実成果の人間受入と既存起動経路への全面接続は未完了です。
 
 Phase 5 の[Jev shadow 接続の初期検証](docs/negi-teams-phase5.md)では、実際のJevへの小規模な判定と、外部送信・予算・重複送信を制限するローカル経路を確認しました。人間校正とactive化は未完了です。
 
