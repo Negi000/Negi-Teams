@@ -110,3 +110,9 @@ Browser plugin not availableのため既存Playwright CLIを利用。最初のfi
 [会話の記録画面](../negi-teams-conversation-ui.md)をTask・契約案・統括の結果通知・作業一覧へ接続した。tertiary surfaceに作成元/開始元と記録状態を置き、PCは送信と応答を並べ、スマホは縦に読む。元のturnとhashは詳細で展開し、現在の統括と元の記録を同じ会話として扱わない。browser開始、記録なし、応答待ち、照合が必要な状態を表示する。
 
 Chromium1440/375/320pxの両テーマ、48px、reduced motion、ログイン後の指定会話への復帰、各入口の往復、キーボード、長いtoken、旧応答の破棄、通信失敗の回復を確認した。最終の予期しないconsole/page errorは0。関連75/75と最終source/auth/Master試験49/49、型検査・ビルド成功。試験集合は重複する。provider/model送信を行った証拠ではなく、一時Git/Vaultと合成runtimeでの確認である。全会話復元・10,000件超の履歴索引・Codexの新しい会話・実機と人の受入は残る。
+
+### 会話切替の準備・失敗・終了
+
+[会話のライフサイクル](../negi-teams-conversation-lifecycle.md)へ既存Claude/Geminiの確認操作を接続した。準備中に二重操作や入力を開始せず、新しい統括の準備完了後だけ表示と使用量を切り替える。失敗時は入力・元の表示・使用量を保ち、終了済みの質問を回答不可にする。サーバ終了後に再起動しない。Codexは準備中の説明と無効状態を維持する。
+
+最終の関連194件、型検査・ビルドと、実MasterSession＋合成brainのGUIを確認した。Chromium1440/375/320px・明暗両テーマで確認ダイアログ、48px操作、focus、reduced motion、横幅、下部ナビとの非重複、再接続、切替失敗と明示再試行、終了競合を確認した。最終GUIのconsole/page error0、UIの追加送信0、明示切替3回のうち成功した表示境界は1回だった。実モデルと実機の受入ではない。Codexの永続切替要求・active/unknown claimと起動時照合など全残条件は継続する。

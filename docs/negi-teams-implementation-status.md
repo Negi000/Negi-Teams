@@ -201,3 +201,13 @@ NT-067/073の追加進捗。新しいCodex会話・作成元会話リンク、�
 関連75/75（266019.5895ms）の後、日時修正を含む最終source/auth/Master admission試験49/49（15034.1519ms）、最終型検査・ビルド成功。両集合は重複する。ビルド済みUIを一時Git/Vault/Taskの合成runtimeへ接続し、Chromium1440/375/320px・両テーマ・48px・keyboard・reduced motion・入口往復・失敗と回復・古い非同期応答の破棄を確認した。準備時の合成Sol callback2回を除き、表示中の追加callback/送信0、実providerプロセス/model API/Jev0、読取中scheduler hash不変。最終予期しないconsole error/warning/page error0、明示503は別記録2件。初期テストとGUIのQA手順失敗は前記文書に区別して保持した。
 
 限定した読取経路の独立監査にblockerは残らなかった。全会話の復元、大規模履歴の索引/版移行（現行検索は10,000件上限）、外部書換え/ABA、実機safe-area/仮想キーボードと人の受入は未完了。Codex新規会話は既存の拒否を維持し、単一lifecycle・永続reset ID・active/unknown claim・process tree終了・thread/start不確定保持を一緒に実装する必要がある。先行記録のdirty初回採用/契約版移行、実Task broker終了とrescue・検証・review・Astra続行、汎用部分作成/unknown/手動orphanの照合・取消・再開、旧MCP/PTYの共通authorityと枠、実コード競合/人の品質受入、Jev7 gate/日本語校正/外部cap、知識の矛盾/寿命/派生失効/削除、Policyの利益計測/承認/rollback、履歴最新性、Linux/UNC/停電/混合版など全残条件を維持する。全73要件とPhase0〜8のゴールはACTIVE。
+
+## 2026-10-02追加: 会話切替の競合と登録ツールの待機
+
+[実装と証拠](negi-teams-conversation-lifecycle.md)。既存Claude/Geminiの起動・切替・終了を一つのSession内で保護した。初回ログ読取から開始状態にし、重複操作と切替中の入力を拒否する。サーバ終了は取り消さず、進行中の開始/切替を待つ。新しいbrainの起動を確認した後だけclearedと使用量リセットを出し、起動失敗は旧表示/使用量を保持して自動再試行しない。旧質問は終了後に破棄とし、表示observerの例外でprocess所有権を失わない。
+
+Codex Masterではprovider turnの完了後も登録ツールが保存中なら実行枠を保持する。全受理toolの終了を待ってから終端台帳と結果を公開する。時間切れ・接続断・終端証拠変更は照合待ちで保持し、遅い完了で解放しない。通常の次の明示入力はturnEnd通知後に開始できる。
+
+最終関連194/194成功（5032.3924ms）、最終型検査・ビルド成功。独立監査の3件を修正し、追加ブロッカーなし。実MasterSession＋合成brainのGUIでChromium1440/375/320px・両テーマ、48px/focus/reduced motion/横幅/下部ナビ、キャンセル未送信、起動待ち、二重拒否、再接続、失敗時保持、旧質問破棄、明示再試行、終了競合を確認した。明示切替3回、成功境界1回、UI chatSend0、最終GUI console error/warning/page error0。provider/model/Jev0であり、実機・実モデルの会話切替・人の品質受入を証明しない。初期のテスト/QA手順失敗とfixture再起動中の旧page再接続エラーは別記録を保持した。
+
+NT-067/073の追加進捗。Codexの同じ常駐process内の空thread作成なら正常な会話切替でprocessを置換せずに進められると独立確認したが、API/UIは引き続き拒否する。永続要求ID・RPC前intent・新旧thread隔離・設定admission・active/unknown Master claim・起動時照合・lost ACK保持が必要である。shutdown/crash/transport喪失時のcontainmentも残る。前節を含む全残条件と全73要件、Phase0–8を維持し、全体ゴールはACTIVE。

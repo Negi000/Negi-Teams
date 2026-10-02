@@ -304,6 +304,79 @@ process.stdin.on("data", chunk => {
 });
 `;
 
+// A provider may report completion while an already accepted host tool is still saving.
+const earlyNativeCompletion = nativeFixture.replace("finish(); continue;", "continue;")
+  .replace('let data = "";', 'let data = ""; let turnSequence = 0; let turnId;')
+  .replaceAll('"synthetic-turn"', 'turnId')
+  .replace('function finish() {', 'function finish() {\n  if (process.argv[2]) require("node:fs").appendFileSync(process.argv[2], "completed\\n");')
+  .replace('result = { turn: { id:turnId } };', 'result = { turn: { id: (turnId = "synthetic-turn-" + (++turnSequence)) } };')
+  .replace('tool:"negi_read_task",arguments:{run_id:"fixed"}}});',
+    'tool:"negi_read_task",arguments:{run_id:"fixed"}}}); setTimeout(finish, 50);');
+
+test("Master stays busy with its scheduler claim until an early-completed turn's host tool saves", async () => {
+  await scheduledBrainFixture(async ({ admission, options, scheduler, root }) => {
+    let release!: () => void, entered!: () => void;
+    const enteredTool = new Promise<void>(resolve => { entered = resolve; });
+    const pendingTool = new Promise<void>(resolve => { release = resolve; });
+    const providerTerminal = join(root, "provider-terminal.txt");
+    await mkdir(root, { recursive: true });
+    const events: MasterChatEnvelope[] = [];
+    let sentAfterEnd: Promise<{ accepted: boolean; reason?: string }> | undefined;
+    const session = new MasterSession({ id: "master", brainId: "codex", cwd: options.cwd,
+      model: options.model, permissionMode: "plan", systemPrompt: null, mcpConfigPath: null,
+      extraArgs: [], logPath: null, handlers: { onEvent: (_id, event) => {
+        events.push(event);
+        if (event.event.kind === "turnEnd" && !sentAfterEnd) sentAfterEnd = session.sendUserText("next explicit input");
+      }, onState: () => {}, onNotice: () => {}, onUsage: () => {}, onRateLimits: () => {}, onRegistryChange: () => {} },
+      createBrain: () => new CodexAppServerBrain({ executable: process.execPath, args: ["-e", earlyNativeCompletion, "ok", providerTerminal],
+        effort: "medium", turnTimeoutMs: 5000, admission, taskTools: {
+          definitions: [{ type: "function", name: "negi_read_task", description: "Read", inputSchema: {} }],
+          invoke: async () => { entered(); await pendingTool; return { success: true, text: "fixed contract" }; },
+        } }) });
+    try {
+      await session.start(); await session.sendUserText("inspect fixed task"); await enteredTool;
+      const terminalDeadline = Date.now() + 5000;
+      while (Date.now() < terminalDeadline) {
+        try { await readFile(providerTerminal); break; } catch { await new Promise(resolve => setTimeout(resolve, 5)); }
+      }
+      assert.match(await readFile(providerTerminal, "utf8"), /completed/);
+      assert.equal(session.state, "busy"); assert.equal(events.some(event => event.event.kind === "turnEnd"), false);
+      assert.equal((await scheduler.read()).state!.entries[0].status, "running");
+      await assert.rejects(readFile(join(root, (await scheduler.read()).state!.entries[0].work.id, "outcome.json")), /ENOENT/);
+      assert.equal((await session.sendUserText("too early")).accepted, false);
+      release();
+      const deadline = Date.now() + 5000;
+      while (!sentAfterEnd && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
+      assert.equal((await sentAfterEnd)?.accepted, true);
+      assert.equal(events.findIndex(event => event.event.kind === "toolResult") < events.findIndex(event => event.event.kind === "turnEnd"), true);
+      assert.equal((await scheduler.read()).state!.entries[0].status, "verified");
+    } finally { release(); await session.stop(); }
+  });
+});
+
+test("host tool settlement timeout holds a completed provider turn's claim for reconciliation", async () => {
+  await scheduledBrainFixture(async ({ admission, options, scheduler, root }) => {
+    let release!: () => void;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    const brain = new CodexAppServerBrain({ executable: process.execPath, args: ["-e", earlyNativeCompletion],
+      effort: "medium", turnTimeoutMs: 100, admission, taskTools: {
+        definitions: [{ type: "function", name: "negi_read_task", description: "Read", inputSchema: {} }],
+        invoke: async () => { await pending; return { success: true, text: "fixed contract" }; },
+      } });
+    try {
+      await brain.start(options); await brain.send({ text: "inspect" });
+      const events = await collectUntil(brain, "exit");
+      assert.equal(events.some(event => event.kind === "turnEnd"), false);
+      const entry = (await scheduler.read()).state!.entries[0];
+      assert.equal(entry.status, "needs_reconciliation");
+      await assert.rejects(readFile(join(root, entry.work.id, "outcome.json")), /ENOENT/);
+      release(); await new Promise(resolve => setImmediate(resolve));
+      assert.equal((await scheduler.read()).state!.entries[0].status, "needs_reconciliation");
+      await assert.rejects(brain.send({ text: "no automatic replay" }));
+    } finally { release(); await brain.stop(); }
+  });
+});
+
 test("confirmed setup stops absorbed Session launch failures without auto-restart or worker exposure",async()=>{
   for(const fault of ["worker","auth"]){let launches=0;
     const session=new MasterSession({id:"setup-master",brainId:"codex",cwd:process.cwd(),model:"synthetic-astra",permissionMode:"plan",systemPrompt:null,

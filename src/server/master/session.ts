@@ -215,6 +215,7 @@ export function unsettledRequestIds(envelopes: readonly MasterChatEnvelope[]): s
   const open = new Map<string, boolean>();
   for (const env of envelopes) {
     const ev = env.event;
+    if (ev.kind === "cleared") open.clear();
     if (ev.kind === "permission" || ev.kind === "question") open.set(ev.id, true);
     else if (ev.kind === "permissionSettled") open.set(ev.id, false);
   }
@@ -259,6 +260,16 @@ export class MasterSession {
   private consecutiveFailures = 0;
   private restartTimer: NodeJS.Timeout | null = null;
   private stopping = false;
+  /** Terminal server shutdown cannot be undone by a conversation reset's finally block. */
+  private shutdownRequested = false;
+  private resetting = false;
+  private launching = false;
+  private startInvoked = false;
+  private startFinished: Promise<void> = Promise.resolve();
+  private launchFinished: Promise<void> = Promise.resolve();
+  private resetFinished: Promise<void> = Promise.resolve();
+  private readonly brainStops = new WeakMap<MasterBrain, Promise<void>>();
+  private brainGeneration = 0;
   private pid: number | null = null;
   /** Codex App Server accepts one turn at a time; keep this set until turnEnd. */
   private codexTurnPending = false;
@@ -309,80 +320,136 @@ export class MasterSession {
    * 起動失敗は例外にせず notice + stopped 状態にする（サーバごと落とさない）。
    */
   async start(): Promise<void> {
-    // 過去ログを復元しておく（サーバ再起動後も直近の会話が snapshot で戻る）。
-    if (this.ring.length === 0) {
-      const past = await this.log.tail(this.snapshotLimit);
-      if (past.length > 0) {
-        this.ring.push(...past);
-        // 上限ちょうど読めた＝それより前がまだファイルに残っている可能性がある。
-        this.truncated = past.length >= this.snapshotLimit;
-        this.seq = Math.max(...past.map((e) => e.seq));
-        // 前回のプロセスが抱えていた承認/質問は**もう答えられない**（MCP ツール呼び出しごと
-        // 消えている）。UI が永久にボタンを出したままにならないよう破棄として畳む。
-        for (const id of unsettledRequestIds(this.ring)) {
-          this.emit({ kind: "permissionSettled", id, outcome: "discarded", answer: null });
+    if (this.startInvoked || this.shutdownRequested) throw new Error("master（chat）の起動はすでに要求されています");
+    this.startInvoked = true;
+    let finishStart!: () => void;
+    this.startFinished = new Promise(resolve => { finishStart = resolve; });
+    try {
+      this.setState("starting");
+      // 過去ログを復元しておく（サーバ再起動後も直近の会話が snapshot で戻る）。
+      if (this.ring.length === 0) {
+        const past = await this.log.tail(this.snapshotLimit);
+        if (this.shutdownRequested) return;
+        if (past.length > 0) {
+          this.ring.push(...past);
+          // 上限ちょうど読めた＝それより前がまだファイルに残っている可能性がある。
+          this.truncated = past.length >= this.snapshotLimit;
+          this.seq = Math.max(...past.map((e) => e.seq));
+          // 前回のプロセスが抱えていた承認/質問は**もう答えられない**（MCP ツール呼び出しごと
+          // 消えている）。UI が永久にボタンを出したままにならないよう破棄として畳む。
+          for (const id of unsettledRequestIds(this.ring)) {
+            this.emit({ kind: "permissionSettled", id, outcome: "discarded", answer: null });
+          }
         }
       }
-    }
-    await this.launch(null);
+      await this.launch(null);
+    } finally { finishStart(); }
   }
 
-  private async launch(resumeSessionId: string | null): Promise<void> {
-    this.setState("starting");
-    const create = this.opts.createBrain ?? ((id, o) => createMasterBrain(id, o));
-    let brain: MasterBrain;
+  private async launch(resumeSessionId: string | null,
+    options: { onReady?: () => void; allowRestart?: boolean } = {}): Promise<boolean> {
+    if (this.shutdownRequested || this.launching) return false;
+    this.launching = true;
+    const generation = ++this.brainGeneration;
+    let finishLaunch!: () => void;
+    this.launchFinished = new Promise(resolve => { finishLaunch = resolve; });
     try {
-      brain = create(this.opts.brainId, {
-        costLedger: this.costLedger,
-        onRawEvent: (raw) => this.onRawEvent(raw),
-        ackTimeoutMs: MASTER_ACK_TIMEOUT_MS,
-        // PR-M3: チャット UI の逐次描画（partial）を有効化する。
-        // 差分は `text`/`thinking` の partial:true として流れ、ブロック完了時に
-        // partial:false の全文が来て置き換わる（claudeEvents.ts の正規化）。
-        includePartialMessages: true,
-      });
-    } catch (err) {
-      this.fail(`master 頭脳（${this.opts.brainId}）を作れませんでした: ${(err as Error).message}`);
-      return;
-    }
-    this.brain = brain;
-    this.startedAt = Date.now();
-    try {
-      await brain.start({
-        cwd: this.opts.cwd,
-        model: this.opts.model,
-        permissionMode: this.opts.permissionMode,
-        systemPrompt: this.opts.systemPrompt,
-        controlMcp: null,
-        mcpConfigPath: this.opts.mcpConfigPath,
-        resumeSessionId,
-        extraArgs: this.opts.extraArgs,
-      });
-    } catch (err) {
-      this.brain = null;
-      this.fail(`master（chat）の起動に失敗しました: ${(err as Error).message}`);
-      this.scheduleRestart();
-      return;
-    }
-    this.pid = brain.pid ?? null;
-    this.pump = this.runPump(brain);
-    this.setState("idle");
-    if (resumeSessionId) {
-      this.handlers.onNotice(
-        this.id,
-        `master（chat）を --resume ${resumeSessionId} で復帰させました`,
-      );
-    }
+      this.setState("starting");
+      const create = this.opts.createBrain ?? ((id, o) => createMasterBrain(id, o));
+      let brain: MasterBrain;
+      try {
+        brain = create(this.opts.brainId, {
+          costLedger: this.costLedger,
+          onRawEvent: (raw) => { if (this.brainGeneration === generation) this.onRawEvent(raw); },
+          ackTimeoutMs: MASTER_ACK_TIMEOUT_MS,
+          // PR-M3: チャット UI の逐次描画（partial）を有効化する。
+          // 差分は `text`/`thinking` の partial:true として流れ、ブロック完了時に
+          // partial:false の全文が来て置き換わる（claudeEvents.ts の正規化）。
+          includePartialMessages: true,
+        });
+      } catch (err) {
+        this.fail(`master 頭脳（${this.opts.brainId}）を作れませんでした: ${(err as Error).message}`);
+        return false;
+      }
+      this.brain = brain;
+      this.startedAt = Date.now();
+      try {
+        await brain.start({
+          cwd: this.opts.cwd,
+          model: this.opts.model,
+          permissionMode: this.opts.permissionMode,
+          systemPrompt: this.opts.systemPrompt,
+          controlMcp: null,
+          mcpConfigPath: this.opts.mcpConfigPath,
+          resumeSessionId,
+          extraArgs: this.opts.extraArgs,
+        });
+      } catch (err) {
+        // A rejected start can still have created a process. Keep it owned until stop finishes.
+        try { await this.stopBrain(brain); }
+        catch (stopError) {
+          this.stopping = true;
+          this.fail(`起動失敗後の統括の終了を確認できません: ${(stopError as Error).message}`);
+          return false;
+        }
+        this.brain = null;
+        this.fail(`master（chat）の起動に失敗しました: ${(err as Error).message}`);
+        if (options.allowRestart !== false) this.scheduleRestart();
+        return false;
+      }
+      if (this.shutdownRequested) {
+        await this.stopBrain(brain);
+        this.brain = null;
+        this.pid = null;
+        this.setState("stopped");
+        return false;
+      }
+      try {
+        this.pid = brain.pid ?? null;
+        options.onReady?.();
+        this.pump = this.runPump(brain, generation);
+        this.setState("idle");
+      } catch (error) {
+        // A ready process remains owned even if local readiness setup fails.
+        await this.stopBrain(brain);
+        this.brain = null;
+        this.pid = null;
+        throw error;
+      }
+      if (resumeSessionId) {
+        this.handlers.onNotice(
+          this.id,
+          `master（chat）を --resume ${resumeSessionId} で復帰させました`,
+        );
+      }
+      return true;
+    } finally { this.launching = false; finishLaunch(); }
+  }
+
+  private stopBrain(brain: MasterBrain): Promise<void> {
+    const existing = this.brainStops.get(brain);
+    if (existing) return existing;
+    const operation = Promise.resolve().then(() => brain.stop());
+    this.brainStops.set(brain, operation);
+    void operation.finally(() => {
+      if (this.brainStops.get(brain) === operation) this.brainStops.delete(brain);
+    }).catch(() => {});
+    return operation;
   }
 
   /** イベントの汲み出しループ。brain が終わる（プロセス exit）まで回る。 */
-  private async runPump(brain: MasterBrain): Promise<void> {
+  private async runPump(brain: MasterBrain, generation: number): Promise<void> {
     try {
       for await (const ev of brain.events()) {
+        // The current process may discard its questions after exit. Other late
+        // events must not revive it or change a replacement conversation.
+        if (this.brain !== brain && !(this.brain === null && this.brainGeneration === generation &&
+            ev.kind === "permissionSettled")) continue;
         this.onBrainEvent(ev);
       }
     } catch (err) {
-      this.emit({ kind: "notice", level: "error", text: `イベント読み取りで例外: ${(err as Error).message}` });
+      if (this.brain === brain)
+        this.emit({ kind: "notice", level: "error", text: `イベント読み取りで例外: ${(err as Error).message}` });
     }
   }
 
@@ -408,7 +475,8 @@ export class MasterSession {
         // PR-M6: usage を出す**前に**状態を落とす。contextGuard の「キリが良いか」判定は
         // registry の master status（= this.stateValue）を読むので、busy のまま usage を
         // 渡すと /clear 促し（quiescent 通知）が永久に発火しない。
-        this.setState(this.pending > 0 ? "waiting" : "idle");
+        if (!this.stopping && !this.shutdownRequested && !this.resetting)
+          this.setState(this.pending > 0 ? "waiting" : "idle");
         if (ev.usage) {
           this.handlers.onUsage(this.id, {
             model: this.lastModel ?? this.opts.model,
@@ -428,14 +496,15 @@ export class MasterSession {
       case "permission":
       case "question": {
         this.pending += 1;
-        this.setState("waiting");
+        if (!this.stopping && !this.shutdownRequested && !this.resetting) this.setState("waiting");
         break;
       }
       case "permissionSettled": {
         if (this.pending > 0) this.pending -= 1;
         // 保留が解けたらターンの実行へ戻る。**waiting のときだけ**動かす
         //（exit → discardAll の順で来たときに stopped を busy へ上書きしないため）。
-        if (this.stateValue === "waiting") this.setState(this.pending > 0 ? "waiting" : "busy");
+        if (!this.stopping && !this.shutdownRequested && !this.resetting && this.stateValue === "waiting")
+          this.setState(this.pending > 0 ? "waiting" : "busy");
         break;
       }
       case "notice": {
@@ -468,7 +537,7 @@ export class MasterSession {
     this.pid = null;
     this.pending = 0;
     if (this.stopping) {
-      this.setState("stopped");
+      this.setState(this.resetting && !this.shutdownRequested ? "starting" : "stopped");
       return;
     }
     const aliveMs = Date.now() - this.startedAt;
@@ -484,7 +553,7 @@ export class MasterSession {
 
   /** プロセス死亡 → `--resume <sessionId>` で自動復帰（設計書 §8-R1）。 */
   private scheduleRestart(): void {
-    if (this.stopping || this.restartTimer) return;
+    if (this.stopping || this.shutdownRequested || this.resetting || this.restartTimer) return;
     if (this.opts.brainId === "codex") {
       // Codex App Server may have completed writes after the last observed
       // event. Resume only after provider turn and checkout reconciliation.
@@ -505,7 +574,7 @@ export class MasterSession {
     this.handlers.onNotice(this.id, `master（chat）を ${delay}ms 後に自動復帰させます`);
     this.restartTimer = setTimeout(() => {
       this.restartTimer = null;
-      if (this.stopping) return;
+      if (this.stopping || this.shutdownRequested || this.resetting) return;
       void this.launch(this.lastSessionId).catch((err) => {
         this.fail(`master（chat）の自動復帰に失敗: ${(err as Error).message}`);
       });
@@ -537,7 +606,8 @@ export class MasterSession {
     } = {},
   ): Promise<{ accepted: boolean; reason?: string }> {
     const brain = this.brain;
-    if (!brain) return { accepted: false, reason: "master（chat）が起動していません" };
+    if (!brain || this.stopping || this.shutdownRequested || this.resetting || this.launching)
+      return { accepted: false, reason: "統括の起動・会話切替・停止中です。今回の入力は未送信です。" };
     if (this.opts.brainId === "codex") {
       if (this.codexTurnPending || this.stateValue !== "idle") {
         return { accepted: false, reason: "Codex master は実行中です。turn の終了を待ってください" };
@@ -554,7 +624,9 @@ export class MasterSession {
         if (!delivery.acked) throw new Error("App Server did not acknowledge turn/start");
       } catch (err) {
         if (err instanceof MasterInputNotSentError) {
-          if (this.brain === brain) { this.codexTurnPending = false; this.setState("idle"); }
+          if (this.brain === brain && !this.stopping && !this.shutdownRequested) {
+            this.codexTurnPending = false; this.setState("idle");
+          }
           return { accepted: false, reason: err.message };
         }
         // An errored request may still have reached the provider. Hold this
@@ -589,7 +661,8 @@ export class MasterSession {
     ].join("\n");
     const images = opts.images ?? [];
     void brain.send({ text: body, ...(images.length > 0 ? { images } : {}) }).catch((err) => {
-      this.emit({ kind: "notice", level: "error", text: `送信に失敗しました: ${(err as Error).message}` });
+      if (this.brain === brain && !this.resetting && !this.shutdownRequested)
+        this.emit({ kind: "notice", level: "error", text: `送信に失敗しました: ${(err as Error).message}` });
     });
     return { accepted: true };
   }
@@ -601,7 +674,7 @@ export class MasterSession {
    */
   async deliverFromEbi(d: MasterChatDelivery): Promise<{ ok: boolean; confirmed: boolean }> {
     const brain = this.brain;
-    if (!brain) return { ok: false, confirmed: false };
+    if (!brain || this.stopping || this.shutdownRequested || this.resetting || this.launching) return { ok: false, confirmed: false };
     // The read-only Codex bridge has no ebi-control delivery contract yet.
     if (this.opts.brainId === "codex") return { ok: false, confirmed: false };
     this.emitChat({ kind: "inbound", from: d.from, tag: d.kind, text: d.message });
@@ -610,7 +683,8 @@ export class MasterSession {
       const { acked } = await brain.send({ text: d.body });
       return { ok: true, confirmed: acked };
     } catch (err) {
-      this.emit({ kind: "notice", level: "error", text: `エビ返信の投入に失敗: ${(err as Error).message}` });
+      if (this.brain === brain && !this.resetting && !this.shutdownRequested)
+        this.emit({ kind: "notice", level: "error", text: `エビ返信の投入に失敗: ${(err as Error).message}` });
       return { ok: false, confirmed: false };
     }
   }
@@ -637,6 +711,7 @@ export class MasterSession {
 
   /** 実行中ターンの中断（WS `chatStop`）。会話は殺さない。 */
   async interrupt(): Promise<void> {
+    if (this.stopping || this.shutdownRequested || this.resetting || this.launching) return;
     await this.brain?.interrupt();
   }
 
@@ -650,7 +725,7 @@ export class MasterSession {
     decision: { allow?: boolean; choice?: string[]; text?: string },
   ): Promise<void> {
     const brain = this.brain;
-    if (!brain) throw new Error("master（chat）が起動していません");
+    if (!brain || this.stopping || this.shutdownRequested || this.resetting || this.launching) throw new Error("master（chat）が起動していません");
     await brain.answer(requestId, {
       ...(decision.allow === undefined ? {} : { allow: decision.allow }),
       ...(decision.choice === undefined ? {} : { choice: decision.choice }),
@@ -668,7 +743,8 @@ export class MasterSession {
     signal?: AbortSignal,
   ): Promise<MasterPermissionDecision> {
     const brain = this.brain;
-    if (!brain) return { behavior: "deny", message: "master（chat）が起動していません" };
+    if (!brain || this.stopping || this.shutdownRequested || this.resetting || this.launching)
+      return { behavior: "deny", message: "master（chat）が起動していません" };
     if (!brain.requestPermission) {
       return {
         behavior: "deny",
@@ -692,41 +768,63 @@ export class MasterSession {
     if (this.opts.brainId === "codex") {
       throw new Error("Codex master の新しい会話は結果照合とrun台帳の接続後に利用できます");
     }
-    if (this.restartTimer) {
-      clearTimeout(this.restartTimer);
-      this.restartTimer = null;
-    }
-    const wasStopping = this.stopping;
+    if (!this.startInvoked || this.shutdownRequested || this.resetting || this.launching || this.stateValue === "starting")
+      throw new Error("統括の会話切替・起動・終了が進行中です。新しい要求は開始していません。");
+    this.resetting = true;
+    let finishReset!: () => void;
+    this.resetFinished = new Promise(resolve => { finishReset = resolve; });
     this.stopping = true;
+    this.setState("starting");
     try {
-      await this.brain?.stop();
+      if (this.restartTimer) {
+        clearTimeout(this.restartTimer);
+        this.restartTimer = null;
+      }
+      if (this.brain) await this.stopBrain(this.brain);
       await this.pump;
+      // The old process is known stopped, even if its backend omitted discard events.
+      for (const id of unsettledRequestIds(this.ring))
+        this.emit({ kind: "permissionSettled", id, outcome: "discarded", answer: null });
+      this.brain = null;
+      this.pid = null;
+      this.pending = 0;
+      // Switch the resume identity and cost only after the replacement is ready.
+      if (this.shutdownRequested) throw new Error("サーバ終了のため会話を切り替えていません。");
+      this.stopping = false;
+      const ready = await this.launch(null, { allowRestart: false, onReady: () => {
+        this.lastSessionId = null;
+        this.consecutiveFailures = 0;
+        this.costLedger.reset();
+        // The new process is ready. Emit the boundary before consuming its events.
+        this.emitChat({ kind: "cleared" });
+      } });
+      if (!ready) throw new Error("新しい統括の起動を確認できません。表示と使用量は保持しています。");
+    } catch (error) {
+      this.stopping = true;
+      this.setState("stopped");
+      throw error;
     } finally {
-      this.stopping = wasStopping;
+      this.resetting = false;
+      if (this.shutdownRequested) this.stopping = true;
+      finishReset();
     }
-    this.brain = null;
-    this.pid = null;
-    this.pending = 0;
-    // resume 先を捨てる＝次の起動は新しいセッション。コスト累計も会話単位でリセットする。
-    this.lastSessionId = null;
-    this.consecutiveFailures = 0;
-    this.costLedger.reset();
-    // 区切りは構造化イベントで流す（UI はここでトランスクリプトを畳んで軽くする）。
-    this.emitChat({ kind: "cleared" });
-    if (this.stopping) return; // サーバ終了と競合したときは起動し直さない。
-    await this.launch(null);
   }
 
   /** 停止（サーバ終了時）。以降の自動復帰は行わない。 */
   async stop(): Promise<void> {
+    this.shutdownRequested = true;
     this.stopping = true;
     if (this.restartTimer) {
       clearTimeout(this.restartTimer);
       this.restartTimer = null;
     }
-    await this.brain?.stop();
+    if (this.brain) await this.stopBrain(this.brain);
+    await this.startFinished;
+    await this.launchFinished;
+    await this.resetFinished;
     await this.pump;
     this.brain = null;
+    this.pid = null;
     this.setState("stopped");
   }
 
@@ -752,12 +850,17 @@ export class MasterSession {
   }
 
   private setState(state: MasterChatState): void {
+    if (this.shutdownRequested && state !== "stopped") return;
     if (this.stateValue === state) return;
     const wasBusy = this.stateValue === "busy";
     this.stateValue = state;
-    this.handlers.onState(this.id, state, this.pending);
+    try { this.handlers.onState(this.id, state, this.pending); }
+    catch (error) { this.reportObserverError("状態表示", error); }
     // registry の status（idle/busy）にも写す（contextGuard の quiescence 判定に効く）。
-    if (wasBusy !== (state === "busy")) this.handlers.onRegistryChange();
+    if (wasBusy !== (state === "busy")) {
+      try { this.handlers.onRegistryChange(); }
+      catch (error) { this.reportObserverError("チーム表示", error); }
+    }
   }
 
   private emit(ev: MasterEvent): void {
@@ -774,7 +877,13 @@ export class MasterSession {
       this.truncated = true;
     }
     this.log.append(envelope);
-    this.handlers.onEvent(this.id, envelope);
+    try { this.handlers.onEvent(this.id, envelope); }
+    catch (error) { this.reportObserverError("会話表示", error); }
+  }
+
+  private reportObserverError(label: string, error: unknown): void {
+    try { this.handlers.onNotice(this.id, `${label}への通知に失敗しました。再接続して記録を確認してください: ${String(error)}`); }
+    catch { /* A broken display observer must not lose process ownership or undo a known commit. */ }
   }
 
   /** テスト用: 会話ログの書き込み完了を待つ。 */

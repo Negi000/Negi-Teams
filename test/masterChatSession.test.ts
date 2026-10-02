@@ -11,6 +11,7 @@ import {
   replyQuoteLine,
   sanitizeReplyRef,
   toChatEvent,
+  unsettledRequestIds,
   type MasterSessionHandlers,
   type MasterUsageSnapshot,
 } from "../src/server/master/session.ts";
@@ -135,7 +136,8 @@ interface Harness {
 }
 
 function makeSession(opts: { snapshotLimit?: number; brainId?: MasterBrainId;
-  failStart?: boolean } = {}): Harness {
+  failStart?: boolean; configureBrain?: (brain: FakeBrain, index: number) => void;
+  configureHandlers?: (handlers: MasterSessionHandlers) => void } = {}): Harness {
   const brains: FakeBrain[] = [];
   const h: Omit<Harness, "session" | "brains"> = {
     events: [],
@@ -158,6 +160,7 @@ function makeSession(opts: { snapshotLimit?: number; brainId?: MasterBrainId;
     onRateLimits: (_id, limits) => h.rateLimits.push(limits),
     onRegistryChange: () => {},
   };
+  opts.configureHandlers?.(handlers);
   const session = new MasterSession({
     id: "master",
     brainId: opts.brainId ?? "claude",
@@ -175,6 +178,7 @@ function makeSession(opts: { snapshotLimit?: number; brainId?: MasterBrainId;
       const b = new FakeBrain(id);
       b.failStart = opts.failStart ?? false;
       b.createOpts = { includePartialMessages: o.includePartialMessages };
+      opts.configureBrain?.(b, brains.length);
       brains.push(b);
       return b;
     },
@@ -578,6 +582,152 @@ test("新しい会話の直後も送信できる（新プロセスの stdin へ�
   const r = await h.session.sendUserText("最初の一言");
   assert.equal(r.accepted, true);
   assert.deepEqual(h.brains[1]!.sent, ["最初の一言"]);
+});
+
+test("会話切替中の二重要求と入力を拒否し、サーバ終了を取り消さない", async () => {
+  let entered!: () => void, release!: () => void;
+  const stopEntered = new Promise<void>(resolve => { entered = resolve; });
+  const stopHeld = new Promise<void>(resolve => { release = resolve; });
+  const h = makeSession({ configureBrain: (brain, index) => {
+    if (index !== 0) return;
+    brain.stop = async () => { brain.stopped++; entered(); await stopHeld; brain.close(); };
+  } });
+  await h.session.start();
+  const reset = h.session.newConversation();
+  const resetRejected = assert.rejects(reset, /サーバ終了/);
+  await stopEntered;
+  assert.equal(h.session.state, "starting");
+  await assert.rejects(h.session.newConversation(), /新しい要求は開始していません/);
+  assert.equal((await h.session.sendUserText("keep unsent")).accepted, false);
+  assert.deepEqual(await h.session.deliverFromEbi({ from: "worker", kind: "reply", message: "late", body: "late" }),
+    { ok: false, confirmed: false });
+  await assert.rejects(h.session.answer("old-question", { allow: true }), /起動していません/);
+  let stopped = false;
+  const shutdown = h.session.stop().then(() => { stopped = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(stopped, false); assert.equal(h.brains[0].stopped, 1);
+  release(); await resetRejected; await shutdown;
+  assert.equal(h.session.state, "stopped"); assert.equal(h.brains.length, 1);
+  assert.equal(h.events.some(event => ["cleared", "user", "inbound"].includes(event.event.kind)), false);
+  await assert.rejects(h.session.newConversation(), /新しい要求は開始していません/);
+  await assert.rejects(h.session.start(), /すでに要求/);
+});
+
+test("初回ログ読取前から起動を保護し、会話切替と終了がbrain所有権を奪わない", async () => {
+  const h = makeSession();
+  const start = h.session.start();
+  assert.equal(h.session.state, "starting");
+  await assert.rejects(h.session.newConversation(), /新しい要求は開始していません/);
+  await start;
+  assert.equal(h.brains.length, 1); assert.equal(h.session.state, "idle");
+  assert.equal((await h.session.sendUserText("owned input")).accepted, true);
+  await h.session.stop(); assert.equal(h.brains[0].stopped, 1);
+
+  const stoppedBeforeLaunch = makeSession();
+  const prelaunch = stoppedBeforeLaunch.session.start();
+  const shutdown = stoppedBeforeLaunch.session.stop();
+  await Promise.all([prelaunch, shutdown]);
+  assert.equal(stoppedBeforeLaunch.brains.length, 0);
+  assert.equal(stoppedBeforeLaunch.session.state, "stopped");
+  assert.equal(stoppedBeforeLaunch.events.length, 0);
+});
+
+test("表示通知の例外で既知の会話切替を取り消したり、新brainを孤立させない", async () => {
+  const h = makeSession({ configureHandlers: handlers => {
+    const event = handlers.onEvent;
+    handlers.onEvent = (id, envelope) => {
+      if (envelope.event.kind === "cleared") throw Error("synthetic display observer failed");
+      event(id, envelope);
+    };
+    handlers.onState = () => { throw Error("synthetic state observer failed"); };
+    handlers.onRegistryChange = () => { throw Error("synthetic registry observer failed"); };
+  } });
+  await h.session.start(); await h.session.newConversation();
+  assert.equal(h.session.state, "idle"); assert.equal(h.brains.length, 2);
+  assert.equal(h.session.snapshot().events.filter(event => event.event.kind === "cleared").length, 1);
+  assert.equal(h.notices.some(notice => notice.includes("会話表示への通知に失敗")), true);
+  assert.equal((await h.session.sendUserText("replacement stays owned")).accepted, true);
+  await h.session.stop(); assert.equal(h.brains[1].stopped, 1);
+  assert.equal(h.session.record().pid, null);
+});
+
+test("会話境界で過去の未回答を除外し、同じIDの新しい質問だけを復元する", () => {
+  const question = { kind: "question" as const, id: "reused", header: "確認", question: "合成",
+    options: [{ label: "続ける", description: "合成" }], multi: false };
+  const events: MasterChatEnvelope[] = [{ seq: 1, ts: 1, event: question }, { seq: 2, ts: 2, event: { kind: "cleared" } }];
+  assert.deepEqual(unsettledRequestIds(events), []);
+  events.push({ seq: 3, ts: 3, event: question });
+  assert.deepEqual(unsettledRequestIds(events), ["reused"]);
+  events.push({ seq: 4, ts: 4, event: { kind: "permissionSettled", id: "reused", outcome: "discarded", answer: null } });
+  assert.deepEqual(unsettledRequestIds(events), []);
+});
+
+test("新しい統括の起動失敗では区切りと使用量消去を出さず、自動再実行しない", async () => {
+  const h = makeSession({ configureBrain: (brain, index) => { if (index === 1) brain.failStart = true; } });
+  await h.session.start();
+  h.brains[0].emit({ kind: "turnEnd", ok: true, aborted: false, usage: null, costUsd: 1.5, errorText: null });
+  h.brains[0].emit({ kind: "question", id: "old-question", header: "確認", question: "終了する確認",
+    options: [{ label: "続ける", description: "合成" }], multi: false });
+  await waitEvents(h, 2);
+  await assert.rejects(h.session.newConversation(), /表示と使用量は保持/);
+  assert.equal(h.session.totalCostUsd, 1.5); assert.equal(h.session.state, "stopped");
+  assert.equal(h.events.some(event => event.event.kind === "cleared"), false);
+  assert.equal(h.brains[0].stopped, 1); assert.equal(h.brains[1].stopped, 1);
+  assert.equal(h.events.filter(event => event.event.kind === "permissionSettled" && event.event.id === "old-question" &&
+    event.event.outcome === "discarded").length, 1);
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(h.brains.length, 2);
+  await h.session.stop();
+});
+
+test("起動待ち中の終了は起動完了まで待ち、会話を待機中へ戻さない", async () => {
+  for (const replacement of [false, true]) {
+    let entered!: () => void, release!: () => void;
+    const startEntered = new Promise<void>(resolve => { entered = resolve; });
+    const startHeld = new Promise<void>(resolve => { release = resolve; });
+    const h = makeSession({ configureBrain: (brain, index) => {
+      if (index !== (replacement ? 1 : 0)) return;
+      brain.start = async options => { brain.started = options; entered(); await startHeld; };
+    } });
+    if (replacement) await h.session.start();
+    const start = replacement ? h.session.newConversation() : h.session.start();
+    const observedStart = replacement ? assert.rejects(start, /起動を確認できません/) : start;
+    await startEntered;
+    let stopped = false;
+    const shutdown = h.session.stop().then(() => { stopped = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(stopped, false, String(replacement));
+    release(); await observedStart; await shutdown;
+    assert.equal(h.session.state, "stopped");
+    assert.equal(h.events.some(event => event.event.kind === "cleared"), false);
+    assert.equal((await h.session.sendUserText("must stay unsent")).accepted, false);
+    assert.equal(h.brains.at(-1)!.stopped >= 1, true);
+  }
+});
+
+test("区切りは新しい起動を確認した後、そのsessionイベントより先に記録する", async () => {
+  const h = makeSession({ configureBrain: (brain, index) => {
+    if (index !== 1) return;
+    const start = brain.start.bind(brain);
+    brain.start = async options => { await start(options); brain.emit({ kind: "session", sessionId: "new-session",
+      model: "opus", apiKeySource: null, mcpServers: [{ name: "ebi-control", status: "connected" }], capabilities: [] }); };
+  } });
+  await h.session.start(); await h.session.newConversation(); await waitEvents(h, 2);
+  assert.deepEqual(h.events.map(event => event.event.kind), ["cleared", "session"]);
+  await h.session.stop();
+});
+
+test("旧プロセスの終了が不明なら、新規起動も会話の消去も行わない", async () => {
+  const h = makeSession({ configureBrain: (brain, index) => {
+    if (index === 0) brain.stop = async () => { throw new Error("synthetic stop not confirmed"); };
+  } });
+  await h.session.start();
+  await assert.rejects(h.session.newConversation(), /stop not confirmed/);
+  assert.equal(h.brains.length, 1); assert.equal(h.session.state, "stopped");
+  assert.equal(h.events.some(event => event.event.kind === "cleared"), false);
+  assert.equal((await h.session.sendUserText("blocked")).accepted, false);
+  h.brains[0].stop = async () => { h.brains[0].close(); };
+  await h.session.stop();
 });
 
 // ===== PR-M4（入力系）=====

@@ -102,6 +102,8 @@ export class CodexAppServerClient {
   private dynamicToolNames = new Set<string>();
   private dynamicToolLimits = new Map<string, CodexDynamicToolLimits>();
   private readonly dynamicCalls = new Map<string, { fingerprint: string; result: Promise<CodexDynamicToolResult> }>();
+  /** Provider completion does not imply that host tool side effects have settled. */
+  private readonly activeDynamicCalls = new Set<Promise<CodexDynamicToolResult>>();
 
   constructor(readable: Readable, writable: Writable, private readonly options: AppServerClientOptions = {}) {
     this.now = options.now ?? Date.now;
@@ -132,6 +134,7 @@ export class CodexAppServerClient {
 
   get currentThread(): CodexThreadIdentity | null { return this.identity && { ...this.identity }; }
   get activeTurn(): string | null { return this.activeTurnId; }
+  get pendingDynamicTools(): number { return this.activeDynamicCalls.size; }
   get dispatchBlocked(): boolean {
     return this.closedReason !== null || this.needsReconciliation || this.identity?.rerouted === true;
   }
@@ -265,7 +268,7 @@ export class CodexAppServerClient {
     this.requireInitialized();
     const identity = this.identity;
     if (!identity || this.dispatchBlocked || this.activeTurnId || this.threadRequestPending ||
-        this.turnRequestPending || !text || !effort) {
+        this.turnRequestPending || this.activeDynamicCalls.size > 0 || !text || !effort) {
       throw new Error("turn cannot start: missing identity, capability, or reconciliation");
     }
     const capability = this.catalog?.find((x) => x.model === identity.requestedModel);
@@ -318,6 +321,37 @@ export class CodexAppServerClient {
       }, timeoutMs);
       this.turnWaiters.set(turnId, { resolve, reject, timer });
     });
+  }
+
+  /** Keep the Master's claim until every accepted host tool finishes. Never cancels a tool. */
+  async waitForTurnOperations(turnId: string, timeoutMs: number): Promise<CodexTurnObservation> {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new Error("tool drain timeout invalid");
+    const threadId = this.identity?.threadId;
+    const terminal = this.getObservation(turnId);
+    if (!threadId || !terminal || !["completed", "failed", "interrupted"].includes(terminal.status) ||
+        this.activeTurnId || this.turnRequestPending || this.threadRequestPending || this.dispatchBlocked)
+      throw new Error("turn tool settlement requires a known terminal identity");
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        Promise.all([...this.activeDynamicCalls]),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            this.needsReconciliation = true;
+            reject(new Error(`host tool settlement timeout: ${turnId}; side effects need reconciliation`));
+          }, timeoutMs);
+        }),
+      ]);
+      const current = this.getObservation(turnId);
+      if (this.identity?.threadId !== threadId || this.dispatchBlocked || this.activeTurnId ||
+          this.activeDynamicCalls.size > 0 || !current || current.status !== terminal.status ||
+          current.finalText !== terminal.finalText)
+        throw new Error("turn identity, result or host operations changed during settlement");
+      return current;
+    } catch (error) {
+      this.needsReconciliation = true;
+      throw error;
+    } finally { if (timer) clearTimeout(timer); }
   }
 
   /** Read provider metadata only. This never clears reconciliation or accepts artifacts. */
@@ -617,7 +651,11 @@ export class CodexAppServerClient {
         return result;
       }).catch(() => ({ success: false,
         text: "Task操作の結果を確認できません。再委任せず、Task画面で現在の状態を確認してください。" }));
-    if (!previous) this.dynamicCalls.set(key, { fingerprint, result });
+    if (!previous) {
+      this.dynamicCalls.set(key, { fingerprint, result });
+      this.activeDynamicCalls.add(result);
+      void result.then(() => this.activeDynamicCalls.delete(result));
+    }
     void result.then(result => {
       try { this.transport.respond(id, { contentItems: [{ type: "inputText", text: result.text }], success: result.success }); }
       catch { /* A disconnected provider must inspect durable Task state before another dispatch. */ }

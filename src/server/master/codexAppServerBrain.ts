@@ -150,7 +150,7 @@ export class CodexAppServerBrain implements MasterBrain {
   }
 
   async send(input: MasterBrainInput): Promise<{ acked: boolean }> {
-    if (this.pendingSend || this.settlement || this.process?.client.activeTurn)
+    if (this.pendingSend || this.settlement || this.process?.client.activeTurn || this.process?.client.pendingDynamicTools)
       throw new MasterInputNotSentError("統括は実行中です。今回の入力は未送信です。");
     const pending = this.sendTurn(input);
     this.pendingSend = pending;
@@ -217,7 +217,8 @@ export class CodexAppServerBrain implements MasterBrain {
   private async settleTurn(process: AppServerProcess, turnId: string, lease?: MasterTurnLease,
     resultContext?: TaskResultContext | null): Promise<void> {
     try {
-      const observation = await process.client.waitForTurn(turnId, this.options.turnTimeoutMs);
+      await process.client.waitForTurn(turnId, this.options.turnTimeoutMs);
+      const observation = await process.client.waitForTurnOperations(turnId, this.options.turnTimeoutMs);
       if (observation.status === "unknown" ||
           (observation.status === "completed" && observation.finalText === null)) {
         throw new Error("turn outcome or final answer is unknown");
@@ -227,6 +228,8 @@ export class CodexAppServerBrain implements MasterBrain {
       if (observation.status === "completed") {
         this.emit({ kind: "text", text: observation.finalText!, partial: false });
       }
+      // The next input may be sent synchronously by a turnEnd listener.
+      this.settlement = null;
       this.emit({ kind: "turnEnd", ok: observation.status === "completed",
         aborted: observation.status === "interrupted", usage: usageOf(observation),
         costUsd: null, errorText: observation.status === "failed" ? "Codex turn failed" : null });

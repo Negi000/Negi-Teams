@@ -240,7 +240,7 @@ export class ChatPanel {
   setCodexReadOnly(enabled: boolean): void {
     this.codexReadOnly = enabled;
     this.newBtn.title = enabled
-      ? "Codex master の新しい会話は結果照合と run 台帳の接続後に利用できます"
+      ? "Codexの会話切替は準備中です。現在の会話と結果の記録は保持されます。"
       : "文脈をリセットし、画面を新しい会話へ切り替えます";
     this.syncControls();
     this.updateStats();
@@ -578,7 +578,7 @@ export class ChatPanel {
       title.textContent = "新しい会話を始めますか？";
       const copy = document.createElement("p");
       copy.id = "chat-new-dialog-description";
-      copy.textContent = "現在の文脈をリセットし、会話の表示を切り替えます。実行中の応答と未回答の確認は終了します。入力中のメッセージは残ります。";
+      copy.textContent = "現在の応答と未回答の確認を終了し、新しい会話を準備します。準備が整ってから表示と使用量を切り替えます。入力中のメッセージと過去の記録は残ります。";
       dialog.setAttribute("aria-labelledby", title.id);
       dialog.setAttribute("aria-describedby", copy.id);
       const actions = div("md-actions");

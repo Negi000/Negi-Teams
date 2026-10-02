@@ -56,6 +56,88 @@ async function dynamicFixture(handler: (call: CodexDynamicToolCall) => Promise<C
 }
 const microtasks = () => new Promise<void>(resolve => setImmediate(resolve));
 
+test("provider completion keeps accepted host tools pending and prevents another turn", async () => {
+  let calls = 0, release!: (result: CodexDynamicToolResult) => void;
+  const pending = new Promise<CodexDynamicToolResult>(resolve => { release = resolve; });
+  const f = await dynamicFixture(async () => { calls++; return pending; });
+  try {
+    f.call("tool-first"); f.call("tool-duplicate"); await microtasks();
+    assert.equal(calls, 1); assert.equal(f.client.pendingDynamicTools, 1);
+    f.notify("item/completed", { threadId: "thread-a", turnId: "turn-a",
+      item: { type: "agentMessage", phase: "final_answer", text: "provider answer" } });
+    f.notify("turn/completed", { threadId: "thread-a", turn: { id: "turn-a", status: "completed" } });
+    assert.equal((await f.client.waitForTurn("turn-a", 100)).status, "completed");
+    let settled = false;
+    const drain = f.client.waitForTurnOperations("turn-a", 1000).then(result => { settled = true; return result; });
+    await microtasks(); assert.equal(settled, false);
+    await assert.rejects(f.client.startTurn("must stay unsent", "medium"), /turn cannot start/);
+    assert.equal(f.messages.filter(message => message.method === "turn/start").length, 1);
+    f.call("late-tool", { callId: "late" });
+    assert.equal((f.messages.at(-1)!.error as Record<string, unknown>).code, -32602);
+    release({ success: true, text: "durably saved" });
+    assert.equal((await drain).finalText, "provider answer");
+    assert.equal(f.client.pendingDynamicTools, 0); assert.equal(f.client.dispatchBlocked, false);
+    for (const id of ["tool-first", "tool-duplicate"])
+      assert.equal((f.messages.find(message => message.id === id)!.result as Record<string, unknown>).success, true);
+  } finally { release({ success: false, text: "cleanup" }); f.client.close(); }
+});
+
+test("host tool timeout retains uncertainty after the handler eventually finishes", async () => {
+  let release!: (result: CodexDynamicToolResult) => void;
+  const pending = new Promise<CodexDynamicToolResult>(resolve => { release = resolve; });
+  const f = await dynamicFixture(async () => pending);
+  try {
+    f.call("tool"); await microtasks();
+    f.notify("turn/completed", { threadId: "thread-a", turn: { id: "turn-a", status: "interrupted" } });
+    await assert.rejects(f.client.waitForTurnOperations("turn-a", 10), /side effects need reconciliation/);
+    assert.equal(f.client.pendingDynamicTools, 1); assert.equal(f.client.dispatchBlocked, true);
+    release({ success: true, text: "late completion" }); await microtasks();
+    assert.equal(f.client.pendingDynamicTools, 0); assert.equal(f.client.dispatchBlocked, true);
+    await assert.rejects(f.client.startTurn("no replay", "medium"), /turn cannot start/);
+    await assert.rejects(f.client.waitForTurnOperations("turn-a", 100), /known terminal identity/);
+  } finally { release({ success: false, text: "cleanup" }); f.client.close(); }
+});
+
+test("every distinct accepted tool must settle, even if one has already completed", async () => {
+  const releases = new Map<string, (result: CodexDynamicToolResult) => void>();
+  const f = await dynamicFixture(async call => new Promise(resolve => { releases.set(call.callId, resolve); }));
+  try {
+    f.call("first", { callId: "first" }); f.call("second", { callId: "second" }); await microtasks();
+    assert.equal(f.client.pendingDynamicTools, 2);
+    f.notify("turn/completed", { threadId: "thread-a", turn: { id: "turn-a", status: "failed" } });
+    let settled = false;
+    const drain = f.client.waitForTurnOperations("turn-a", 1000).then(result => { settled = true; return result; });
+    releases.get("first")!({ success: true, text: "first saved" }); await microtasks();
+    assert.equal(f.client.pendingDynamicTools, 1); assert.equal(settled, false);
+    await assert.rejects(f.client.startTurn("still unsent", "medium"), /turn cannot start/);
+    releases.get("second")!({ success: true, text: "second saved" });
+    assert.equal((await drain).status, "failed"); assert.equal(f.client.pendingDynamicTools, 0);
+  } finally { for (const release of releases.values()) release({ success: false, text: "cleanup" }); f.client.close(); }
+});
+
+test("provider loss or changed terminal evidence during host settlement cannot release a turn", async () => {
+  for (const fault of ["close", "status", "answer"] as const) {
+    let release!: (result: CodexDynamicToolResult) => void;
+    const pending = new Promise<CodexDynamicToolResult>(resolve => { release = resolve; });
+    const f = await dynamicFixture(async () => pending);
+    try {
+      f.call("tool"); await microtasks();
+      f.notify("item/completed", { threadId: "thread-a", turnId: "turn-a",
+        item: { type: "agentMessage", phase: "final_answer", text: "first" } });
+      f.notify("turn/completed", { threadId: "thread-a", turn: { id: "turn-a", status: "completed" } });
+      const drain = f.client.waitForTurnOperations("turn-a", 1000);
+      if (fault === "close") f.client.close();
+      else if (fault === "status") f.notify("turn/completed", { threadId: "thread-a", turn: { id: "turn-a", status: "failed" } });
+      else f.notify("item/completed", { threadId: "thread-a", turnId: "turn-a",
+        item: { type: "agentMessage", phase: "final_answer", text: "changed" } });
+      release({ success: true, text: "finished" });
+      await assert.rejects(drain, /changed during settlement/, fault);
+      assert.equal(f.client.dispatchBlocked, true, fault);
+      assert.equal(f.messages.filter(message => message.method === "turn/start").length, 1);
+    } finally { release({ success: false, text: "cleanup" }); f.client.close(); }
+  }
+});
+
 test("host-owned native limits admit bounded Japanese plans and project context without exposing limits to the provider", async () => {
   let calls = 0;
   let resultText = "仕様".repeat(7000);
