@@ -329,15 +329,20 @@ def process_identity():
 def storage_action(function):
     @wraps(function)
     def guarded(self, *args, **kwargs):
-        with storage_guard(self.root, create=function.__name__ not in ("audit", "owner_baseline", "lookup", "latest_stage", "append_receipt", "recovery_intent", "owner_recovery_intent", "release_recovery", "preview_migration", "preview", "recover")):return function(self, *args, **kwargs)
+        with storage_guard(self.root, create=function.__name__ not in ("audit", "owner_baseline", "lookup", "latest_stage", "append_receipt", "recovery_intent", "owner_recovery_intent", "release_recovery", "preview_migration", "migrate", "preview", "recover")):return function(self, *args, **kwargs)
     return guarded
 
 
 class Inventory:
-    def __init__(self, root, master_id):
+    def __init__(self, root, master_id, bootstrap_context=None):
         require(type(root) is str and os.path.isabs(root), "absolute authority root required")
         require(type(master_id) is str and MASTER.fullmatch(master_id), "master registration")
         self.root = Path(os.path.abspath(root))
+        if bootstrap_context is not None:
+            require(type(bootstrap_context) is dict and set(bootstrap_context) == {"turnRoot", "schedulerPath"} and
+                    all(type(path) is str and os.path.isabs(path) and str(Path(os.path.abspath(path))) == path for path in bootstrap_context.values()),
+                    "bootstrap server registration invalid")
+        self.bootstrap_context = bootstrap_context
         self.db = Path(str(self.root) + ".inventory.sqlite3")
         self.master_id = master_id
         self.masters = self.root / "masters"
@@ -348,6 +353,8 @@ class Inventory:
         self.recovery_access = False
 
     def authority(self):
+        from negi_storage_bootstrap import assert_bootstrap_ready
+        bootstrap_sha = assert_bootstrap_ready(self.root, self.bootstrap_context)
         normal(self.root.parent, True)
         root_info = normal(self.root, True)
         require(catalog(self.root) == ["masters", "signing-key.json"], "authority inventory")
@@ -357,8 +364,12 @@ class Inventory:
         require(set(key_row) == {"schemaVersion", "key"} and key_row["schemaVersion"] == "negi-master-conversation-key/1"
                 and valid_sha(key_row["key"]), "signing key")
         self.key = bytes.fromhex(key_row["key"])
-        return {"schema": "negi-master-inventory/1", "root": str(self.root), "rootIdentity": identity(root_info),
+        meta = {"schema": "negi-master-inventory/1", "root": str(self.root), "rootIdentity": identity(root_info),
                 "mastersIdentity": identity(masters_info), "keyIdentity": identity(normal(self.key_path)), "keySha256": sha(key_raw)}
+        # New authorities bind their immutable bootstrap receipt into the signed
+        # DB metadata. Its later loss cannot become an older unregistered root.
+        if bootstrap_sha is not None:meta["bootstrapSha256"] = bootstrap_sha
+        return meta
 
     @contextmanager
     def authority_guard(self):
@@ -1238,14 +1249,14 @@ def main():
     require(0 < len(raw) <= 100000, "input size")
     request = json.loads(raw, object_pairs_hook=unique)
     require(type(request) is dict and {"action", "root", "masterId"} <= set(request), "input shape")
-    inventory = Inventory(request["root"], request["masterId"])
+    inventory = Inventory(request["root"], request["masterId"], request.pop("bootstrapContext", None))
     ticket = request.pop("storageTicket", None)
     action = request["action"]
     if action == "processIdentity":
         require(set(request) == {"action", "root", "masterId"}, "input fields")
         result = {"schema": "negi-master-inventory-result/1", "action": action, "masterId": inventory.master_id, "processIdentity": process_identity()}
     else:
-        with storage_guard(inventory.root, ticket, create=action not in ("audit", "ownerBaseline", "lookup", "latestStage", "appendRecoveryIntent", "recoveryIntent", "ownerRecoveryIntent", "releaseRecovery", "previewMigration", "previewDatabaseRecovery", "recoverDatabase")):
+        with storage_guard(inventory.root, ticket, create=action not in ("audit", "ownerBaseline", "lookup", "latestStage", "appendRecoveryIntent", "recoveryIntent", "ownerRecoveryIntent", "releaseRecovery", "previewMigration", "migrate", "previewDatabaseRecovery", "recoverDatabase")):
             if action in ("initialize", "register", "audit"):
                 require(set(request) == {"action", "root", "masterId"}, "input fields")
                 result = getattr(inventory, action)()

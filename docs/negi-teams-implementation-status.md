@@ -446,3 +446,15 @@ trusted catalogのread-only検査から固定root/turnRoot/sharedscheduler/Maste
 Browser plugin not availableのため既存Playwright CLI/Chromeでビルド済み実serverと独立native fixtureを操作した。ログイン、実stage/runtime登録、2タブ保持、保存後応答切断→元ID再確認→当該IDのみ消去、実hot journal→複製preview→正確な元DB hashへの復旧/同ID ACK、通常再起動の実行保留、keyboard Space、設定往復、1440/768/375/320px・明暗・テーマ保持・reduced motionを確認。最終通常画面の予期しないconsole/page error0、通信断注入のexpected net::ERR_FAILEDだけ1件。GUI証拠は公開差分外へ保存した。client assets名の一致だけを新HTMLの証拠にせず、最終画面を直接検証した。
 
 旧server/外部writerの停止は運用条件で、当該serverの保留や画面チェックはroot-wide version参加・外部process静止の測定証拠ではない。初回root/key/indexの明示操作、全Master/旧writer参加、通常indexed production有効化、owner/欠落stage等の完全な手動復旧導線、性能/保持/移行/実provider/停止/transport、実機safe-area/keyboard・人の全導線受入を継続する。Codex新規会話は未有効化、全73要件・Phase0–8と全体ゴールはACTIVE。今回のlocal/native/GUI検証をrelease・実model/Jev・CI成功と扱わない。
+
+## 2026-10-03追加: Material 3 Expressiveで初回保存先を準備する
+
+[方式・操作・検証と残条件](negi-teams-storage-bootstrap.md)。認証済み保存画面へ「初回の保存先を準備」を追加し、未作成root/key/native guard/Master/turnRootを固定server登録・明示確認からcreate-onlyで公開する。元IDの署名intentと独立scheduler fenceをtarget前に保存し、途中終了後は同じID・proof・native identityだけで続ける。未知sourceの削除、鍵再生成、別ID再実行を行わない。初回準備だけでも通常legacy起動を保留する。
+
+全stage helperへtrusted bootstrapContextを渡し、runtimeにも同じ登録を固定する。片側receipt喪失・別authorityのscheduler誤採用を拒否し、新authorityのreceipt SHAを署名metadataへ束縛する。初回/partialは原文＋FileScheduler reducerをnative proofへ照合し、完了済み準備のACKは後日のruntime破損/hardlink/directoryから分離する。容量とWindows SQLite pathの必要条件を鍵作成前に検査する。既存legacyの署名field/domainを変更しない。
+
+最終修正後3files **47/47・失敗/取消/skip0・129023.057ms・actual exit0**、freeze320 SHA不変。先行15files **272/272・694975.3746ms・actual exit0**はその後のbootstrap helper/test 2files修正前で、最終47件へ合算しない。独立read-only再レビューで残存blockerなし。型検査/build/AST4/差分検査成功。途中のruntime初回fence拒否はsourceを修正し、実SQLiteで失敗した長い日本語pathは対応を主張せず初回拒否へ変更した。
+
+Browser plugin not availableのためPlaywright CLI/Chromeを使い、compiled実serverでstate parentだけのfixtureから製品操作による初回鍵/root/turns作成、保存後応答切断→元ID照合→全native identityとkey/両receipt SHA不変、初回だけの通常起動保留、stage/runtime登録まで確認した。1440/768/375/320px・明暗・Space確認・theme/reduced motion・設定往復、空白/overlayなし・予期しないerror0（expected応答切断1）を確認。GUI証拠は公開差分外。通常indexed実行は開始しない。
+
+全Master選択・全旧writer/version参加/外部静止測定、通常indexed activation、owner/欠落stage/部分bootstrap等の完全な復旧、保持/版移行/性能/外部anchor・実停電/UNC/Linux、実provider/停止/transport、実機safe-area/keyboardと全導線の人による受入を継続する。contextを省いたtrusted内部呼出しは製品consoleのcross-root保証外。Codex新規会話は未有効化。Task/Jev/知識/Policy/履歴を含む全73要件・Phase0–8の全体ゴールはACTIVEで、このlocal/native/GUI検証を完成/release/CI成功と扱わない。

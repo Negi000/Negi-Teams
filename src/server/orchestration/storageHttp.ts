@@ -36,7 +36,7 @@ export function createStorageHttp(service: LocalStorageConsole | null, auth: Aut
       if (!input || typeof input !== "object" || Array.isArray(input)) throw Error("Storage input invalid");
       const row = input as Record<string, unknown>;
       if (url.pathname.endsWith("/preview")) {
-        if (Object.keys(row).join() !== "operation" || !["stage-adopt", "runtime-adopt", "database-recover"].includes(String(row.operation))) throw Error("Storage preview fields invalid");
+        if (Object.keys(row).join() !== "operation" || !["authority-initialize", "stage-adopt", "runtime-adopt", "database-recover"].includes(String(row.operation))) throw Error("Storage preview fields invalid");
         json(res, 200, await service.preview(row.operation as StorageOperation));
       } else {
         if (Object.keys(row).sort().join() !== "confirmed,decision" || row.confirmed !== true || !host().maintenance) throw Error("Explicit maintenance confirmation required");

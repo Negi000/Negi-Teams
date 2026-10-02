@@ -116,7 +116,8 @@ export class MasterConversationInventory {
     this.recoveryContext = options.recoveryContext ? Object.freeze({ turnRoot: resolve(options.recoveryContext.turnRoot), schedulerPath: resolve(options.recoveryContext.schedulerPath) }) : null;
   }
   private request(action: string, extra: Record<string, unknown> = {}) {
-    return { action, root: this.root, masterId: this.masterId, ...extra };
+    return { action, root: this.root, masterId: this.masterId, ...extra,
+      ...(this.recoveryContext ? { bootstrapContext: this.recoveryContext } : {}) };
   }
   async initialize(): Promise<void> {
     fields(await invoke(this.request("initialize")), ["schema", "action", "masterId"]);

@@ -347,7 +347,8 @@ export class FileScheduler {
   private async assertRuntimeUnregistered(): Promise<void> {
     this.assertPath();
     const paths = runtimeStoragePaths(this.registeredPath);
-    for (const path of [paths.registration, paths.database, ...["-journal", "-wal", "-shm"].map(suffix => paths.database + suffix)]) {
+    for (const path of [paths.registration, paths.database, ...["-journal", "-wal", "-shm"].map(suffix => paths.database + suffix),
+      this.registeredPath + ".negi-storage-bootstrap.json", this.registeredPath + ".negi-storage-bootstrap.json.pending"]) {
       try { await lstat(path); throw new Error("Scheduler rejected: registered runtime index requires its journal writer"); }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     }

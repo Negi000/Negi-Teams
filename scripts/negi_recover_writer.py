@@ -36,6 +36,10 @@ def master_inventory_absent(root):
     # native boundary must keep the index fence independently of TypeScript.
     if root.parent.name != "masters":raise ValueError("Canonical Master authority layout required")
     database = str(root.parent.parent) + ".inventory.sqlite3"
+    for suffix in (".bootstrap-v1.json", ".bootstrap-v1.json.pending"):
+        try:Path(str(root.parent.parent) + suffix).lstat()
+        except FileNotFoundError:continue
+        else:raise ValueError("Initial authority registration requires its indexed writer; preserve owner and receipt")
     for suffix in ("", "-journal", "-wal", "-shm", ".recoveries", ".recoveries.pending"):
         try:Path(database + suffix).lstat()
         except FileNotFoundError:continue

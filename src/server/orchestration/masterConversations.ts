@@ -107,6 +107,10 @@ export class MasterConversationAuthority {
       try { await lstat(database + suffix); return true; }
       catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
     }));
+    for (const path of [this.root + ".bootstrap-v1.json", this.root + ".bootstrap-v1.json.pending"]) {
+      try { await lstat(path); return false; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    }
     // Default legacy registrations do not index their writes. Even a valid DB
     // must not silently admit this older writer. Do not open it
     // with SQLite: a read could roll back a hot journal before explicit recovery.

@@ -85,11 +85,25 @@ export class RuntimeJournalInventory {
     return { ...result, head: { ...head }, missing: row.missing as string[], state: row.state as "clean" | "pending" };
   }
   async previewBaseline(): Promise<RuntimeBaselinePreview> {
-    // The existing reducer remains the authority for legacy scheduler semantics.
-    await new FileScheduler(this.context.schedulerPath).read();
-    const row = await this.invoke("preview"); fields(row, ["schema", "action", "proofSha256", "schedulerSha256", "schedulerBytes", "schedulerPresent", "artifactCount"]);
-    check(typeof row.proofSha256 === "string" && sha.test(row.proofSha256), "baseline proof invalid");
-    return { ...this.summary(row), proofSha256: row.proofSha256 };
+    return this.withStorage(async () => {
+      const row = await this.invoke("preview"); fields(row, ["schema", "action", "proofSha256", "schedulerSha256", "schedulerBytes", "schedulerPresent", "artifactCount"]);
+      check(typeof row.proofSha256 === "string" && sha.test(row.proofSha256), "baseline proof invalid");
+      const summary = this.summary(row);
+      // A completed initial authority has already fenced default writers. Use
+      // the same FileScheduler reducer in a private, read-only registration,
+      // bound to the native pre/post preview. Never expose an unindexed writer.
+      const reader = new FileScheduler(this.context.schedulerPath, { journal: {
+        withStorage: run => this.withStorage(run),
+        audit: async snapshot => {
+          check(snapshot.path === this.context.schedulerPath && hash(snapshot.bytes) === summary.schedulerSha256 &&
+            Buffer.byteLength(snapshot.bytes) === summary.schedulerBytes, "baseline scheduler differs from native preview");
+        },
+        appendIntent: async () => { throw Error("Baseline inspection cannot append scheduler events"); }
+      } });
+      await reader.read();
+      check(JSON.stringify(await this.invoke("preview")) === JSON.stringify(row), "baseline changed during semantic inspection");
+      return { ...summary, proofSha256: row.proofSha256 };
+    });
   }
   async adoptBaseline(input: { decisionId: string; expectedProofSha256: string }): Promise<RuntimeInventoryAudit> {
     const frozen = { decisionId: input.decisionId, expectedProofSha256: input.expectedProofSha256 };

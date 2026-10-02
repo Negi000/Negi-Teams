@@ -29,17 +29,18 @@ MAX_LOG = 64000000
 MAX_EVENTS = 100000
 MAX_TURNS = 10000
 MAX_DATABASE_BYTES = 1500000000
+MAX_REGISTRATION = 32000
 ZERO = "0" * 64
 
 
 class RuntimeInventory:
     def __init__(self, request):
-        self.authority = Inventory(request["root"], "runtime")
-        self.root = self.authority.root
         context = request["context"]
         require(type(context) is dict and set(context) == {"turnRoot", "schedulerPath"}, "runtime registration fields")
         require(all(type(value) is str and os.path.isabs(value) and str(Path(os.path.abspath(value))) == value for value in context.values()), "runtime absolute canonical registration")
         self.context = context
+        self.authority = Inventory(request["root"], "runtime", context)
+        self.root = self.authority.root
         self.turns = Path(context["turnRoot"])
         self.scheduler = Path(context["schedulerPath"])
         require(self.turns != self.root and self.root not in self.turns.parents and self.turns not in self.root.parents and
@@ -51,6 +52,8 @@ class RuntimeInventory:
     @contextmanager
     def scope(self):
         with ExitStack() as stack:
+            from negi_storage_bootstrap import assert_bootstrap_ready
+            assert_bootstrap_ready(self.root, self.context)
             meta = stack.enter_context(self.authority.authority_guard())
             if os.name == "nt":
                 from negi_recover_writer import windows_parent
@@ -93,7 +96,11 @@ class RuntimeInventory:
         rows = [{"path": path, "sha256": sha(raw), "size": len(raw)} for path, raw in sorted(artifacts.items())]
         proof = sha(encoded({**self.binding, "schedulerSha256": sha(scheduler), "schedulerBytes": len(scheduler),
                              "artifacts": rows, "stamps": stamps}))
-        return {"proofSha256": proof, "schedulerSha256": sha(scheduler), "schedulerBytes": len(scheduler), "schedulerPresent": stamps["scheduler"] is not None, "artifactCount": len(rows)}
+        preview = {"proofSha256": proof, "schedulerSha256": sha(scheduler), "schedulerBytes": len(scheduler), "schedulerPresent": stamps["scheduler"] is not None, "artifactCount": len(rows)}
+        require(len(encoded({"schema": "negi-runtime-registration/1", "binding": self.binding,
+                             "decisionId": "00000000-0000-4000-8000-000000000000", **preview})) <= MAX_REGISTRATION,
+                "runtime preview registration capacity")
+        return preview
 
     def preview(self):
         require(absent(self.db) and absent(self.registration), "runtime already/partially registered; preserve original decision")
@@ -148,7 +155,7 @@ class RuntimeInventory:
         rows = conn.execute("SELECT id,body,signature,seq,last_sha,head_signature FROM meta").fetchall()
         require(len(rows) == 1 and rows[0][0] == 1, "runtime DB metadata")
         _, raw, sig, seq, last, head_sig = rows[0]
-        require(type(raw) is bytes and len(raw) <= 8000 and valid_sha(sig) and valid_sha(last) and valid_sha(head_sig) and
+        require(type(raw) is bytes and len(raw) <= MAX_REGISTRATION and valid_sha(sig) and valid_sha(last) and valid_sha(head_sig) and
                 type(seq) is int and 1 <= seq <= MAX_EVENTS and hmac.compare_digest(sig, signature(self.authority.key, "negi-runtime-registration/1", raw)) and
                 hmac.compare_digest(head_sig, self.signed_head(raw, seq, last)), "runtime metadata/head signature")
         meta = json.loads(raw, object_pairs_hook=unique)
@@ -156,7 +163,7 @@ class RuntimeInventory:
                 meta["schema"] == "negi-runtime-registration/1" and meta["binding"] == self.binding and valid_uuid(meta["decisionId"]) and valid_sha(meta["proofSha256"]) and
                 valid_sha(meta["schedulerSha256"]) and type(meta["schedulerPresent"]) is bool and type(meta["schedulerBytes"]) is int and 0 <= meta["schedulerBytes"] <= MAX_LOG and
                 type(meta["artifactCount"]) is int and 0 <= meta["artifactCount"] <= 50000, "runtime fixed registration mismatch")
-        marker = canonical(read_file(self.registration, 10000), 10000)
+        marker = canonical(read_file(self.registration, MAX_REGISTRATION + 256), MAX_REGISTRATION + 256)
         require(marker == {"payload": meta, "signature": sig}, "runtime registration marker changed")
         return raw, meta, seq, last
 
@@ -304,7 +311,7 @@ class RuntimeInventory:
                 "runtime baseline capacity before registration")
         meta = {"schema": "negi-runtime-registration/1", "binding": self.binding, "decisionId": request["decisionId"], **preview}
         raw = encoded(meta);sig = signature(self.authority.key, "negi-runtime-registration/1", raw)
-        require(len(raw) <= 8000, "runtime registration size limit")
+        require(len(raw) <= MAX_REGISTRATION, "runtime registration size limit")
         for path, data in ((self.registration, encoded({"payload": meta, "signature": sig}) + b"\n"), (self.db, b"")):
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             try:

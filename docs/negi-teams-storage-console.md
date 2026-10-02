@@ -65,3 +65,13 @@ Browser plugin not availableのため、既存Playwright CLIとChromeを使い�
 初回root/key/index設定、全Masterの選択・登録、全旧CLI/MCP/PTY/過去binaryのversion参加・静止、通常indexed production callerの有効化、owner/欠落stage/部分記録の手動照合・完全な復旧導線は残る。対応外journal・部分bootstrap、実停電/UNC/Linux、保持・版移行・大規模性能・外部anchor/DB同時喪失/ABA、実provider/停止/transportの受入も今回完了していない。
 
 実機スマホのsafe-area・仮想キーボード、全導線の人による使いやすさの受入は残る。Codex「新しい会話」は未有効化。Task/Jev/知識/Policy/履歴を含む全73要件・Phase0–8と全体ゴールはACTIVEであり、この画面の検証を全体完成・release・CI成功へ置き換えない。
+
+## 2026-10-03追加: 初回の保存先を準備する
+
+[方式・画面操作・検証・残条件](negi-teams-storage-bootstrap.md)。上記の既存authority向け3操作に「初回の保存先を準備」を加えた。trusted server登録と明示確認でroot/key/guard/Master/turnRootをWindows nativeでcreate-only公開する。未作成状態から準備→stage登録→runtime登録まで、Material 3 Expressiveの同じPC一覧＋詳細/スマホ単一詳細で進められる。
+
+元ID付き署名intentと独立scheduler fenceをtarget公開前に保存し、部分公開は元ID/native identityだけで続ける。別ID・変更鍵・改変receipt・派生名衝突・片側receipt喪失/別rootのscheduler登録を拒否し、未知sourceを消さない。schedulerの原文と意味、input/receipt/runtime容量、Windows SQLite pathの必要条件は鍵作成前に検査する。後日のruntime故障は元の準備内容のhistorical ACKを妨げず、別のruntime監査で保留する。
+
+最終修正後3files **47/47・129023.057ms・actual exit0**、先行15files **272/272・694975.3746ms・actual exit0**で各freeze320 SHA不変。先行集合の終了後に2filesを修正して最終集合を実行し、合算しない。型検査/build/AST/差分検査と独立再レビューが成功。Chrome/Playwrightのcompiled実serverで、初回実native作成、応答切断→元ID照合・key/receipt/identity不変、初回だけの通常起動保留、stage/runtime登録、1440/768/375/320px・明暗・keyboard/reduced motion・設定往復を確認した。予期しないconsole/page error0、expected応答切断だけ1件。
+
+全Master/旧writer参加・外部静止測定、通常indexed activation、部分bootstrap/owner/欠落記録等の完全な復旧、保持/版移行/性能、実provider/停止/transport、実機safe-area/keyboard・人の全導線受入は残る。初回準備の追加を全73要件・Phase0–8の完成やrelease/CI成功へ置き換えない。全体ゴールはACTIVE。

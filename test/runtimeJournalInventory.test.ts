@@ -107,7 +107,7 @@ test("committed scheduler and turn intents remain pending after caller acknowled
 test("persistent fence survives missing DB and partial bootstrap and never creates replacement authority", windows, async () => fixture(async f => {
   const { admission } = await f.activate(); const marker = await readFile(f.inventory.registrationPath); await rm(f.inventory.databasePath);
   await assert.rejects(f.inventory.audit(), /No such|cannot|not found|WinError/); await assert.rejects(new FileScheduler(f.schedulerPath).ensureSubscriptionConfiguration(), /requires its journal writer/);
-  await assert.rejects(f.inventory.previewBaseline(), /requires its journal writer/);
+  await assert.rejects(f.inventory.previewBaseline(), /already\/partially registered/);
   await assert.rejects(f.inventory.adoptBaseline({ decisionId: randomUUID(), expectedProofSha256: "a".repeat(64) }), /partial bootstrap/);
   await assert.rejects(admission.reserve(f.request)); assert.deepEqual(await readFile(f.inventory.registrationPath), marker); await assert.rejects(lstat(f.inventory.databasePath), { code: "ENOENT" });
 }));
