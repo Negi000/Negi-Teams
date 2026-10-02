@@ -1,6 +1,6 @@
 # Master会話の独立索引と明示移行候補
 
-NT-067/073の追加部品。`MasterConversationInventory`と固定Python helperに、既存stageと復旧receiptの明示移行、および署名済みDBのstandalone hot journalをSQLite自身でrollbackする明示復旧を追加した。2026-10-03には、明示的なserver登録で会話authorityのstage保存と状態照会を索引へ接続し、署名済み復旧receipt intentとWindows native公開・正確なdead owner解除の部品を追加した。通常読取や起動で自動移行・復旧しない。既存処理は独立DBが残る場合に未接続writerを保留する。起動検査、通常入力、provider RPC、通常authorityの復旧、認証済み確認UIの全面接続は次の工程である。全73要件・Phase0–8のゴールは継続中。
+NT-067/073の追加部品。`MasterConversationInventory`と固定Python helperに、既存stageと復旧receiptの明示移行、および署名済みDBのstandalone hot journalをSQLite自身でrollbackする明示復旧を追加した。2026-10-03には、明示的なserver登録で会話authorityのstage保存・状態照会・owner復旧を索引へ接続した。復旧は署名済みreceipt intentとWindows nativeの正確なdead owner解除を使い、同じ確認IDを読み直せる。通常読取や起動で自動移行・復旧しない。既存処理は独立DBが残る場合に未接続writerを保留する。production caller、起動検査、通常入力、provider RPC、認証済み確認UIへの全面接続は次の工程である。全73要件・Phase0–8のゴールは継続中。
 
 ## 保存するもの
 
@@ -231,3 +231,31 @@ intent commit・部分書込み・receipt公開・owner解除後の返答消失�
 最終関連8 test filesは**200件中199成功・OS条件1スキップ・失敗/取消0（664,082.5678ms、actual exit0）**。新規18ケースにはintent/部分書込み/公開/解除後の実process exitと同一decision、移行baseline、原文/prefix/HMAC/live identity、未署名path容量、35秒終了待ち、現在proofの鮮度、verifier return直後のappend/release競合、foreign lock/context/未対応kindを含む。初期15/15（304,214.2679ms）はscheduler競合修正前、focused5成功/13 name-filter skip（97,986.4787ms）は修正後の別集合で、最終suiteと合算しない。独立read-only再レビューで参加scheduler競合の閉鎖を確認し、追加の具体的blockerはなかった。Python AST5・型検査・build・mjs構文・差分検査成功。compiled fallbackはmodule読込と不存在authorityのread-only保留/actual exit1を確認し、compiled側の実復旧全経路試験ではない。開始した試験childは終了を待った。実provider/model/Jev/新GUI/実機/人の受入/CI成功を確認した結果ではない。最大履歴/実停電/UNC/Linuxは未検証。
 
 通常`MasterConversationAuthority.ownerRecovery/releaseOwner`とlegacy native CLIは独立DBがある場合の保留を維持する。今回の登録/APIをproduction caller・HTTP・認証済み人間確認UIへ接続していない。UUID/proofと内部署名は人間の認証済み承認そのものではない。通常owner baselineの正規化、turn/schedulerの索引baseline、参加version/旧binary fence、初回thread・戻りidentity・旧runtime静止、repair/保持/版移行/大規模性能、実停電/UNC/Linux/実機safe-area/keyboard等の先行条件を継続する。実provider/model/Jev/新GUI/人の受入/CI成功を示す変更ではない。Material 3 Expressive assetsは維持し、全73要件・Phase0–8とゴールはACTIVE。
+
+## 2026-10-03: 明示登録したauthorityのowner復旧と同じ確認IDの照会
+
+`stageStorage: "indexed"`をserver内部で登録した`MasterConversationAuthority`の`ownerRecovery/releaseOwner`を、既存の索引receipt/native解除へ接続した。既定のlegacy登録とlegacy CLIはDB presenceで引き続き保留する。登録root/turnRoot/Masterとscheduler pathを固定し、元のoptionsやscheduler pathの変更から別の保存先へ復旧を向けない。root/guard/key/DBがない場合も作成せず保留する。production callerはindexed登録をまだ使用していない。
+
+対象は`thread-start`、`inspection`、`turn-admission`の3種類。正規cwdのUTF8 hashを署名ownerへ照合し、thread-startではさらに索引にある元の要求のcwd/hashを要求する。現在のturn/scheduler/会話証拠とnative process作成tokenの終了を再検査する。inspectionの未解決会話や、admissionの対象turn/claimが既に存在する場合は解除しない。解除はownerだけに限定し、`operationComplete: false`を維持する。結果不明のthread-startは`needs_reconciliation`のままであり、providerを再実行しない。
+
+`ownerRecoveryIntent(ownerId)`は全認証済み索引から正確なownerの元receiptと`live/adopted`の由来を読み取る。intent commitの返答が消えた場合、previewは保存済み`recoveryDecisionId`を返す。明示再開はそのUUID・proof・元bytesだけを使い、別の確認IDや現在時刻でreceiptを作り直さない。未知ACKはその呼出しでは保留し、自動再試行しない。receiptの部分書込み・公開後の実process exitでも、同じ保存済み確認を再開できる。
+
+`ownerRecoveryStatus(cwd, decisionId)`は記録を読み、モデルやnative解除を再実行しない。次の状態を返す。
+
+| state | 保存された事実と扱い |
+| --- | --- |
+| `intent_saved` | この確認のintentだけが保存済みで、final receiptはまだない。owner不在でも完了と扱わない |
+| `receipt_published` | 正確なreceiptを公開済みで、元ownerが残る。明示再開で現在proofを再確認する |
+| `owner_released` | 正確なreceiptを公開済みで、ownerは存在しない。保存済みACKだけを返す |
+| `different_owner` | 別ownerが存在する。過去の確認で新しいownerを解除しない |
+| `storage_pending` | この確認以外のstage/receiptが欠ける。復旧を保留し、欠落を補修しない |
+
+previewもこの確認の欠落と別記録の欠落を分ける。own receiptのpendingだけは独立索引の全認証後に照合できるが、別の欠落・改変・stale proofを解除可能へ正規化しない。reviewで見つかった「今のreceiptは公開済み、過去receiptが欠落」の`intent_saved`誤分類は、preview/statusとも`storage_pending`へ修正した。移行で受け入れた`adopted` receiptは、owner不在の過去ACKの読取だけに使い、native解除の新しい承認として使わない。
+
+### 今回の検証と残る接続
+
+最終関連7 test filesは**148件中147成功・OS条件1スキップ・失敗/取消0（585,547.7888ms、actual exit0）**。実行中の15 runtime/test filesのhashは不変だった。Python AST5・固定mjs構文・client/server型検査・build・差分検査成功。開始した試験childは終了を待った。新規14ケースを含む最終集合であり、途中focused集合と合算しない。client assetsは`index-CvLJ6iRB.css`/`index-C-cjKz75.js`と一致する。
+
+新規14ケースは3種類の実Node dead owner、intent/native ACK消失、部分書込み/公開直後の実Python exit、移行済み過去ACK、後の別owner、root/key/DB欠落、foreign scheduler lock、stale proof、別cwd、登録元の変更、admission targetの後発作成、別receipt欠落を確認する。最後の欠落ケースの公開済み状態と復元は試験用に構成し、製品のrepair APIの証拠とは扱わない。合成provider identityと一時filesystemを使い、開始したchildは実際の終了を待つ。途中のfocused集合は最終suiteと合算しない。
+
+独立read-onlyレビューの状態誤分類を修正し、再レビューで追加の具体的blockerはなかった。参加writerのroot/scheduler guard内に限る保証で、旧binary/version fenceや同権限の非参加writer ABAは継続する。通常turn予約・provider起動・起動監査は既存の互換gateを維持する。turn/schedulerの索引baseline、通常owner取得時のbaseline登録、初回thread/root/config、戻りcwd/model/provider/settings、旧tools/approval/server requests/waiters静止、HTTP/認証済み人間確認UI、repair/保持/版移行/性能、実停電/UNC/Linuxは次の工程である。Codex「新しい会話」は未有効化。Material 3 Expressiveの既存UIを維持し、実機safe-area/keyboardと人間受入は未確認。全73要件・Phase0–8と全体ゴールはACTIVE。

@@ -21,6 +21,7 @@ export interface MasterInventoryLatestStage extends MasterInventoryAudit {
 export interface MasterInventoryRecoveryIntent extends MasterInventoryAudit {
   receipt: Pick<MasterInventoryArtifact, "relativePath" | "bytes" | "artifactSha256"> | null;
 }
+export interface MasterInventoryOwnerRecoveryIntent extends MasterInventoryRecoveryIntent { origin: "live" | "adopted" | null }
 export interface MasterInventoryOwnerRelease extends MasterInventoryAudit { decisionId: string; requestId: string; ownerReleased: true; operationComplete: false }
 export interface MasterInventoryProcessIdentity { platform: "windows" | "linux"; pid: number; startToken: string }
 export interface MasterInventoryMigrationPreview {
@@ -62,7 +63,7 @@ async function script() {
 async function invoke(request: Record<string, unknown>): Promise<Record<string, unknown>> {
   const frozen = structuredClone(request);
   return frozen.action === "processIdentity" ? invokeHeld(frozen) : withMasterStorageGuard(String(frozen.root), () => invokeHeld(frozen),
-    { createIfMissing: !["audit", "lookup", "latestStage", "appendRecoveryIntent", "recoveryIntent", "releaseRecovery", "previewMigration", "previewDatabaseRecovery", "recoverDatabase"].includes(String(frozen.action)) });
+    { createIfMissing: !["audit", "lookup", "latestStage", "appendRecoveryIntent", "recoveryIntent", "ownerRecoveryIntent", "releaseRecovery", "previewMigration", "previewDatabaseRecovery", "recoverDatabase"].includes(String(frozen.action)) });
 }
 
 async function invokeHeld(request: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -210,9 +211,11 @@ export class MasterConversationInventory {
   }
 
   /** Trusted server only: commit exact signed receipt bytes before native publication. */
-  async appendRecoveryIntent(input: { expectedHead: MasterInventoryHead; ownerSha256: string; bytes: string }): Promise<MasterInventoryIntent> {
+  async appendRecoveryIntent(input: { expectedHead: MasterInventoryHead; ownerSha256: string; bytes: string; cwd?: string }): Promise<MasterInventoryIntent> {
     check(this.recoveryContext, "recovery server registration required");
-    const frozen = { expectedHead: { seq: input.expectedHead.seq, sha256: input.expectedHead.sha256 }, ownerSha256: input.ownerSha256, bytes: input.bytes };
+    const frozen = { expectedHead: { seq: input.expectedHead.seq, sha256: input.expectedHead.sha256 }, ownerSha256: input.ownerSha256, bytes: input.bytes,
+      ...(input.cwd === undefined ? {} : { cwd: input.cwd }) };
+    check(frozen.cwd === undefined || isAbsolute(frozen.cwd) && Buffer.byteLength(frozen.cwd) <= 16000, "recovery checkout invalid");
     head(frozen.expectedHead);
     check(sha.test(frozen.ownerSha256) && typeof frozen.bytes === "string" && Buffer.byteLength(frozen.bytes) <= 8000, "recovery intent input invalid");
     const ownerId = JSON.parse(frozen.bytes)?.payload?.owner?.owner;
@@ -231,20 +234,35 @@ export class MasterConversationInventory {
     fields(row, ["schema", "action", "masterId", "head", "state", "artifactCount", "missing", "decisionId", "receipt"]);
     const audit = this.auditResult(row);
     check(row.decisionId === decisionId, "recovery decision differs");
-    if (row.receipt === null) return { ...audit, receipt: null };
-    check(row.receipt && typeof row.receipt === "object" && !Array.isArray(row.receipt), "recovery intent missing");
-    const receipt = row.receipt as Record<string, unknown>;
+    const receipt = this.recoveryReceipt(row.receipt);
+    check(receipt === null || JSON.parse(receipt.bytes)?.payload?.decisionId === decisionId, "recovery decision differs");
+    return { ...audit, receipt };
+  }
+  private recoveryReceipt(value: unknown): MasterInventoryRecoveryIntent["receipt"] {
+    if (value === null) return null;
+    check(value && typeof value === "object" && !Array.isArray(value), "recovery intent missing");
+    const receipt = value as Record<string, unknown>;
     fields(receipt, ["relativePath", "bytes", "artifactSha256"]);
     check(typeof receipt.relativePath === "string" && path.test(receipt.relativePath) && receipt.relativePath.startsWith("recoveries/") &&
       typeof receipt.bytes === "string" && Buffer.byteLength(receipt.bytes) <= 8000 && typeof receipt.artifactSha256 === "string" &&
-      sha.test(receipt.artifactSha256) && receipt.artifactSha256 === hash(receipt.bytes) &&
-      JSON.parse(receipt.bytes)?.payload?.decisionId === decisionId, "recovery intent invalid");
-    return { ...audit, receipt: receipt as unknown as NonNullable<MasterInventoryRecoveryIntent["receipt"]> };
+      sha.test(receipt.artifactSha256) && receipt.artifactSha256 === hash(receipt.bytes), "recovery intent invalid");
+    return receipt as unknown as NonNullable<MasterInventoryRecoveryIntent["receipt"]>;
+  }
+  /** Read the original intent for an exact owner after an uncertain commit ACK. */
+  async ownerRecoveryIntent(ownerId: string): Promise<MasterInventoryOwnerRecoveryIntent> {
+    check(uuid.test(ownerId), "recovery owner ID invalid");
+    const row = await invoke(this.request("ownerRecoveryIntent", { ownerId }));
+    fields(row, ["schema", "action", "masterId", "head", "state", "artifactCount", "missing", "ownerId", "receipt", "origin"]);
+    const audit = this.auditResult(row), receipt = this.recoveryReceipt(row.receipt);
+    check(row.ownerId === ownerId && (receipt === null ? row.origin === null : row.origin === "live" || row.origin === "adopted") &&
+      (receipt === null || receipt.relativePath === "recoveries/" + ownerId + ".json" && JSON.parse(receipt.bytes)?.payload?.owner?.owner === ownerId), "owner recovery intent differs");
+    return { ...audit, receipt, origin: row.origin as MasterInventoryOwnerRecoveryIntent["origin"] };
   }
   /** Fixed Windows native publication/exact-owner release for a previously committed intent. */
-  async releaseRecoveryIntent(input: { decisionId: string; expectedProofSha256: string }): Promise<MasterInventoryOwnerRelease> {
+  async releaseRecoveryIntent(input: { decisionId: string; expectedProofSha256: string; cwd?: string }): Promise<MasterInventoryOwnerRelease> {
     check(this.recoveryContext, "recovery server registration required");
-    const frozen = { decisionId: input.decisionId, expectedProofSha256: input.expectedProofSha256 };
+    const frozen = { decisionId: input.decisionId, expectedProofSha256: input.expectedProofSha256, ...(input.cwd === undefined ? {} : { cwd: input.cwd }) };
+    check(frozen.cwd === undefined || isAbsolute(frozen.cwd) && Buffer.byteLength(frozen.cwd) <= 16000, "recovery checkout invalid");
     check(uuid.test(frozen.decisionId) && sha.test(frozen.expectedProofSha256), "recovery decision/proof required");
     const row = await invoke(this.request("releaseRecovery", { ...frozen, recoveryContext: this.recoveryContext }));
     fields(row, ["schema", "action", "masterId", "head", "state", "artifactCount", "missing", "decisionId", "requestId", "ownerReleased", "operationComplete"]);

@@ -31,6 +31,12 @@ export interface MasterConversationStatus extends MasterConversationResult { exc
 export interface MasterOwnerRecoveryPreview {
   ownerId:string; requestId:string; kind:MasterOwnerKind; ownerState:"live"|"dead"|"unknown";
   ownerSha256:string; proofSha256:string; canRelease:boolean; reason:string|null;
+  recoveryDecisionId?:string|null; recoveryState?:"not_confirmed"|"intent_saved"|"receipt_published"|"storage_pending";
+}
+export interface MasterOwnerRecoveryStatus {
+  decisionId:string;requestId:string;ownerId:string;kind:MasterOwnerKind;ownerSha256:string;proofSha256:string;
+  state:"intent_saved"|"receipt_published"|"owner_released"|"different_owner"|"storage_pending";
+  ownerReleased:boolean;operationComplete:false;
 }
 interface RecoveryPayload {
   schemaVersion:"negi-master-owner-recovery/1"; masterId:string; decisionId:string; cwdSha256:string;
@@ -75,12 +81,16 @@ function nextStage(previous: Stage | null, next: Stage) {
 export class MasterConversationAuthority {
   private readonly root: string;
   private readonly stageInventory: MasterConversationInventory | null;
+  private readonly schedulerPath: string;
   constructor(private readonly options: { root: string; turnRoot: string; masterId: string; scheduler: FileScheduler; onReleased?: () => Promise<void>;
     stageStorage?: "indexed" }) {
     check(isAbsolute(options.root) && isAbsolute(options.turnRoot) && /^[a-zA-Z0-9_-]{1,100}$/.test(options.masterId), "server registration invalid");
     check(options.stageStorage === undefined || options.stageStorage === "indexed", "stage storage registration invalid");
+    this.options = Object.freeze({ ...options, root: resolve(options.root), turnRoot: resolve(options.turnRoot) });
     this.root = resolve(options.root);
-    this.stageInventory = options.stageStorage === "indexed" ? new MasterConversationInventory({ root: this.root, masterId: options.masterId }) : null;
+    this.schedulerPath = resolve(options.scheduler.path);
+    this.stageInventory = options.stageStorage === "indexed" ? new MasterConversationInventory({ root: this.root, masterId: options.masterId,
+      recoveryContext: { turnRoot: this.options.turnRoot, schedulerPath: this.schedulerPath } }) : null;
   }
 
   private async legacyInventoryAbsent(): Promise<boolean> {
@@ -89,8 +99,8 @@ export class MasterConversationAuthority {
       try { await lstat(database + suffix); return true; }
       catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
     }));
-    // This authority does not index stage or recovery receipt intents yet.
-    // Even a valid DB must not silently admit this older writer. Do not open it
+    // Default legacy registrations do not index their writes. Even a valid DB
+    // must not silently admit this older writer. Do not open it
     // with SQLite: a read could roll back a hot journal before explicit recovery.
     return present.every(value => !value);
   }
@@ -329,21 +339,48 @@ export class MasterConversationAuthority {
       (await artifact(join(state.master, "owner.lock"), 2000))?.bytes === actual?.bytes, "current recovery proof changed");
   }
 
-  /** Read-only preview. No native guard, key, decision, owner or provider is created. */
+  /** Read-only preview. Indexed mode joins only the existing storage guard;
+   * no authority, key, decision, owner or provider is created. */
   async ownerRecovery(cwd:string):Promise<MasterOwnerRecoveryPreview|null> {
+    return this.stageInventory ? this.withStorage(() => this.ownerRecoveryHeld(cwd)) : this.ownerRecoveryHeld(cwd);
+  }
+
+  private assertIndexedRecoveryContext(): void {
+    check(resolve(this.options.scheduler.path) === this.schedulerPath, "registered scheduler path changed");
+  }
+
+  private async ownerRecoveryHeld(cwd:string):Promise<MasterOwnerRecoveryPreview|null> {
     try{
-      const state=await this.recoveryState(cwd);if(!state)return null;
-      const record=await artifact(join(state.master,"owner.lock"),2000);if(!record)return null;
-      const owner=validatedMasterOwner(record.value,this.options.masterId,state.key),before=await this.ownerRecoveryEvidence(state,owner);
+      if(this.stageInventory)this.assertIndexedRecoveryContext();
+      const state=await this.recoveryState(cwd);
+      if(!state){if(this.stageInventory)await this.stageInventory.audit();return null;}
+      const record=await artifact(join(state.master,"owner.lock"),2000);
+      if(!record){if(this.stageInventory)await this.stageInventory.audit();return null;}
+      const owner=validatedMasterOwner(record.value,this.options.masterId,state.key);
+      const indexed = this.stageInventory ? await this.stageInventory.ownerRecoveryIntent(owner.owner) : null;
+      let saved:RecoveryPayload|null=null;
+      if(indexed?.receipt){
+        saved=this.validateRecoveryRecord(JSON.parse(indexed.receipt.bytes),owner.owner+".json",state.key);
+        check(JSON.stringify(saved.owner)+"\n"===record.bytes,"indexed recovery owner differs");
+      }
+      const before=await this.ownerRecoveryEvidence(state,owner);
+      check(!saved||saved.proofSha256===before.proofSha256,"saved recovery proof is stale");
       const observed=await observeWriter(state.master,"master");
       check(observed.sha256===hash(record.bytes)&&observed.operation&&isDeepStrictEqual(observed.operation,owner.operation)&&!observed.legacyGuard,"native owner observation changed");
       const after=await this.ownerRecoveryEvidence(state,owner);
       check(before.proofSha256===after.proofSha256&&(await artifact(join(state.master,"owner.lock"),2000))?.bytes===record.bytes,"owner evidence changed during preview");
       const ownerState=observed.state==="dead"?"dead":observed.state==="live"?"live":"unknown";
       const supported=process.platform==="win32";
-      const compatible=await this.legacyInventoryAbsent();
+      const storagePending=indexed?.missing.some(path=>path!==indexed.receipt?.relativePath)??false;
+      const ownMissing=indexed?.receipt!==null&&indexed?.missing.includes(indexed.receipt?.relativePath??"");
+      const compatible=indexed ? indexed.origin!=="adopted"&&!storagePending : await this.legacyInventoryAbsent();
+      if(this.stageInventory){
+        check(isDeepStrictEqual(indexed,await this.stageInventory.ownerRecoveryIntent(owner.owner)),"indexed recovery preview changed");
+        this.assertIndexedRecoveryContext();
+      }
       return {ownerId:owner.owner,requestId:owner.operation.requestId,kind:owner.kind,ownerState,ownerSha256:hash(record.bytes),
         proofSha256:before.proofSha256,canRelease:ownerState==="dead"&&supported&&compatible,
+        ...(indexed?{recoveryDecisionId:saved?.decisionId??null,recoveryState:storagePending?"storage_pending" as const:!saved?"not_confirmed" as const:ownMissing?"intent_saved" as const:"receipt_published" as const}:{}),
         reason:!compatible?"会話の保存記録との照合が必要です。所有記録を保持しています。":ownerState!=="dead"?"所有者の終了を確認できません。所有記録を保持しています。":supported?null:"このOSでは正確な所有記録の解除を保証できません。所有記録を保持しています。"};
     }catch{throw new MasterConversationHeldError();}
   }
@@ -356,6 +393,7 @@ export class MasterConversationAuthority {
   private async releaseOwnerHeld(cwd:string,decisionId:string,expectedProofSha256:string):Promise<{decisionId:string;requestId:string;ownerReleased:true;operationComplete:false}> {
     check(uuid.test(decisionId)&&/^[0-9a-f]{64}$/.test(expectedProofSha256),"recovery decision invalid");
     try{
+      if(this.stageInventory)return await this.releaseIndexedOwnerHeld(cwd,decisionId,expectedProofSha256);
       await this.requireLegacyInventoryAbsent();
       const state=await this.recoveryState(cwd);check(state,"recovery authority absent");
       let record=await artifact(join(state.master,"owner.lock"),2000);
@@ -400,6 +438,68 @@ export class MasterConversationAuthority {
       await this.requireLegacyInventoryAbsent();
       return {decisionId,requestId:owner.operation.requestId,ownerReleased:true,operationComplete:false};
     }catch{throw new MasterConversationHeldError();}
+  }
+
+  /** Read the saved decision without repeating a recovery or provider operation. */
+  async ownerRecoveryStatus(cwd:string,decisionId:string):Promise<MasterOwnerRecoveryStatus|null> {
+    check(uuid.test(decisionId),"recovery decision invalid");
+    const read=async()=>{
+      try{
+        if(this.stageInventory)this.assertIndexedRecoveryContext();else await this.requireLegacyInventoryAbsent();
+        const indexed=this.stageInventory?await this.stageInventory.recoveryIntent(decisionId):null;
+        const state=await this.recoveryState(cwd);if(!state){check(!indexed,"indexed recovery authority absent");return null;}
+        const record=await artifact(join(state.master,"owner.lock"),2000);
+        const owner=record?validatedMasterOwner(record.value,this.options.masterId,state.key):null;
+        const legacy=indexed?null:(await this.recoveryDecisions(state.master,state.key,owner?.owner)).find(row=>row.payload.decisionId===decisionId);
+        const receipt=indexed?.receipt??(legacy?{relativePath:"recoveries/"+legacy.payload.owner.owner+".json",bytes:legacy.bytes}:null);
+        if(!receipt)return null;
+        const value=JSON.parse(receipt.bytes),payload=this.validateRecoveryRecord(value,value.payload?.owner?.owner+".json",state.key);
+        check(payload.decisionId===decisionId&&payload.cwdSha256===hash(state.canonicalCwd),"saved recovery checkout/decision differs");
+        const expectedOwner=JSON.stringify(payload.owner)+"\n",ownMissing=indexed?.missing.includes(receipt.relativePath)??false;
+        const storagePending=indexed?.missing.some(path=>path!==receipt.relativePath)??false;
+        const phase=storagePending?"storage_pending":ownMissing?"intent_saved":record===null?"owner_released":record.bytes===expectedOwner?"receipt_published":"different_owner";
+        if(!ownMissing)check((await artifact(join(state.master,receipt.relativePath),8000))?.bytes===receipt.bytes,"published recovery changed");
+        check((await artifact(join(this.root,"signing-key.json"),1000))?.bytes===state.keyBytes&&
+          (await artifact(join(state.master,"owner.lock"),2000))?.bytes===record?.bytes,"saved recovery evidence changed");
+        if(this.stageInventory){check(isDeepStrictEqual(indexed,await this.stageInventory.recoveryIntent(decisionId)),"saved recovery index changed");this.assertIndexedRecoveryContext();}
+        return {decisionId,requestId:payload.owner.operation.requestId,ownerId:payload.owner.owner,kind:payload.owner.kind,ownerSha256:hash(expectedOwner),
+          proofSha256:payload.proofSha256,state:phase,ownerReleased:phase==="owner_released",operationComplete:false} as MasterOwnerRecoveryStatus;
+      }catch{throw new MasterConversationHeldError();}
+    };
+    return this.stageInventory?this.withStorage(read):read();
+  }
+
+  private async releaseIndexedOwnerHeld(cwd:string,decisionId:string,expectedProofSha256:string) {
+    this.assertIndexedRecoveryContext();const inventory=this.stageInventory!;
+    const state=await this.recoveryState(cwd);check(state,"recovery authority absent");
+    const indexed=await inventory.recoveryIntent(decisionId);
+    let receipt=indexed.receipt?.bytes;
+    const record=await artifact(join(state.master,"owner.lock"),2000);
+    if(!record){
+      const saved=await this.ownerRecoveryStatus(cwd,decisionId);
+      check(saved?.state==="owner_released"&&saved.proofSha256===expectedProofSha256,"absent owner has no matching published decision");
+      return {decisionId,requestId:saved.requestId,ownerReleased:true as const,operationComplete:false as const};
+    }
+    const owner=validatedMasterOwner(record.value,this.options.masterId,state.key);
+    const preview=await this.ownerRecoveryHeld(cwd);
+    check(preview?.canRelease&&preview.proofSha256===expectedProofSha256&&preview.ownerSha256===hash(record.bytes)&&
+      (preview.recoveryDecisionId===null||preview.recoveryDecisionId===decisionId),"owner recovery preview is stale, live or belongs to another decision");
+    if(!receipt){
+      check(indexed.state==="clean"&&preview.recoveryDecisionId===null,"another recovery intent is pending");
+      const payload:RecoveryPayload={schemaVersion:"negi-master-owner-recovery/1",masterId:this.options.masterId,decisionId,cwdSha256:hash(state.canonicalCwd),
+        owner,proofSha256:expectedProofSha256,action:"release-owner-only",at:new Date().toISOString()};
+      receipt=JSON.stringify({payload,signature:createHmac("sha256",state.key).update(JSON.stringify(payload)).digest("hex")})+"\n";
+      await inventory.appendRecoveryIntent({expectedHead:indexed.head,ownerSha256:hash(record.bytes),bytes:receipt,cwd:state.canonicalCwd});
+    }
+    const payload=this.validateRecoveryRecord(JSON.parse(receipt),owner.owner+".json",state.key);
+    check(payload.decisionId===decisionId&&payload.proofSha256===expectedProofSha256&&payload.cwdSha256===hash(state.canonicalCwd)&&
+      JSON.stringify(payload.owner)+"\n"===record.bytes,"saved recovery decision differs");
+    const result=await inventory.releaseRecoveryIntent({decisionId,expectedProofSha256,cwd:state.canonicalCwd});
+    check(result.requestId===owner.operation.requestId&&await artifact(join(state.master,"owner.lock"),2000)===null,"indexed owner release changed");
+    const saved=await this.ownerRecoveryStatus(cwd,decisionId);
+    check(saved?.state==="owner_released"&&saved.proofSha256===expectedProofSha256,"indexed owner release not materialized");
+    this.assertIndexedRecoveryContext();
+    return {decisionId,requestId:result.requestId,ownerReleased:true as const,operationComplete:false as const};
   }
   private async idle(state: Awaited<ReturnType<MasterConversationAuthority["prepare"]>>) {
     const operations = await this.operations(state.master, state.key);

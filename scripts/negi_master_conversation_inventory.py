@@ -329,7 +329,7 @@ def process_identity():
 def storage_action(function):
     @wraps(function)
     def guarded(self, *args, **kwargs):
-        with storage_guard(self.root, create=function.__name__ not in ("audit", "lookup", "latest_stage", "append_receipt", "recovery_intent", "release_recovery", "preview_migration", "preview", "recover")):return function(self, *args, **kwargs)
+        with storage_guard(self.root, create=function.__name__ not in ("audit", "lookup", "latest_stage", "append_receipt", "recovery_intent", "owner_recovery_intent", "release_recovery", "preview_migration", "preview", "recover")):return function(self, *args, **kwargs)
     return guarded
 
 
@@ -1011,18 +1011,29 @@ class Inventory:
                 and all(type(path) is str and os.path.isabs(path) and len(path.encode("utf-8")) <= 16000 for path in value.values()), "registered recovery context invalid")
         return {"turnRoot": value["turnRoot"], "schedulerPath": value["schedulerPath"]}
 
-    def recovery_cwd(self, owner, operations):
-        require(owner["kind"] == "thread-start", "indexed inspection/admission recovery is not connected")
-        target = operations.get(owner["operation"]["requestId"])
-        require(target and sha(encoded(target[0]["request"]) + b"\n") == owner["operation"]["hash"], "indexed recovery target differs")
-        return target[0]["request"]["cwd"]
+    def recovery_cwd(self, owner, operations, supplied=None):
+        if supplied is not None:
+            require(type(supplied) is str and os.path.isabs(supplied) and len(supplied.encode("utf-8")) <= 16000
+                    and sha(supplied.encode("utf-8")) == owner["cwdSha256"], "indexed recovery checkout differs")
+        if owner["kind"] == "thread-start":
+            target = operations.get(owner["operation"]["requestId"])
+            require(target and sha(encoded(target[0]["request"]) + b"\n") == owner["operation"]["hash"], "indexed recovery target differs")
+            cwd = target[0]["request"]["cwd"]
+            require(supplied is None or supplied == cwd, "indexed recovery target checkout differs")
+            return cwd
+        # These owners may have no request file. The registered caller must pin
+        # the full canonical checkout; its hash is already signed in the owner.
+        # The fresh verifier separately rejects unfinished conversations/claims.
+        require(supplied is not None, "indexed inspection/admission recovery is not connected without checkout")
+        return supplied
 
     def verify_recovery(self, context, owner_raw, proof, cwd, present):
         from negi_master_inventory_owner_recovery import verify_authority
         verify_authority(self.root, self.master_id, context, owner_raw.decode("utf-8"), proof, cwd, present)
     @storage_action
     def append_receipt(self, request):
-        require(set(request) == {"action", "root", "masterId", "expectedHead", "ownerSha256", "bytes", "recoveryContext"}, "recovery intent input")
+        require(set(request) in ({"action", "root", "masterId", "expectedHead", "ownerSha256", "bytes", "recoveryContext"},
+                                {"action", "root", "masterId", "expectedHead", "ownerSha256", "bytes", "recoveryContext", "cwd"}), "recovery intent input")
         context = self.recovery_context(request["recoveryContext"])
         expected = request["expectedHead"]
         require(type(expected) is dict and set(expected) == {"seq", "sha256"} and type(expected["seq"]) is int
@@ -1039,7 +1050,7 @@ class Inventory:
         with self.connection() as (conn, meta):
             checkpoint, paths, operations, missing = self.audited(conn, meta)
             payload = self.receipt(artifact, owner["owner"] + ".json")
-            cwd = self.recovery_cwd(payload["owner"], operations)
+            cwd = self.recovery_cwd(payload["owner"], operations, request.get("cwd"))
             require(not missing, "previous intent is not materialized")
             body, seq, last = checkpoint
             require(expected == {"seq": seq, "sha256": last}, "recovery intent stale head")
@@ -1085,8 +1096,22 @@ class Inventory:
             return result
 
     @storage_action
+    def owner_recovery_intent(self, request):
+        require(set(request) == {"action", "root", "masterId", "ownerId"} and valid_uuid(request["ownerId"]), "owner recovery lookup input")
+        with self.connection() as (conn, meta):
+            checkpoint, paths, _, missing = self.audited(conn, meta)
+            relative = "recoveries/" + request["ownerId"] + ".json"
+            selected = self.receipt_artifacts.get(relative)
+            receipt = {"relativePath": relative, "bytes": selected[0].decode("utf-8"), "artifactSha256": sha(selected[0])} if selected else None
+            result = self.result(checkpoint, paths, missing)
+            result.update(action="ownerRecoveryIntent", ownerId=request["ownerId"], receipt=receipt,
+                          origin=("adopted" if selected[2] else "live") if selected else None)
+            return result
+
+    @storage_action
     def release_recovery(self, request):
-        require(set(request) == {"action", "root", "masterId", "decisionId", "expectedProofSha256", "recoveryContext"}
+        require(set(request) in ({"action", "root", "masterId", "decisionId", "expectedProofSha256", "recoveryContext"},
+                                {"action", "root", "masterId", "decisionId", "expectedProofSha256", "recoveryContext", "cwd"})
                 and valid_uuid(request["decisionId"]) and valid_sha(request["expectedProofSha256"]), "indexed recovery release input")
         context = self.recovery_context(request["recoveryContext"])
         with self.connection() as (conn, meta):
@@ -1095,7 +1120,7 @@ class Inventory:
             require(selected and selected[2]["proofSha256"] == request["expectedProofSha256"], "indexed recovery decision/proof absent")
             relative, raw, payload, context_sha = selected
             require(context_sha == sha(encoded(context)), "registered recovery context changed")
-            cwd = self.recovery_cwd(payload["owner"], operations)
+            cwd = self.recovery_cwd(payload["owner"], operations, request.get("cwd"))
             require(missing in ([], [relative]), "other indexed artifacts missing; preserve owner")
         owner_raw = encoded(payload["owner"]) + b"\n"
         owner_path = self.master / "owner.lock"
@@ -1167,7 +1192,7 @@ def main():
         require(set(request) == {"action", "root", "masterId"}, "input fields")
         result = {"schema": "negi-master-inventory-result/1", "action": action, "masterId": inventory.master_id, "processIdentity": process_identity()}
     else:
-        with storage_guard(inventory.root, ticket, create=action not in ("audit", "lookup", "latestStage", "appendRecoveryIntent", "recoveryIntent", "releaseRecovery", "previewMigration", "previewDatabaseRecovery", "recoverDatabase")):
+        with storage_guard(inventory.root, ticket, create=action not in ("audit", "lookup", "latestStage", "appendRecoveryIntent", "recoveryIntent", "ownerRecoveryIntent", "releaseRecovery", "previewMigration", "previewDatabaseRecovery", "recoverDatabase")):
             if action in ("initialize", "register", "audit"):
                 require(set(request) == {"action", "root", "masterId"}, "input fields")
                 result = getattr(inventory, action)()
@@ -1176,6 +1201,7 @@ def main():
             elif action == "latestStage":result = inventory.latest_stage(request)
             elif action == "appendRecoveryIntent":result = inventory.append_receipt(request)
             elif action == "recoveryIntent":result = inventory.recovery_intent(request)
+            elif action == "ownerRecoveryIntent":result = inventory.owner_recovery_intent(request)
             elif action == "releaseRecovery":result = inventory.release_recovery(request)
             elif action == "previewMigration":
                 require(set(request) == {"action", "root", "masterId"}, "migration preview fields")

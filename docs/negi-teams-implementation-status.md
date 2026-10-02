@@ -1,6 +1,6 @@
 # Negi-Teams 実装と受入の現在地
 
-2026-10-02（JST）。基準は `NEGI_TEAMS_MASTER_PLAN.ja.md` のPhase 0〜8と `REQUIREMENTS_TRACEABILITY.ja.md`。この表は実装・合成テスト・実モデル観測・人間受入を分ける。Git管理外の実行証拠も参照しており、実装差分の公開を全Phaseの完了宣言とは扱わない。
+2026-10-03（JST）。基準は `NEGI_TEAMS_MASTER_PLAN.ja.md` のPhase 0〜8と `REQUIREMENTS_TRACEABILITY.ja.md`。この表は実装・合成テスト・実モデル観測・人間受入を分ける。Git管理外の実行証拠も参照しており、実装差分の公開を全Phaseの完了宣言とは扱わない。
 
 ## 追加: チーム端末のMaterial 3操作
 
@@ -364,3 +364,15 @@ intent/部分file/公開後/解除後の実exitでは同じdecisionと原文だ�
 Material 3 Expressiveの作業一覧・Task・レビュー・初回設定・知識・チーム・会話・端末は実装済みで、今回のbuildもassets `index-CvLJ6iRB.css`/`index-C-cjKz75.js`と一致する。新GUI/実機/人の受入は今回確認していない。実機safe-area/keyboardと全導線の受入は残る。
 
 通常authorityのownerRecovery/releaseOwner・legacy CLIのDB presence保留は維持し、候補APIはproduction caller/HTTP/認証済み人間確認UIへ未接続。owner baseline正規化、turn/scheduler索引baseline、参加version fence、初回thread/戻りidentity/旧runtime静止、DB/欠落stage repair・保持・版移行・性能、未対応journal/部分記録/OS crash cleanup/実停電/UNC/Linux等の先行条件を継続する。Codex「新しい会話」は未有効化。NT-067/073の追加進捗であり、全73要件・Phase0–8と全体ゴールはACTIVE。
+
+## 2026-10-03追加: 明示登録したauthorityのowner復旧と同じ確認IDの照会
+
+[方式・検証・残条件](negi-teams-master-conversation-inventory.md#2026-10-03-明示登録したauthorityのowner復旧と同じ確認idの照会)。server内部で`stageStorage: "indexed"`を登録したauthorityの`ownerRecovery/releaseOwner`を索引receiptとWindows native解除へ接続した。固定したroot/turnRoot/scheduler pathと正規cwdの署名hashを使い、thread-start/inspection/turn-admissionの3種類を再検査する。通常turn・起動・providerと既定legacyのDB presence保留は継続する。
+
+返答消失後はpreviewで元の確認IDを読み、同じUUID/proof/原文だけを明示再開する。新しい`ownerRecoveryStatus`はintent保存・receipt公開・owner不在・別owner・別記録欠落を読み取るだけである。移行した過去receiptはreadonly ACKに使い、native解除へ流用しない。owner解除後も`operationComplete: false`を維持し、provider不明結果を完了と扱わない。
+
+独立read-onlyレビューで見つかった、別receiptの欠落をpreviewだけ`intent_saved`と表示する不整合を修正した。preview/statusとも`storage_pending`を返し、ownerを保持する回帰を追加した。再レビューで追加の具体的blockerはなかった。
+
+最終関連7 test filesは**148件中147成功・OS条件1スキップ・失敗/取消0（585,547.7888ms、actual exit0）**。実行中の15 runtime/test filesのhashは不変だった。Python AST5・固定mjs構文・client/server型検査・build・差分検査成功。開始した試験childは終了を待った。新規14ケースを含む最終集合であり、途中focused集合と合算しない。client assetsは`index-CvLJ6iRB.css`/`index-C-cjKz75.js`と一致する。
+
+Material 3 Expressiveの作業一覧・Task・レビュー・初回設定・知識・チーム・会話・端末を維持する。今回新GUI/実provider/model/Jev/実機/人の受入/CI成功を確認した結果ではない。production caller/HTTP/認証済み確認UI、通常owner baseline・turn/scheduler索引、version fence、初回thread/戻りidentity/旧runtime静止、repair/保持/版移行/性能、実停電/UNC/Linux、native phoneのsafe-area/keyboardと全導線受入が残る。Codex「新しい会話」は未有効化。NT-067/073の追加進捗であり、全73要件・Phase0–8と全体ゴールはACTIVE。

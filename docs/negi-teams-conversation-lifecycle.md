@@ -2,6 +2,8 @@
 
 2026-10-03更新。Material 3の会話切替を、実際の起動・終了状態に合わせる。Codexの新規会話を有効にした記録ではない。
 
+最新の候補実装では、server内部で`stageStorage: "indexed"`を明示登録したauthorityのowner preview・解除・保存済み確認IDの照会まで索引へ接続した。[owner復旧の方式と検証](negi-teams-master-conversation-inventory.md#2026-10-03-明示登録したauthorityのowner復旧と同じ確認idの照会)。3種類のownerを対象に、元receipt/UUID/proofを再利用し、不明なACK・別owner・別記録の欠落を保留する。owner解除はprovider操作の完了ではない。既定legacy、通常入力/起動/providerの互換gateとCodex新規会話の拒否は維持する。production caller・HTTP・認証済み人間確認UIはまだ接続していない。これらの確認画面はauthority/APIの受入後に既存のMaterial 3 PC/スマホ導線へ統合する。
+
 ## 実装した範囲
 
 - Claude/Geminiの切替中は新しい切替、入力、担当からの配送、回答を開始しない。起動前のログ読取も開始状態として保護する。

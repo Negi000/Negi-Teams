@@ -41,7 +41,7 @@ async function fixture(run: (f: { dir: string; root: string; master: string; cwd
     await child(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], { root, turnRoot, scheduler: scheduler.path, request }, 23);
     const authority = new MasterConversationAuthority({ root, turnRoot, masterId: "master", scheduler, stageStorage: "indexed" });
     const owner = await readFile(join(master, "owner.lock"), "utf8"), preview = await authority.ownerRecovery(cwd), decisionId = randomUUID();
-    assert.equal(preview?.ownerState, "dead");assert.equal(preview?.canRelease, false);
+    assert.equal(preview?.ownerState, "dead");assert.equal(preview?.canRelease, true);
     const proof = preview!.proofSha256, key = Buffer.from(JSON.parse(await readFile(join(root, "signing-key.json"), "utf8")).key, "hex");
     const payload = { schemaVersion: "negi-master-owner-recovery/1", masterId: "master", decisionId, cwdSha256: hash(cwd),
       owner: JSON.parse(owner), proofSha256: proof, action: "release-owner-only", at: new Date().toISOString() };
