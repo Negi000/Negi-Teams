@@ -9,6 +9,7 @@ import { test as nativeTest } from "node:test";
 import { pathToFileURL } from "node:url";
 import { MasterConversationAuthority, MasterConversationHeldError, type MasterConversationRequest } from "../src/server/orchestration/masterConversations.ts";
 import { MasterConversationInventory } from "../src/server/orchestration/masterConversationInventory.ts";
+import { signedMasterOwner } from "../src/server/orchestration/masterConversationOwner.ts";
 import { FileScheduler } from "../src/server/orchestration/scheduler.ts";
 
 const hash=(raw:string)=>createHash("sha256").update(raw).digest("hex");
@@ -45,6 +46,8 @@ async function fixture(kind:Kind,run:(f:F)=>Promise<void>){
 const release=(f:F)=>f.authority.releaseOwner(f.cwd,f.decisionId,f.proof);
 
 for(const kind of ["thread-start","inspection","turn-admission"] as const)test("indexed authority recovers "+kind+" with the same signed decision and no model operation",async()=>fixture(kind,async f=>{
+  const owner=JSON.parse(f.owner);assert.equal(owner.schema,"negi-master-conversation-owner/4");assert.deepEqual(owner.indexed.head,{seq:0,sha256:"0".repeat(64)});
+  assert.equal(owner.indexed.contextSha256,hash(JSON.stringify({turnRoot:f.turnRoot,schedulerPath:f.scheduler.path})));
   const database=await readFile(f.inventory.databasePath);assert.equal(await f.authority.ownerRecoveryStatus(f.cwd,f.decisionId),null);assert.deepEqual(await readFile(f.inventory.databasePath),database);
   assert.equal((await f.legacy.ownerRecovery(f.cwd))?.canRelease,false);await assert.rejects(f.legacy.releaseOwner(f.cwd,f.decisionId,f.proof),MasterConversationHeldError);
   await assert.rejects(f.legacy.ownerRecoveryStatus(f.cwd,f.decisionId),MasterConversationHeldError);
@@ -98,6 +101,10 @@ for(const phase of ["partial","published"] as const)test("actual native exit at 
 }));
 
 test("historical adopted receipt ACK stays readable without enabling an imported native release",async()=>fixture("thread-start",async f=>{
+  // Construct historical owner/3 evidence. Production cannot downgrade owner/4.
+  const {indexed:_baseline,signature:_oldSignature,...historical}=JSON.parse(f.owner);historical.schema="negi-master-conversation-owner/3";
+  const key=Buffer.from(JSON.parse(await readFile(join(f.root,"signing-key.json"),"utf8")).key,"hex"),historicalOwner=signedMasterOwner(historical,key);
+  await writeFile(join(f.master,"owner.lock"),historicalOwner);
   await unlink(f.inventory.databasePath);const preview=await f.legacy.ownerRecovery(f.cwd);assert.equal(preview?.canRelease,true);
   const result=await f.legacy.releaseOwner(f.cwd,f.decisionId,preview!.proofSha256),receipt=await readFile(join(f.master,"recoveries",JSON.parse(f.owner).owner+".json"),"utf8");
   const migration=await f.inventory.previewLegacyMigration();await f.inventory.migrateLegacy({decisionId:randomUUID(),expectedProofSha256:migration.proofSha256});
@@ -105,8 +112,8 @@ test("historical adopted receipt ACK stays readable without enabling an imported
   const database=await readFile(f.inventory.databasePath);assert.deepEqual(await f.authority.releaseOwner(f.cwd,f.decisionId,preview!.proofSha256),result);
   assert.equal((await f.authority.ownerRecoveryStatus(f.cwd,f.decisionId))?.state,"owner_released");assert.deepEqual(await readFile(f.inventory.databasePath),database);
   assert.equal((await f.inventory.recoveryIntent(f.decisionId)).receipt?.bytes,receipt);
-  await writeFile(join(f.master,"owner.lock"),f.owner);assert.equal((await f.authority.ownerRecovery(f.cwd))?.canRelease,false);
-  await assert.rejects(release(f),MasterConversationHeldError);assert.equal(await readFile(join(f.master,"owner.lock"),"utf8"),f.owner);
+  await writeFile(join(f.master,"owner.lock"),historicalOwner);assert.equal((await f.authority.ownerRecovery(f.cwd))?.canRelease,false);
+  await assert.rejects(release(f),MasterConversationHeldError);assert.equal(await readFile(join(f.master,"owner.lock"),"utf8"),historicalOwner);
 }));
 
 test("a later owner is preserved and a historical decision does not authorize deleting it",async()=>fixture("inspection",async f=>{
@@ -166,3 +173,58 @@ test("an unrelated missing receipt is storage_pending in both preview and saved-
   assert.equal((await f.authority.ownerRecovery(f.cwd))?.recoveryState,"receipt_published");assert.equal((await f.authority.ownerRecoveryStatus(f.cwd,decisionId))?.state,"receipt_published");
   await f.authority.releaseOwner(f.cwd,decisionId,preview!.proofSha256);
 }));
+
+test("owner acquisition anchors reject a future head, a changed prefix, another context and an unsigned change",async()=>fixture("inspection",async f=>{
+  await release(f);const original=await stoppedOwner(f,"inspection"),base=JSON.parse(original);
+  assert.equal(base.indexed.head.seq,1);assert.deepEqual((await f.inventory.ownerBaseline(hash(original))).head,base.indexed.head);
+  const key=Buffer.from(JSON.parse(await readFile(join(f.root,"signing-key.json"),"utf8")).key,"hex"),database=await readFile(f.inventory.databasePath);
+  for(const kind of ["future","prefix","context","unsigned"]){
+    const row=structuredClone(base);
+    if(kind==="future")row.indexed.head.seq++;
+    else if(kind==="prefix")row.indexed.head.sha256="b".repeat(64);
+    else row.indexed.contextSha256="c".repeat(64);
+    const {signature:_signature,...payload}=row,corrupt=kind==="unsigned"?JSON.stringify(row)+"\n":signedMasterOwner(payload,key);
+    await writeFile(join(f.master,"owner.lock"),corrupt);
+    await assert.rejects(f.inventory.ownerBaseline(hash(corrupt)),kind==="future"?/ahead/:kind==="prefix"?/prefix changed/:kind==="context"?/context changed/:/HMAC/);
+    await assert.rejects(f.authority.ownerRecovery(f.cwd),MasterConversationHeldError);
+    assert.equal(await readFile(join(f.master,"owner.lock"),"utf8"),corrupt);assert.deepEqual(await readFile(f.inventory.databasePath),database);
+  }
+  await writeFile(join(f.master,"owner.lock"),original);assert.equal((await f.authority.ownerRecovery(f.cwd))?.canRelease,true);
+}));
+
+test("a separately authenticated operation after the acquisition head is not normalized into this owner",async()=>fixture("inspection",async f=>{
+  // Fixture replacement creates valid other-writer history, then restores the stopped owner.
+  await unlink(join(f.master,"owner.lock"));
+  const request={...f.request,requestId:randomUUID()};
+  assert.equal((await f.authority.start(request,async mark=>{await mark();return {threadId:"other-fixture",requestedModel:"fixture",resolvedModel:"fixture",modelProvider:"fixture",rerouted:false}})).stage,"completed");
+  await writeFile(join(f.master,"owner.lock"),f.owner,{flag:"wx"});const database=await readFile(f.inventory.databasePath);
+  await assert.rejects(f.inventory.ownerBaseline(hash(f.owner)),/another writer/);await assert.rejects(f.inventory.audit(),/another writer/);
+  await assert.rejects(f.authority.ownerRecovery(f.cwd),MasterConversationHeldError);await assert.rejects(release(f),MasterConversationHeldError);
+  assert.equal(await readFile(join(f.master,"owner.lock"),"utf8"),f.owner);assert.deepEqual(await readFile(f.inventory.databasePath),database);
+}));
+
+test("historical indexed receipt keeps its original acquisition prefix after a later indexed operation",async()=>fixture("inspection",async f=>{
+  const result=await release(f),receipt=(await f.inventory.recoveryIntent(f.decisionId)).receipt!;
+  const request={...f.request,requestId:randomUUID()};
+  assert.equal((await f.authority.start(request,async mark=>{await mark();return {threadId:"later-fixture",requestedModel:"fixture",resolvedModel:"fixture",modelProvider:"fixture",rerouted:false}})).stage,"completed");
+  assert.equal((await f.inventory.audit()).head.seq,6);const database=await readFile(f.inventory.databasePath);
+  assert.equal((await f.authority.ownerRecoveryStatus(f.cwd,f.decisionId))?.state,"owner_released");assert.deepEqual(await release(f),result);
+  assert.equal((await f.inventory.recoveryIntent(f.decisionId)).receipt?.bytes,receipt.bytes);assert.deepEqual(await readFile(f.inventory.databasePath),database);
+}));
+
+test("a missing index cannot downgrade an indexed owner or receipt to legacy recovery or adoption",async()=>{
+  await fixture("inspection",async f=>{
+    await unlink(f.inventory.databasePath);assert.equal((await f.legacy.ownerRecovery(f.cwd))?.canRelease,false);
+    await assert.rejects(f.legacy.releaseOwner(f.cwd,f.decisionId,f.proof),MasterConversationHeldError);
+    const owner=JSON.parse(f.owner),child=spawn("python",["-B",resolve("scripts/negi_recover_writer.py"),"--root",f.master,"--kind","master","--domain","master-conversation",
+      "--request-id",owner.operation.requestId,"--hash",owner.operation.hash,"--owner-sha256",hash(f.owner)],{windowsHide:true,stdio:["ignore","ignore","pipe"]});
+    let stderr="";child.stderr.on("data",p=>stderr+=p);const code=await new Promise<number|null>((accept,reject)=>{child.once("close",accept);child.once("error",reject)});
+    assert.equal(code,1,stderr);assert.match(stderr,/requires its original inventory/);assert.equal(await readFile(join(f.master,"owner.lock"),"utf8"),f.owner);
+    await assert.rejects(lstat(join(f.master,"recoveries")),{code:"ENOENT"});await assert.rejects(lstat(join(f.master,"owner-recovery-flock-v2.lock")),{code:"ENOENT"});
+  });
+  await fixture("inspection",async f=>{
+    await release(f);const receipt=(await f.inventory.recoveryIntent(f.decisionId)).receipt!;await unlink(f.inventory.databasePath);
+    await assert.rejects(f.inventory.previewLegacyMigration(),/original inventory/);await assert.rejects(f.legacy.ownerRecoveryStatus(f.cwd,f.decisionId),MasterConversationHeldError);
+    await assert.rejects(lstat(f.inventory.databasePath),{code:"ENOENT"});assert.equal(await readFile(join(f.master,receipt.relativePath),"utf8"),receipt.bytes);
+  });
+});

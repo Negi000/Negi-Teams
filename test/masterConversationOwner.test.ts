@@ -36,6 +36,18 @@ test("signed creation identity rejects missing, foreign, noncanonical and out-of
   assert.throws(() => validatedMasterOwner(JSON.parse(old), "master", key), /owner shape/);
 });
 
+test("owner/4 signs the acquisition head/context and rejects invalid anchors without changing historical owner formats",()=>{
+  const base=payload() as Extract<MasterOwnerPayload,{schema:"negi-master-conversation-owner/3"}>;
+  const modern={...base,schema:"negi-master-conversation-owner/4" as const,indexed:{head:{seq:0,sha256:"0".repeat(64)},contextSha256:"d".repeat(64)}};
+  const raw=signedMasterOwner(modern,key);assert.equal(JSON.stringify(validatedMasterOwner(JSON.parse(raw),"master",key))+"\n",raw);
+  const changed=JSON.parse(raw);changed.indexed.contextSha256="e".repeat(64);assert.throws(()=>validatedMasterOwner(changed,"master",key),/signature mismatch/);
+  for(const indexed of [null,{}, {...modern.indexed,extra:true}, {...modern.indexed,contextSha256:"bad"},
+    ...[-1,1.5,60001].map(seq=>({...modern.indexed,head:{seq,sha256:"0".repeat(64)}})),{...modern.indexed,head:{seq:0,sha256:"f".repeat(64)}}]){
+    const invalid=signedMasterOwner({...modern,indexed} as MasterOwnerPayload,key);
+    assert.throws(()=>validatedMasterOwner(JSON.parse(invalid),"master",key),/owner shape/);
+  }
+});
+
 test("native creation probe distinguishes same live owner, simulated PID reuse, and unknown query failures", { skip: process.platform !== "win32" }, async () => {
   const script = String.raw`import ctypes,json,os,sys
 sys.path.insert(0,sys.argv[1])

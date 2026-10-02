@@ -1,6 +1,6 @@
 # Master会話の独立索引と明示移行候補
 
-NT-067/073の追加部品。`MasterConversationInventory`と固定Python helperに、既存stageと復旧receiptの明示移行、および署名済みDBのstandalone hot journalをSQLite自身でrollbackする明示復旧を追加した。2026-10-03には、明示的なserver登録で会話authorityのstage保存・状態照会・owner復旧を索引へ接続した。復旧は署名済みreceipt intentとWindows nativeの正確なdead owner解除を使い、同じ確認IDを読み直せる。通常読取や起動で自動移行・復旧しない。既存処理は独立DBが残る場合に未接続writerを保留する。production caller、起動検査、通常入力、provider RPC、認証済み確認UIへの全面接続は次の工程である。全73要件・Phase0–8のゴールは継続中。
+NT-067/073の追加部品。`MasterConversationInventory`と固定Python helperに、既存stageと復旧receiptの明示移行、および署名済みDBのstandalone hot journalをSQLite自身でrollbackする明示復旧を追加した。2026-10-03には、明示的なserver登録で会話authorityのstage保存・状態照会・owner復旧を索引へ接続した。新しいindexed owner/4は取得時点の署名headと登録contextを持ち、同じownerのstage/receiptだけを後続行として照合する。復旧は署名済みreceipt intentとWindows nativeの正確なdead owner解除を使い、同じ確認IDを読み直せる。通常読取や起動で自動移行・復旧しない。既存処理は独立DBが残る場合に未接続writerを保留する。production caller、起動検査、通常入力、provider RPC、認証済み確認UIへの全面接続は次の工程である。全73要件・Phase0–8のゴールは継続中。
 
 ## 保存するもの
 
@@ -22,7 +22,7 @@ SQLiteの設定とprocess exit試験は実電源断の保証ではない。[SQLi
 
 intentまたは移行済み原文が保存されてfileがない場合、`pending`と欠落pathを返し、`lookup`で索引の固定bytesを読み出せる。次のappendは保留する。既存の部分/異なるfileや未登録directory/fileは変更せず保留する。取消stageを後付けしたり、モデル処理を再実行したりしない。receiptも欠落を返せるが、一般stage writerから公開/復元しない。自動復元や人の確認済み復元APIはまだ提供していない。
 
-appendは選択Masterの正確な署名ownerと、呼出前に固定したheadを要求する。新部品のowner/3はPID、nonce、要求hash、cwd hashに加え、Windowsのnative process作成FILETIME、またはLinuxのboot ID＋開始tickを署名する。Pythonを直接起動した親processのPID/作成tokenと一致する必要がある。PIDが同じだけの古いownerやowner/2はappendへ使えない。2026-10-02に新規authority ownerとnative復旧の版判別をowner/3へ接続した。過去owner/2の原文は保持する。既存stage/receiptの明示baseline移行を追加したが、新規stage/receipt intentの通常authorityへの全面接続と旧binaryの排除は引き続き必要である。
+appendは選択Masterの正確な署名ownerと、呼出前に固定したheadを要求する。owner/3・4はPID、nonce、要求hash、cwd hashに加え、Windowsのnative process作成FILETIME、またはLinuxのboot ID＋開始tickを署名する。Pythonを直接起動した親processのPID/作成tokenと一致する必要がある。PIDが同じだけの古いownerやowner/2はappendへ使えない。明示indexed登録のauthorityはowner/4に取得時の索引headと固定contextも署名し、legacy登録はowner/3を使う。過去owner/2・3の原文は保持する。stage/receipt intentは明示登録したauthorityへ接続済みで、production caller・通常turn/startup/providerへの全面接続と旧binaryの排除は引き続き必要である。
 
 Windowsの読取は同じnative handle APIのfile ID・link数・size・作成/更新時刻を前後で照合する。PythonのWindows lstat/fstatが異なるctimeを返したため、両API間のctime比較を廃した。正規directoryのhandleを保持し、DB/fileのreparse/hardlinkを拒否する。選択headを読取後とappend直前に再確認し、全filesystem本文走査をSQLiteのwrite transactionから外した。
 
@@ -38,12 +38,12 @@ DBとauthorityを同時に過去snapshotへ戻す攻撃、同じOS userによる
 
 `-journal/-wal/-shm`がある場合はGET/append/registerを保留する。実transaction途中のexitで残ったjournalも通常読取から回復しない。[明示DB復旧候補](#2026-10-03-署名済みdbの明示hot-journal復旧)は正規DB/journal、期待するproof、全owner不在とOS排他を照合し、SQLite自身へrollbackを委ねる。WAL/SHM、cold/partial/super-journal等の復旧と確認UIは未対応。手動でjournalを削除する実装は提供しない。
 
-既存復旧receiptは明示移行で索引へ原文のまま取り込める。未登録receiptや`.pending-*`は保留する。新規receipt intentをnativeの同じ解除境界で照合し、同じ確認の固定bytesを再利用すること、owner baselineのheadを対象要求/自分のreceiptだけ正規化する接続は未実装である。一般stage repairでreceiptを作成しない。
+過去owner/2・3の復旧receiptは明示移行で索引へ原文のまま取り込める。未登録receiptや`.pending-*`は保留する。明示indexed登録のauthorityでは、新規receipt intentをnativeの同じ解除境界で照合し、同じ確認の固定bytesを再利用する。owner/4の取得head以後は同じowner/requestのstageと同じcontextの自分のreceiptだけを認める。owner/4またはそのreceiptは元の索引が必須で、DB欠落後のlegacy adoptionへ使えない。一般stage repairでreceiptを作成しない。
 
 ## 接続前に残る工程
 
 1. 既存stage/receiptの明示移行は候補APIへ追加済み。旧binary/version fence、turn/schedulerのbaseline索引、retention/既存DB版移行と通常authorityへの全面接続を進める。root/鍵作成前の独立DB検査は保持する。
-2. 明示DB rollback候補の人間確認と通常経路への接続、未対応journal/部分bootstrapの復旧、欠落stageだけの認証済みpreview/repair、native receipt intent/解除の照合、owner baseline正規化。
+2. 明示DB rollback候補とindexed owner復旧の認証済み人間確認・production経路への接続、未対応journal/部分bootstrapの復旧、欠落stageだけの認証済みpreview/repair。
 3. 複数Masterの並行appendと大規模履歴の実測、turn/scheduler全履歴の索引/照合、初回基盤とtarget-bearing admissionの復旧。
 4. 同じ常駐App Serverでの初回空thread/rotation、戻り値cwd/model/provider/settings、旧runtimeのtool/approval/server request/waiter静止、通常入力との共通排他。
 5. 認証済み利用者の確認と完了後だけのUI境界、再接続の同じID照会、実機safe-area/keyboardと人の受入。
@@ -259,3 +259,19 @@ previewもこの確認の欠落と別記録の欠落を分ける。own receipt�
 新規14ケースは3種類の実Node dead owner、intent/native ACK消失、部分書込み/公開直後の実Python exit、移行済み過去ACK、後の別owner、root/key/DB欠落、foreign scheduler lock、stale proof、別cwd、登録元の変更、admission targetの後発作成、別receipt欠落を確認する。最後の欠落ケースの公開済み状態と復元は試験用に構成し、製品のrepair APIの証拠とは扱わない。合成provider identityと一時filesystemを使い、開始したchildは実際の終了を待つ。途中のfocused集合は最終suiteと合算しない。
 
 独立read-onlyレビューの状態誤分類を修正し、再レビューで追加の具体的blockerはなかった。参加writerのroot/scheduler guard内に限る保証で、旧binary/version fenceや同権限の非参加writer ABAは継続する。通常turn予約・provider起動・起動監査は既存の互換gateを維持する。turn/schedulerの索引baseline、通常owner取得時のbaseline登録、初回thread/root/config、戻りcwd/model/provider/settings、旧tools/approval/server requests/waiters静止、HTTP/認証済み人間確認UI、repair/保持/版移行/性能、実停電/UNC/Linuxは次の工程である。Codex「新しい会話」は未有効化。Material 3 Expressiveの既存UIを維持し、実機safe-area/keyboardと人間受入は未確認。全73要件・Phase0–8と全体ゴールはACTIVE。
+
+## 2026-10-03: owner取得時の索引headと後続行の照合
+
+server内部で`stageStorage: "indexed"`を登録した通常のowner取得を`negi-master-conversation-owner/4`へ変更した。3種類のownerに、取得時点の認証済み`indexed.head {seq, sha256}`と、固定turnRoot/schedulerPathの`contextSha256`をHMAC署名する。既存の会話/turn/schedulerのphysical証拠hashとnative process作成tokenも保持する。legacy登録はowner/3を使い、過去owner/2・3の原文を変更しない。DB schema/version、stage event/1、移行event/2、receipt event/3、receipt原文の版は変えない。
+
+通常auditはowner/4の署名・prefixを検査する。新しい読取専用`ownerBaseline(ownerSha256)`は、さらにserverに登録したcontextと正確なowner bytesを照合する。取得headが現在より先にある、hashが違う、head以後に別owner/requestの行がある場合は保留する。正規化できる後続行は同じownerのthread-start stageと、同じowner/request/context/pathの復旧receiptだけである。stageの欠落・部分file・改変を正規化する処理ではない。
+
+ownerはfsyncしてwrite handleを閉じた後、処理開始前と通常のowner解除前にこの基準を再検査する。stage intentのappendには固定contextを渡し、native復旧receiptのcommitでも同じ基準を検査する。receiptを読み直す際は、そのreceipt保存直前までの行を照合し、後の正当な別処理を過去のownerへ帰属させない。保存済み確認のACKは元の原文・UUID・proofを維持し、providerを再実行しない。
+
+DBが欠けてもowner/4をlegacy解除へ切り替えない。Windowsのlegacy native入口はguard作成前と開いた正確なowner bytesで拒否し、既存owner/2・3の確認にはDELETEを共有できるnative readerを使用する。owner/4を含むreceiptも、元の索引を失った状態からlegacy移行として受け入れない。これは元DBのrepair APIではなく、欠落を保留する境界である。root全体の参加version登録・旧binaryの排除、索引とauthorityを同時に戻す外部rollback/ABAの保証は別の条件として残る。
+
+最終関連8 test filesは**156件中155成功・OS条件1スキップ・失敗/取消0（705120.9183ms、actual exit0）**。実行中の17 runtime/test filesのhashは不変だった。Python AST5・固定mjs構文・client/server型検査・build・差分検査成功。独立read-onlyレビューは署名形式、取得prefix/後続行、SQLite/FS snapshot、欠損DBのdowngrade拒否とWindows native/旧形式の互換境界を確認し、material findingなし。レビュー側の変更・試験の重複実行はない。開始した試験childの終了を待った。途中focused集合と最終suiteは合算しない。client assetsは`index-CvLJ6iRB.css`/`index-C-cjKz75.js`と一致する。
+
+新規の統合4ケースは、取得headのfuture/prefix/context/HMAC改変、別の認証済みoperation行、後のindexed operationを経た過去ACK、欠落DBでのnative/legacy/adoption拒否を確認する。既存3種類の実dead ownerケースにもowner/4のhead/contextを確認するassertionを追加した。旧形式の移行2ケースとmissing-cwd契約は構成したowner/3 fixtureで維持し、製品にdowngrade手順は提供しない。初期focusedの旧fixture署名ミスと、追加したnative preflightがDELETE handleを共有できない互換不具合を修正した。後者はnative share7 readerへ変更し、旧解除・過去ACKを再確認した。途中focused集合と最終suiteは合算しない。
+
+通常turn予約・起動・provider・production caller・HTTP/認証済み人間確認UIには接続していない。通常ownerと索引headの接続は今回の進捗であり、turn/schedulerの索引baseline、初回root/config/target、returned identity/旧runtime静止、version fence、repair/保持/版移行/大規模性能、実停電/UNC/Linux、実機safe-area/keyboardと全導線受入は継続する。Material 3 Expressive UIは保持し、Codex「新しい会話」は未有効化。全73要件・Phase0–8と全体ゴールはACTIVE。

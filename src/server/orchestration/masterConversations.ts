@@ -112,7 +112,11 @@ export class MasterConversationAuthority {
 
   private async requireStageStorage(): Promise<void> {
     if (!this.stageInventory) return this.requireLegacyInventoryAbsent();
-    try { check((await this.stageInventory.audit()).state === "clean", "stage intent has not been materialized"); }
+    try {
+      this.assertIndexedRecoveryContext();
+      check((await this.stageInventory.audit()).state === "clean", "stage intent has not been materialized");
+      this.assertIndexedRecoveryContext();
+    }
     catch { throw new MasterConversationHeldError("会話の保存記録を照合してください。未完了の保存を保持しています。"); }
   }
 
@@ -125,6 +129,7 @@ export class MasterConversationAuthority {
 
   private async prepare(cwd: string) {
     if (this.stageInventory) {
+      this.assertIndexedRecoveryContext();
       // Explicit server registration only. Never bootstrap/migrate a missing DB,
       // recreate a root/key, or change a legacy authority from a read operation.
       await this.requireStageStorage();
@@ -178,9 +183,13 @@ export class MasterConversationAuthority {
     try{evidenceSha256 = await masterOwnerEvidence(evidenceOptions,kind,operation.requestId);}catch{throw new MasterConversationHeldError();}
     const ticket = masterStorageTicket(this.root);
     check(process.platform === "win32" && ticket?.pid === process.pid, "native owner identity unavailable");
-    const bytes = signedMasterOwner({ schema:"negi-master-conversation-owner/3", owner:randomUUID(), pid:process.pid,
+    const indexed = this.stageInventory ? await this.stageInventory.audit() : null;
+    check(indexed === null || indexed.state === "clean", "indexed owner acquisition is pending");
+    const payload = { schema:"negi-master-conversation-owner/3" as const, owner:randomUUID(), pid:process.pid,
       createdAt:new Date().toISOString(), masterId:this.options.masterId, kind, cwdSha256:hash(state.canonicalCwd), operation, evidenceSha256,
-      processIdentity: { platform: "windows", pid: ticket.pid, startToken: ticket.startToken } },state.key);
+      processIdentity: { platform: "windows" as const, pid: ticket.pid, startToken: ticket.startToken } };
+    const bytes = signedMasterOwner(indexed ? { ...payload, schema:"negi-master-conversation-owner/4",
+      indexed:{head:indexed.head,contextSha256:hash(JSON.stringify({turnRoot:this.options.turnRoot,schedulerPath:this.schedulerPath}))} } : payload,state.key);
     await this.requireStageStorage();
     let file;
     try { file = await open(path, "wx", 0o600); }
@@ -194,6 +203,7 @@ export class MasterConversationAuthority {
       if (this.stageInventory) { await file.close(); fileClosed = true; }
       await this.requireStageStorage();
       check(evidenceSha256 === await masterOwnerEvidence(evidenceOptions,kind,operation.requestId), "evidence changed before owner admission");
+      if(this.stageInventory)await this.stageInventory.ownerBaseline(hash(bytes));
       await this.requireStageStorage();
       return await run(state);
     } finally {
@@ -201,6 +211,7 @@ export class MasterConversationAuthority {
         // An index appearing during this operation makes its owner evidence
         // part of the required migration/reconciliation. Preserve it.
         await this.requireStageStorage();
+        if(this.stageInventory)await this.stageInventory.ownerBaseline(hash(bytes));
         const current = await lstat(path), record = await artifact(path, 8000);
         check(current.dev === pinned.dev && current.ino === pinned.ino && record?.bytes === bytes, "owner lock replaced; keep hold");
         await unlink(path); // Remove only this exact live owner; never steal an old lock.
@@ -357,6 +368,7 @@ export class MasterConversationAuthority {
       const record=await artifact(join(state.master,"owner.lock"),2000);
       if(!record){if(this.stageInventory)await this.stageInventory.audit();return null;}
       const owner=validatedMasterOwner(record.value,this.options.masterId,state.key);
+      if(this.stageInventory&&owner.schema==="negi-master-conversation-owner/4")await this.stageInventory.ownerBaseline(hash(record.bytes));
       const indexed = this.stageInventory ? await this.stageInventory.ownerRecoveryIntent(owner.owner) : null;
       let saved:RecoveryPayload|null=null;
       if(indexed?.receipt){
@@ -373,7 +385,7 @@ export class MasterConversationAuthority {
       const supported=process.platform==="win32";
       const storagePending=indexed?.missing.some(path=>path!==indexed.receipt?.relativePath)??false;
       const ownMissing=indexed?.receipt!==null&&indexed?.missing.includes(indexed.receipt?.relativePath??"");
-      const compatible=indexed ? indexed.origin!=="adopted"&&!storagePending : await this.legacyInventoryAbsent();
+      const compatible=indexed ? indexed.origin!=="adopted"&&!storagePending : owner.schema!=="negi-master-conversation-owner/4"&&await this.legacyInventoryAbsent();
       if(this.stageInventory){
         check(isDeepStrictEqual(indexed,await this.stageInventory.ownerRecoveryIntent(owner.owner)),"indexed recovery preview changed");
         this.assertIndexedRecoveryContext();
@@ -399,6 +411,7 @@ export class MasterConversationAuthority {
       let record=await artifact(join(state.master,"owner.lock"),2000);
       const owner=record?validatedMasterOwner(record.value,this.options.masterId,state.key):null;
       const decisions=await this.recoveryDecisions(state.master,state.key,owner?.owner),existing=decisions.find(row=>row.payload.decisionId===decisionId);
+      check(owner?.schema!=="negi-master-conversation-owner/4"&&existing?.payload.owner.schema!=="negi-master-conversation-owner/4","indexed owner requires its original inventory registration");
       if(!record){
         check(existing&&existing.payload.cwdSha256===hash(state.canonicalCwd)&&existing.payload.proofSha256===expectedProofSha256,"absent owner has no matching decision");
         // The receipt describes this past exact owner. Later legitimate work
@@ -454,6 +467,7 @@ export class MasterConversationAuthority {
         const receipt=indexed?.receipt??(legacy?{relativePath:"recoveries/"+legacy.payload.owner.owner+".json",bytes:legacy.bytes}:null);
         if(!receipt)return null;
         const value=JSON.parse(receipt.bytes),payload=this.validateRecoveryRecord(value,value.payload?.owner?.owner+".json",state.key);
+        check(this.stageInventory!==null||payload.owner.schema!=="negi-master-conversation-owner/4","indexed recovery requires its original inventory registration");
         check(payload.decisionId===decisionId&&payload.cwdSha256===hash(state.canonicalCwd),"saved recovery checkout/decision differs");
         const expectedOwner=JSON.stringify(payload.owner)+"\n",ownMissing=indexed?.missing.includes(receipt.relativePath)??false;
         const storagePending=indexed?.missing.some(path=>path!==receipt.relativePath)??false;

@@ -376,3 +376,13 @@ Material 3 Expressiveの作業一覧・Task・レビュー・初回設定・知�
 最終関連7 test filesは**148件中147成功・OS条件1スキップ・失敗/取消0（585,547.7888ms、actual exit0）**。実行中の15 runtime/test filesのhashは不変だった。Python AST5・固定mjs構文・client/server型検査・build・差分検査成功。開始した試験childは終了を待った。新規14ケースを含む最終集合であり、途中focused集合と合算しない。client assetsは`index-CvLJ6iRB.css`/`index-C-cjKz75.js`と一致する。
 
 Material 3 Expressiveの作業一覧・Task・レビュー・初回設定・知識・チーム・会話・端末を維持する。今回新GUI/実provider/model/Jev/実機/人の受入/CI成功を確認した結果ではない。production caller/HTTP/認証済み確認UI、通常owner baseline・turn/scheduler索引、version fence、初回thread/戻りidentity/旧runtime静止、repair/保持/版移行/性能、実停電/UNC/Linux、native phoneのsafe-area/keyboardと全導線受入が残る。Codex「新しい会話」は未有効化。NT-067/073の追加進捗であり、全73要件・Phase0–8と全体ゴールはACTIVE。
+
+## 2026-10-03追加: owner取得時の索引headと後続行の照合
+
+[方式と境界](negi-teams-master-conversation-inventory.md#2026-10-03-owner取得時の索引headと後続行の照合)。明示indexed登録の3種類の通常owner取得をowner/4へ接続した。取得時点の署名headと固定登録contextをownerへ束縛し、通常audit・読取専用ownerBaseline・stage/receipt intentでprefixと同じownerの後続行を確認する。別writer/request/context、future/変更head、HMAC不一致は保留する。過去receiptは保存直前までの行を照合し、後の正当な処理を過去ownerへ帰属させない。
+
+owner/4またはそのreceiptを、missing DBからlegacy解除/移行へdowngradeしない。通常legacyと過去owner/2・3の原文は保持する。旧互換fixtureの署名ミスと、native preflightのDELETE sharing不具合を修正し、native readerと正確なopened ownerで照合する。fixtureでの旧形式作成は製品のconversion APIではない。
+
+最終関連8 test filesは**156件中155成功・OS条件1スキップ・失敗/取消0（705120.9183ms、actual exit0）**。実行中の17 runtime/test filesのhashは不変だった。Python AST5・固定mjs構文・client/server型検査・build・差分検査成功。独立read-onlyレビューは署名形式、取得prefix/後続行、SQLite/FS snapshot、欠損DBのdowngrade拒否とWindows native/旧形式の互換境界を確認し、material findingなし。レビュー側の変更・試験の重複実行はない。開始した試験childの終了を待った。途中focused集合と最終suiteは合算しない。client assetsは`index-CvLJ6iRB.css`/`index-C-cjKz75.js`と一致する。
+
+production caller、通常turn/provider/起動、認証済み人間確認UIの互換gateは維持する。turn/scheduler索引baseline、初回root/config/targetとreturned identity/旧runtime静止、参加version fence、repair/保持/版移行/性能、外部rollback/ABA、実停電/UNC/Linuxとnative phone/全導線の人間受入は残る。Material 3 Expressive assetsを維持し、今回新GUI/実model/Jev/CI成功の証拠ではない。Codex「新しい会話」は未有効化。全73要件・Phase0–8と全体ゴールはACTIVE。

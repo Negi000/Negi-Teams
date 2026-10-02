@@ -329,7 +329,7 @@ def process_identity():
 def storage_action(function):
     @wraps(function)
     def guarded(self, *args, **kwargs):
-        with storage_guard(self.root, create=function.__name__ not in ("audit", "lookup", "latest_stage", "append_receipt", "recovery_intent", "owner_recovery_intent", "release_recovery", "preview_migration", "preview", "recover")):return function(self, *args, **kwargs)
+        with storage_guard(self.root, create=function.__name__ not in ("audit", "owner_baseline", "lookup", "latest_stage", "append_receipt", "recovery_intent", "owner_recovery_intent", "release_recovery", "preview_migration", "preview", "recover")):return function(self, *args, **kwargs)
     return guarded
 
 
@@ -519,6 +519,7 @@ class Inventory:
                         for filename in receipt_names:
                             relative = entry + "/" + filename
                             raw = read_file(path / filename, 8000);payload = self.receipt(raw, filename)
+                            require(payload["owner"]["schema"] != "negi-master-conversation-owner/4", "indexed receipt requires its original inventory, not legacy adoption")
                             require(payload["decisionId"] not in decisions, "duplicate legacy recovery decision")
                             decisions.add(payload["decisionId"]);receipts += 1
                             require(receipts <= MAX_RECEIPTS, "migration receipt capacity; preserve legacy history")
@@ -787,6 +788,9 @@ class Inventory:
                 payload = self.receipt(artifact, path.split("/")[1])
                 require(payload["decisionId"] not in receipts and event["stage"] is None and event["requestId"] == payload["owner"]["operation"]["requestId"], "receipt decision/event mismatch")
                 require(imported or event["ownerSha256"] == sha(encoded(payload["owner"]) + b"\n"), "receipt exact owner hash")
+                if payload["owner"]["schema"] == "negi-master-conversation-owner/4":
+                    require(not imported and event["contextSha256"] == payload["owner"]["indexed"]["contextSha256"], "indexed receipt cannot downgrade its context/baseline")
+                    self.assert_owner_baseline(conn, checkpoint, payload["owner"], through=seq - 1)
                 adopted_receipts += int(imported)
                 self.receipt_artifacts[path] = (artifact, payload, imported, event.get("contextSha256"))
                 receipts.add(payload["decisionId"]);require(len(receipts) <= MAX_RECEIPTS, "receipt capacity; migrate explicitly")
@@ -907,6 +911,13 @@ class Inventory:
         require(before == self.scan(paths), "journal inventory/content changed during audit")
         conn.execute("BEGIN")
         require(self.validated(conn, meta, integrity=False) == checkpoint, "selected checkpoint changed during audit")
+        if not absent(self.master / "owner.lock"):
+            raw = read_file(self.master / "owner.lock", 2000)
+            try:marker = json.loads(raw.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):marker = None
+            if type(marker) is dict and marker.get("schema") == "negi-master-conversation-owner/4":
+                _, owner = self.owner(sha(raw), live=False, thread_only=False)
+                self.assert_owner_baseline(conn, checkpoint, owner)
         return checkpoint, paths, operations, before[2]
 
     def result(self, checkpoint, paths, missing):
@@ -921,24 +932,57 @@ class Inventory:
             checkpoint, paths, _, missing = self.audited(conn, meta)
             return self.result(checkpoint, paths, missing)
 
-    def owner(self, expected_sha):
+    def owner(self, expected_sha, live=True, thread_only=True):
         require(valid_sha(expected_sha), "exact owner SHA required")
         raw = read_file(self.master / "owner.lock", 2000)
         require(sha(raw) == expected_sha, "owner bytes changed")
         value = canonical(raw, 2000)
-        require(set(value) == {"schema", "pid", "owner", "createdAt", "masterId", "kind", "cwdSha256", "operation", "evidenceSha256", "signature", "processIdentity"}
-                and value["schema"] == "negi-master-conversation-owner/3" and value["masterId"] == self.master_id
+        required = {"schema", "pid", "owner", "createdAt", "masterId", "kind", "cwdSha256", "operation", "evidenceSha256", "signature", "processIdentity"}
+        require(value["schema"] in ("negi-master-conversation-owner/3", "negi-master-conversation-owner/4")
+                and set(value) == required | ({"indexed"} if value["schema"] == "negi-master-conversation-owner/4" else set()) and value["masterId"] == self.master_id
                 and type(value["pid"]) is int and 0 < value["pid"] <= 0x7fffffff and valid_uuid(value["owner"])
-                and value["kind"] == "thread-start" and valid_sha(value["cwdSha256"]) and valid_sha(value["evidenceSha256"])
+                and value["kind"] in (("thread-start",) if thread_only else ("thread-start", "inspection", "turn-admission")) and valid_sha(value["cwdSha256"]) and valid_sha(value["evidenceSha256"])
                 and valid_sha(value["signature"]), "stage owner shape/kind")
         date(value["createdAt"])
         payload = {key: item for key, item in value.items() if key != "signature"}
         require(hmac.compare_digest(value["signature"], hmac.new(self.key, encoded(payload), hashlib.sha256).hexdigest()), "owner HMAC")
-        require(value["pid"] == os.getppid() and value["processIdentity"] == process_identity(), "owner process creation token differs from invoking parent")
+        if live:require(value["pid"] == os.getppid() and value["processIdentity"] == process_identity(), "owner process creation token differs from invoking parent")
         operation = value["operation"]
         require(type(operation) is dict and set(operation) == {"domain", "requestId", "hash"}
                 and operation["domain"] == "master-conversation" and valid_uuid(operation["requestId"]) and valid_sha(operation["hash"]), "owner operation")
+        from negi_recover_writer import validate
+        validate(raw, "master", operation["domain"], operation["requestId"], operation["hash"])
         return raw, value
+
+    def assert_owner_baseline(self, conn, checkpoint, owner, context=None, through=None):
+        if owner["schema"] != "negi-master-conversation-owner/4":return
+        indexed = owner["indexed"];head = indexed["head"]
+        upper = checkpoint[1] if through is None else through
+        require(head["seq"] <= upper <= checkpoint[1], "indexed owner baseline is ahead of current history")
+        row = conn.execute("SELECT entry_sha FROM events WHERE master_id=? AND seq=?", (self.master_id, head["seq"])).fetchone()
+        require(head["sha256"] == (row[0] if row else "0" * 64) and (head["seq"] == 0 or row is not None), "indexed owner baseline prefix changed")
+        if context is not None:require(indexed["contextSha256"] == sha(encoded(context)), "indexed owner registered context changed")
+        owner_sha = sha(encoded(owner) + b"\n")
+        for (raw,) in conn.execute("SELECT body FROM events WHERE master_id=? AND seq>? AND seq<=? ORDER BY seq", (self.master_id, head["seq"], upper)):
+            event = json.loads(raw, object_pairs_hook=unique)
+            require(event.get("ownerSha256") == owner_sha and event["requestId"] == owner["operation"]["requestId"], "indexed owner history contains another writer")
+            require(event["schema"] == "negi-master-inventory-event/1" and owner["kind"] == "thread-start" and event["type"] == "stage"
+                    or event["schema"] == "negi-master-inventory-event/3" and event["type"] == "receipt"
+                    and event["relativePath"] == "recoveries/" + owner["owner"] + ".json" and event["contextSha256"] == indexed["contextSha256"], "indexed owner history kind/context changed")
+
+    @storage_action
+    def owner_baseline(self, request):
+        require(set(request) == {"action", "root", "masterId", "ownerSha256", "recoveryContext"}, "owner baseline input")
+        context = self.recovery_context(request["recoveryContext"])
+        with self.connection() as (conn, meta):
+            checkpoint, paths, _, missing = self.audited(conn, meta)
+            raw, owner = self.owner(request["ownerSha256"], live=False, thread_only=False)
+            require(owner["schema"] == "negi-master-conversation-owner/4", "indexed owner baseline required")
+            self.assert_owner_baseline(conn, checkpoint, owner, context)
+            require(read_file(self.master / "owner.lock", 2000) == raw, "indexed owner changed during baseline read")
+            result = self.result(checkpoint, paths, missing)
+            result.update(action="ownerBaseline", ownerSha256=request["ownerSha256"])
+            return result
 
     @storage_action
     def append(self, request):
@@ -951,7 +995,8 @@ class Inventory:
             finally:self.retained = None
 
     def append_checked(self, request):
-        require(set(request) == {"action", "root", "masterId", "expectedHead", "ownerSha256", "relativePath", "bytes"}, "append input fields")
+        fields = {"action", "root", "masterId", "expectedHead", "ownerSha256", "relativePath", "bytes"}
+        require(set(request) in (fields, fields | {"recoveryContext"}), "append input fields")
         expected = request["expectedHead"]
         require(type(expected) is dict and set(expected) == {"seq", "sha256"} and type(expected["seq"]) is int
                 and 0 <= expected["seq"] < MAX_EVENTS and valid_sha(expected["sha256"]), "expected checkpoint")
@@ -963,6 +1008,8 @@ class Inventory:
             body, seq, last = checkpoint
             require(expected == {"seq": seq, "sha256": last}, "stale checkpoint; never retry automatically")
             owner_raw, owner = self.owner(request["ownerSha256"])
+            if owner["schema"] == "negi-master-conversation-owner/4":
+                self.assert_owner_baseline(conn, checkpoint, owner, self.recovery_context(request.get("recoveryContext")))
             payload = self.stage(artifact)
             stage_request = payload["request"]
             request_id = stage_request["requestId"]
@@ -1050,6 +1097,7 @@ class Inventory:
         with self.connection() as (conn, meta):
             checkpoint, paths, operations, missing = self.audited(conn, meta)
             payload = self.receipt(artifact, owner["owner"] + ".json")
+            self.assert_owner_baseline(conn, checkpoint, owner, context)
             cwd = self.recovery_cwd(payload["owner"], operations, request.get("cwd"))
             require(not missing, "previous intent is not materialized")
             body, seq, last = checkpoint
@@ -1192,11 +1240,12 @@ def main():
         require(set(request) == {"action", "root", "masterId"}, "input fields")
         result = {"schema": "negi-master-inventory-result/1", "action": action, "masterId": inventory.master_id, "processIdentity": process_identity()}
     else:
-        with storage_guard(inventory.root, ticket, create=action not in ("audit", "lookup", "latestStage", "appendRecoveryIntent", "recoveryIntent", "ownerRecoveryIntent", "releaseRecovery", "previewMigration", "previewDatabaseRecovery", "recoverDatabase")):
+        with storage_guard(inventory.root, ticket, create=action not in ("audit", "ownerBaseline", "lookup", "latestStage", "appendRecoveryIntent", "recoveryIntent", "ownerRecoveryIntent", "releaseRecovery", "previewMigration", "previewDatabaseRecovery", "recoverDatabase")):
             if action in ("initialize", "register", "audit"):
                 require(set(request) == {"action", "root", "masterId"}, "input fields")
                 result = getattr(inventory, action)()
             elif action == "append":result = inventory.append(request)
+            elif action == "ownerBaseline":result = inventory.owner_baseline(request)
             elif action == "lookup":result = inventory.lookup(request)
             elif action == "latestStage":result = inventory.latest_stage(request)
             elif action == "appendRecoveryIntent":result = inventory.append_receipt(request)

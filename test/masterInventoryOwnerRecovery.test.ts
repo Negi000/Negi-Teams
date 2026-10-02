@@ -10,6 +10,7 @@ import { MasterConversationAuthority, type MasterConversationRequest } from "../
 import { MasterConversationInventory } from "../src/server/orchestration/masterConversationInventory.ts";
 import { FileScheduler } from "../src/server/orchestration/scheduler.ts";
 import { recoverWriter } from "../src/server/orchestration/writerRecovery.ts";
+import { signedMasterOwner } from "../src/server/orchestration/masterConversationOwner.ts";
 
 const hash = (raw: string | Buffer) => createHash("sha256").update(raw).digest("hex");
 const bytes = (row: unknown) => JSON.stringify(row) + "\n";
@@ -131,6 +132,10 @@ test("receipt HMAC, exact owner and native live identity must pass before a reco
 
 
 test("adopted historical receipt lookup returns the original decision without enabling a new native release", async () => fixture(async f => {
+  // Historical owner/3 fixture; owner/4 cannot be adopted after losing its DB.
+  const {indexed:_baseline,signature:_oldSignature,...historical}=JSON.parse(f.owner);historical.schema="negi-master-conversation-owner/3";
+  const key=Buffer.from(JSON.parse(await readFile(join(f.root,"signing-key.json"),"utf8")).key,"hex");
+  await writeFile(join(f.master,"owner.lock"),signedMasterOwner(historical,key));
   await unlink(f.inventory.databasePath);
   const legacy = new MasterConversationAuthority({ root: f.root, turnRoot: join(f.dir, "turns"), masterId: "master", scheduler: new FileScheduler(join(f.dir, "scheduler.jsonl")) });
   const preview = await legacy.ownerRecovery(f.cwd);assert.equal(preview?.canRelease, true);
@@ -225,7 +230,8 @@ test("registration is fixed in the signed intent and unsupported inspection/admi
   await assert.rejects(new MasterConversationInventory({ root: f.root, masterId: "master" }).appendRecoveryIntent({ expectedHead: head, ownerSha256: hash(f.owner), bytes: f.receipt }), /registration required/);
   const key = Buffer.from(JSON.parse(await readFile(join(f.root, "signing-key.json"), "utf8")).key, "hex");
   for (const kind of ["inspection", "turn-admission"]) {
-    const { signature: _signature, ...payload } = JSON.parse(f.owner);payload.kind = kind;
+    // Preserve the component's historical owner/3 missing-checkout contract.
+    const { signature: _signature, indexed: _baseline, ...payload } = JSON.parse(f.owner);payload.kind = kind;payload.schema="negi-master-conversation-owner/3";
     const changed = bytes({ ...payload, signature: createHmac("sha256", key).update(JSON.stringify(payload)).digest("hex") });await writeFile(join(f.master, "owner.lock"), changed);
     const receipt = JSON.parse(f.receipt);receipt.payload.owner = JSON.parse(changed);receipt.signature = createHmac("sha256", key).update(JSON.stringify(receipt.payload)).digest("hex");
     await assert.rejects(f.inventory.appendRecoveryIntent({ expectedHead: head, ownerSha256: hash(changed), bytes: bytes(receipt) }), /not connected/);

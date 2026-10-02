@@ -1,5 +1,5 @@
-// Independent candidate primitive. Not connected to MasterConversationAuthority,
-// provider RPC, startup, owner recovery or UI until migration/recovery gates pass.
+// Explicit server-registered candidate for indexed Authority stages/recovery.
+// Ordinary provider/turn/startup and authenticated UI remain separately gated.
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstat } from "node:fs/promises";
@@ -63,7 +63,7 @@ async function script() {
 async function invoke(request: Record<string, unknown>): Promise<Record<string, unknown>> {
   const frozen = structuredClone(request);
   return frozen.action === "processIdentity" ? invokeHeld(frozen) : withMasterStorageGuard(String(frozen.root), () => invokeHeld(frozen),
-    { createIfMissing: !["audit", "lookup", "latestStage", "appendRecoveryIntent", "recoveryIntent", "ownerRecoveryIntent", "releaseRecovery", "previewMigration", "previewDatabaseRecovery", "recoverDatabase"].includes(String(frozen.action)) });
+    { createIfMissing: !["audit", "ownerBaseline", "lookup", "latestStage", "appendRecoveryIntent", "recoveryIntent", "ownerRecoveryIntent", "releaseRecovery", "previewMigration", "previewDatabaseRecovery", "recoverDatabase"].includes(String(frozen.action)) });
 }
 
 async function invokeHeld(request: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -196,6 +196,14 @@ export class MasterConversationInventory {
     fields(row, ["schema", "action", "masterId", "head", "state", "artifactCount", "missing"]);
     return this.auditResult(row);
   }
+  /** Check an indexed owner's signed acquisition head and only its own tail. */
+  async ownerBaseline(ownerSha256: string): Promise<MasterInventoryAudit> {
+    check(this.recoveryContext && sha.test(ownerSha256), "indexed owner/context required");
+    const row = await invoke(this.request("ownerBaseline", { ownerSha256, recoveryContext: this.recoveryContext }));
+    fields(row, ["schema", "action", "masterId", "head", "state", "artifactCount", "missing", "ownerSha256"]);
+    check(row.ownerSha256 === ownerSha256, "indexed owner baseline differs");
+    return this.auditResult(row);
+  }
   async appendStageIntent(input: { expectedHead: MasterInventoryHead; ownerSha256: string; relativePath: string; bytes: string }): Promise<MasterInventoryIntent> {
     // Freeze before the first await: a committed intent must not be compared with
     // a caller's subsequently changed input object.
@@ -203,7 +211,7 @@ export class MasterConversationInventory {
       ownerSha256: input.ownerSha256, relativePath: input.relativePath, bytes: input.bytes };
     head(frozen.expectedHead);
     check(sha.test(frozen.ownerSha256) && stagePath(frozen.relativePath) && typeof frozen.bytes === "string" && Buffer.byteLength(frozen.bytes) <= 24_000, "stage intent input invalid");
-    const row = await invoke(this.request("append", frozen));
+    const row = await invoke(this.request("append", { ...frozen, ...(this.recoveryContext ? { recoveryContext: this.recoveryContext } : {}) }));
     fields(row, ["schema", "action", "masterId", "head", "relativePath", "artifactSha256"]);
     const checkpoint = head(row.head);
     check(checkpoint.seq === frozen.expectedHead.seq + 1 && row.relativePath === frozen.relativePath && row.artifactSha256 === hash(frozen.bytes), "append result differs from intent");
