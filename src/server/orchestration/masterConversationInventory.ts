@@ -16,8 +16,14 @@ export interface MasterInventoryArtifact extends MasterInventoryAudit {
   relativePath: string; bytes: string; artifactSha256: string;
 }
 export interface MasterInventoryProcessIdentity { platform: "windows" | "linux"; pid: number; startToken: string }
+export interface MasterInventoryMigrationPreview {
+  proofSha256: string; masterCount: number; stageCount: number; receiptCount: number;
+}
+export interface MasterInventoryMigrationResult extends MasterInventoryMigrationPreview { decisionId: string }
 const sha = /^[0-9a-f]{64}$/;
-const path = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/0[0-4]-(requested|old_idle|start_dispatched|bound|completed|cancelled|needs_reconciliation)\.json$/;
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const path = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/0[0-4]-(requested|old_idle|start_dispatched|bound|completed|cancelled|needs_reconciliation)|recoveries\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.json$/;
+const stagePath = (value: string) => path.test(value) && !value.startsWith("recoveries/");
 function check(value: unknown, reason: string): asserts value { if (!value) throw Error("Master inventory: " + reason); }
 function fields(value: Record<string, unknown>, names: string[]) {
   check(Object.keys(value).sort().join() === names.sort().join(), "helper result fields");
@@ -27,7 +33,7 @@ function head(value: unknown): MasterInventoryHead {
   check(value && typeof value === "object" && !Array.isArray(value), "checkpoint required");
   const row = value as Record<string, unknown>;
   fields(row, ["seq", "sha256"]);
-  check(Number.isSafeInteger(row.seq) && Number(row.seq) >= 0 && Number(row.seq) <= 50_000 && typeof row.sha256 === "string" && sha.test(row.sha256), "checkpoint invalid");
+  check(Number.isSafeInteger(row.seq) && Number(row.seq) >= 0 && Number(row.seq) <= 60_000 && typeof row.sha256 === "string" && sha.test(row.sha256), "checkpoint invalid");
   return row as unknown as MasterInventoryHead;
 }
 async function script() {
@@ -44,7 +50,7 @@ async function script() {
 async function invoke(request: Record<string, unknown>): Promise<Record<string, unknown>> {
   const frozen = structuredClone(request);
   return frozen.action === "processIdentity" ? invokeHeld(frozen) : withMasterStorageGuard(String(frozen.root), () => invokeHeld(frozen),
-    { createIfMissing: !["audit", "lookup"].includes(String(frozen.action)) });
+    { createIfMissing: !["audit", "lookup", "previewMigration"].includes(String(frozen.action)) });
 }
 
 async function invokeHeld(request: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -57,7 +63,11 @@ async function invokeHeld(request: Record<string, unknown>): Promise<Record<stri
     const child = spawn("python", ["-B", filename], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, PYTHONIOENCODING: "utf-8" } });
     let stdout = "", stderr = "", size = 0, failure: Error | null = null;
-    const timer = setTimeout(() => { failure = Error("Master inventory: helper timeout; operation outcome needs inspection"); child.kill(); }, 30_000);
+    // Do not terminate an explicit adoption on an elapsed-time deadline: it may
+    // already have created its one permitted DB. Wait for its actual exit. The
+    // read-only full preview has a larger budget than ordinary artifact APIs.
+    const timeout = request.action === "migrate" ? null : request.action === "previewMigration" ? 15 * 60_000 : 30_000;
+    const timer = timeout === null ? null : setTimeout(() => { failure = Error("Master inventory: helper timeout; operation outcome needs inspection"); child.kill(); }, timeout);
     child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       size += Buffer.byteLength(chunk);
@@ -67,7 +77,7 @@ async function invokeHeld(request: Record<string, unknown>): Promise<Record<stri
     child.stderr.on("data", (chunk: string) => { stderr = (stderr + chunk).slice(0, 500); });
     child.on("error", error => { failure = error; });
     child.stdin.on("error", error => { failure ??= error; });
-    child.on("close", code => { clearTimeout(timer); if (failure) reject(failure);
+    child.on("close", code => { if (timer) clearTimeout(timer); if (failure) reject(failure);
       else if (code !== 0) reject(Error("Master inventory helper held: " + stderr.trim())); else accept(stdout); });
     child.stdin.end(input);
   });
@@ -96,6 +106,30 @@ export class MasterConversationInventory {
   async registerEmptyMaster(): Promise<void> {
     fields(await invoke(this.request("register")), ["schema", "action", "masterId"]);
   }
+  private migrationSummary(row: Record<string, unknown>): MasterInventoryMigrationPreview {
+    check(typeof row.proofSha256 === "string" && sha.test(row.proofSha256) && Number.isSafeInteger(row.masterCount) &&
+      Number(row.masterCount) > 0 && Number(row.masterCount) <= 10_000 && Number.isSafeInteger(row.stageCount) &&
+      Number(row.stageCount) >= 0 && Number(row.stageCount) <= 50_000 && Number.isSafeInteger(row.receiptCount) &&
+      Number(row.receiptCount) >= 0 && Number(row.receiptCount) <= 50_000 &&
+      Number(row.stageCount) + Number(row.receiptCount) <= 100_000, "migration result invalid");
+    return { proofSha256: row.proofSha256, masterCount: Number(row.masterCount), stageCount: Number(row.stageCount), receiptCount: Number(row.receiptCount) };
+  }
+  /** Read-only snapshot; the persistent root guard must already be installed. */
+  async previewLegacyMigration(): Promise<MasterInventoryMigrationPreview> {
+    const row = await invoke(this.request("previewMigration"));
+    fields(row, ["schema", "action", "masterId", "proofSha256", "masterCount", "stageCount", "receiptCount"]);
+    return this.migrationSummary(row);
+  }
+  /** Explicit create-only adoption; retry the same decision to inspect its commit. */
+  async migrateLegacy(input: { decisionId: string; expectedProofSha256: string }): Promise<MasterInventoryMigrationResult> {
+    const frozen = { decisionId: input.decisionId, expectedProofSha256: input.expectedProofSha256 };
+    check(uuid.test(frozen.decisionId) && sha.test(frozen.expectedProofSha256), "migration decision/proof required");
+    const row = await invoke(this.request("migrate", frozen));
+    fields(row, ["schema", "action", "masterId", "proofSha256", "masterCount", "stageCount", "receiptCount", "decisionId"]);
+    const result = this.migrationSummary(row);
+    check(row.decisionId === frozen.decisionId && result.proofSha256 === frozen.expectedProofSha256, "accepted migration differs from decision");
+    return { ...result, decisionId: frozen.decisionId };
+  }
   async currentProcessIdentity(): Promise<MasterInventoryProcessIdentity> {
     const row = await invoke(this.request("processIdentity"));
     fields(row, ["schema", "action", "masterId", "processIdentity"]);
@@ -109,7 +143,7 @@ export class MasterConversationInventory {
   private auditResult(row: Record<string, unknown>): MasterInventoryAudit {
     const checkpoint = head(row.head);
     check(["clean", "pending"].includes(String(row.state)) && Number.isSafeInteger(row.artifactCount) &&
-      Number(row.artifactCount) >= 0 && Number(row.artifactCount) <= 50_000 && Array.isArray(row.missing) &&
+      Number(row.artifactCount) >= 0 && Number(row.artifactCount) <= 60_000 && Array.isArray(row.missing) &&
       row.missing.length <= Number(row.artifactCount) && row.missing.every(name => typeof name === "string" && path.test(name)) &&
       new Set(row.missing).size === row.missing.length && row.state === (row.missing.length ? "pending" : "clean") &&
       checkpoint.seq === row.artifactCount, "audit result invalid");
@@ -126,7 +160,7 @@ export class MasterConversationInventory {
     const frozen = { expectedHead: { seq: input.expectedHead.seq, sha256: input.expectedHead.sha256 },
       ownerSha256: input.ownerSha256, relativePath: input.relativePath, bytes: input.bytes };
     head(frozen.expectedHead);
-    check(sha.test(frozen.ownerSha256) && path.test(frozen.relativePath) && typeof frozen.bytes === "string" && Buffer.byteLength(frozen.bytes) <= 24_000, "stage intent input invalid");
+    check(sha.test(frozen.ownerSha256) && stagePath(frozen.relativePath) && typeof frozen.bytes === "string" && Buffer.byteLength(frozen.bytes) <= 24_000, "stage intent input invalid");
     const row = await invoke(this.request("append", frozen));
     fields(row, ["schema", "action", "masterId", "head", "relativePath", "artifactSha256"]);
     const checkpoint = head(row.head);

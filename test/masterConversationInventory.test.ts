@@ -464,7 +464,7 @@ test("changed indexed artifact bytes and changed event bytes fail verification",
 
 test("unexpected SQLite schema and application version require explicit migration", async () => fixture(async f => {
   await f.inventory.initialize(); await sql(f, "CREATE TABLE surprise (value TEXT);"); await assert.rejects(f.inventory.audit(), /unexpected database schema/);
-  await sql(f, "DROP TABLE surprise; PRAGMA user_version=2;"); await assert.rejects(f.inventory.audit(), /version\/application/);
+  await sql(f, "DROP TABLE surprise; PRAGMA user_version=3;"); await assert.rejects(f.inventory.audit(), /version\/application/);
 }));
 
 test("read-only audit refuses every journal sidecar without recovery or mutation", async () => fixture(async f => {
@@ -482,10 +482,10 @@ test("unindexed files and empty operation directories are held", async () => fix
   await writeFile(join(f.master, "extra.json"), "{}\n"); await assert.rejects(f.inventory.audit(), /unindexed operation/);
 }));
 
-test("receipts remain an explicit unintegrated gate and are never deleted by inventory", async () => fixture(async f => {
+test("unindexed receipts remain held and are never deleted by inventory", async () => fixture(async f => {
   await f.inventory.initialize(); const receipts = join(f.master, "recoveries"); await mkdir(receipts);
   assert.equal((await f.inventory.audit()).state, "clean"); await writeFile(join(receipts, randomUUID() + ".json"), "saved\n");
-  await assert.rejects(f.inventory.audit(), /receipt indexing is not integrated/); assert.equal((await readdir(receipts)).length, 1);
+  await assert.rejects(f.inventory.audit(), /unindexed recovery receipt/); assert.equal((await readdir(receipts)).length, 1);
 }));
 
 test("wrong owner SHA, changed signed owner and wrong operation bind no intent", async () => fixture(async f => {

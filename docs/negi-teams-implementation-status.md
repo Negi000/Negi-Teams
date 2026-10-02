@@ -310,3 +310,15 @@ Material 3 Expressiveは作業一覧・Task・レビュー・初回設定・知�
 最終関連9 test filesは**189件中188成功・1スキップ・失敗/取消0（202,725.2583ms）**。旧版原文receipt/retry、実live/dead試験owner、署名とmetadataの不正、native query failure、simulated PID再利用で記録ownerだけ解除し生存process identityを保持すること、通常起動・受付・索引候補を確認した。実OSのPID再利用を再現したとは扱わない。初回のfixture2件の不正な新版PIDを修正し、別の失敗logを保持した。最終Python AST・型検査・build・差分検査成功。独立read-onlyレビューの指摘は修正済み。合成providerと試験専用childだけを使い、終了を待った。
 
 owner/3が残る場合のowner/2専用版へのrollbackは保留され、新版復旧が必要。旧binary/version fence、既存履歴baseline/移行intent、stage/receipt/turn/scheduler索引の全面接続、初回thread、明示SQLite rollback/repair/保持/性能、実provider会話切替と確認UI等は継続中である。Material 3 Expressiveのclient assets `index-CvLJ6iRB.css`/`index-C-cjKz75.js`は一致し、新GUI/実機/人の受入/実Codex/model/Jev/CI成功の確認ではない。先行の全残条件と全73要件・Phase0–8を保持し、ゴールはACTIVE。
+
+## 2026-10-02追加: 既存stage/receiptの明示baseline移行
+
+[保存版・移行条件と検証範囲](negi-teams-master-conversation-inventory.md#2026-10-02-既存stagereceiptの明示baseline移行)。全Masterの既存署名stageと復旧receipt原文を、固定preview proofとUUID decisionでcreate-onlyのv2 DBへ取り込む候補APIを追加した。原文・署名・旧owner版と未完了/unknown事実を保持する。全owner/recovery writer不在、繰返し全本文/identity/stamp照合、streaming保存、署名adoption baselineを要求し、実行当時のownerを捏造しない。v1 DBのaudit/appendはv1のまま自動upgradeしない。通常起動・読取から移行せず、認証済み人間確認UI/HTTP routeには未接続である。
+
+commit前の実exitで残るDB/journalを保存し、commit後の返答消失は同じ確認による全Masterの読取照合だけで結果を返す。時間だけで移行helperをkillせず実終了を待ち、35秒の固定TS→Python helper遅延を検証した。helper不終了時のroot guard保持と進捗/取消UIは残る。従来50,000 stage予算はMaster別/全体とも維持し、receipt予算を分離した。receipt数はHMAC認証済みbaseline件数から計算し、他Masterの未署名path改変でstageの使用数を減らせない。物理DB上限でも原本を切り捨てない。
+
+最終関連5 test filesは**153件中152成功・1スキップ・失敗/取消0（210,825.9579ms、exit0）**。Windows一時fixtureで全Master・旧新版原文・未完了/欠落/改変・競合/入力固定・実exit前後・35秒終了待ち・v1互換・縮小容量境界と移行後の他Master path改変を確認した。スキップは非Windows owner preview。独立レビューの30秒killと未署名path集計を修正し、追加の具体的指摘はなかった。前の150件・152件suite、初期の容量fixture失敗と修正後focused6件は別に保持し、合算しない。最終Python AST3件・型検査・build・差分検査成功。開始した試験childの終了を待った。最大履歴での性能や実停電/全platformは未検証である。
+
+Material 3 Expressiveの作業一覧・Task・レビュー・初回設定・知識・チーム・会話・端末は実装済みで、最終buildのassets `index-CvLJ6iRB.css`/`index-C-cjKz75.js`は一致する。今回は新GUI/実機/人の受入/実Codex/model/Jev/CI成功の確認ではない。認証と保存APIを整えてからPC/スマホ別の移行/確認導線へ接続する。
+
+受入前に既に失われた履歴の完全性はUnknown。旧binary/version fence、turn/scheduler baseline、通常stage/receipt intentの全面接続、native解除/owner baseline正規化、初回thread/returned identity/旧runtime静止、明示SQLite rollback/repair、保持/版移行/大規模性能、実機safe-area/keyboardなど先行の全残条件を維持する。移行済みDBでも未接続の通常writer/provider起動を保留し、Codex「新しい会話」は未有効化。全73要件・Phase0–8と全体ゴールはACTIVE。

@@ -1,6 +1,6 @@
-# Master会話の独立索引候補
+# Master会話の独立索引と明示移行候補
 
-NT-067/073の追加部品。`MasterConversationInventory`と固定Python helperを実装した。既存処理には、独立DBが残る場合に旧writerを保留する互換性検査を接続した。索引intentを使う会話authority、起動検査、通常入力、provider RPC、復旧解除、認証済み確認UIの全面接続は次の工程である。全73要件・Phase0–8のゴールは継続中。
+NT-067/073の追加部品。`MasterConversationInventory`と固定Python helperに、既存stageと復旧receiptを全Masterから取り込む明示移行を追加した。通常読取や起動で自動移行しない。既存処理は独立DBが残る場合に未接続writerを保留する。索引intentを使う会話authority、起動検査、通常入力、provider RPC、新規復旧receiptの公開/解除、認証済み確認UIの全面接続は次の工程である。全73要件・Phase0–8のゴールは継続中。
 
 ## 保存するもの
 
@@ -8,20 +8,21 @@ NT-067/073の追加部品。`MasterConversationInventory`と固定Python helper�
 
 - authorityの正規path、root/masters/鍵file identity、鍵全文SHA-256を署名して固定する。
 - 空のMaster directoryだけを明示登録し、directory identityとMaster別の段階数/最終hashを署名する。
-- 各stageの固定相対path、要求ID、stage、前のentry hash、owner全文hash、原文SHA-256と原文bytesを保存する。entryはdomainを分けたHMACとhash鎖で検査する。
+- 新規appendする各stageの固定相対path、要求ID、stage、前のentry hash、owner全文hash、原文SHA-256と原文bytesを保存する。entryはdomainを分けたHMACとhash鎖で検査する。
+- 既存履歴の移行は、全Masterのstage/receipt原文と署名、path、file identity/stamp、鍵とdirectory identityを固定したpreview proofと確認IDを必要とする。移行entryは実行当時のownerを捏造せず、受け入れた署名baselineのhashへ結び付ける。
 - `BEGIN IMMEDIATE`、DELETE journal、`synchronous=FULL`で新しいintentと署名headを同じtransactionへ保存する。成功後だけ、呼出側がstage directory/fileを作成できる。helper自体はstageを作成しない。
 
 SQLiteの設定とprocess exit試験は実電源断の保証ではない。[SQLiteのrollback journalとcommit手順](https://www.sqlite.org/lockingv3.html)に従う保存設定であり、OS・filesystem・deviceの耐久性は別の検証が必要。
 
 ## 検査と所有者
 
-読取は`mode=ro`で既存DBだけを開き、初期化・移行・repairを行わない。schema/application ID/version、integrity/FK、全登録Masterの署名head・行数・整数連番範囲・最終entry hashを検査する。選択したMasterの全entry鎖、署名、stage原文・要求・遷移と、実filesystemのinventory/本文を二度照合する。他Masterの全本文/鎖を検査したという意味ではない。
+読取は`mode=ro`で既存DBだけを開き、初期化・移行・repairを行わない。schema/application ID/version、integrity/FK、全登録Masterの署名head・行数・整数連番範囲・最終entry hashを検査する。選択したMasterの全entry鎖、署名、stage原文・要求・遷移、移行済みreceipt原文と、実filesystemのinventory/本文を二度照合する。通常auditが他Masterの全本文/鎖を検査したという意味ではない。移行確認IDの同一再試行は例外として、全登録Masterの全鎖/本文を検査してから既存の受入記録を返す。
 
 `clean`は選択したMasterの保存整合だけを意味する。`needs_reconciliation`を含む署名済み段階でも、保存が一致すれば`clean`になり得る。idle、scheduler/turnの終端、providerの結果、切替可能、人の承認は別の判定である。
 
-intentだけが保存されてfileがない場合、`pending`と欠落pathを返し、`lookup`で索引の固定bytesを読み出せる。次のappendは保留する。既存の部分/異なるfileや未登録directory/fileは変更せず保留する。取消stageを後付けしたり、モデル処理を再実行したりしない。自動復元や人の確認済み復元APIはまだ提供していない。
+intentまたは移行済み原文が保存されてfileがない場合、`pending`と欠落pathを返し、`lookup`で索引の固定bytesを読み出せる。次のappendは保留する。既存の部分/異なるfileや未登録directory/fileは変更せず保留する。取消stageを後付けしたり、モデル処理を再実行したりしない。receiptも欠落を返せるが、一般stage writerから公開/復元しない。自動復元や人の確認済み復元APIはまだ提供していない。
 
-appendは選択Masterの正確な署名ownerと、呼出前に固定したheadを要求する。新部品のowner/3はPID、nonce、要求hash、cwd hashに加え、Windowsのnative process作成FILETIME、またはLinuxのboot ID＋開始tickを署名する。Pythonを直接起動した親processのPID/作成tokenと一致する必要がある。PIDが同じだけの古いownerやowner/2はappendへ使えない。2026-10-02に新規authority ownerとnative復旧の版判別をowner/3へ接続した。過去owner/2の原文は保持し、署名と保守的なPID終了確認を維持する。stage/receiptの索引intentと既存履歴のbaseline/version移行の全面接続は引き続き必要である。
+appendは選択Masterの正確な署名ownerと、呼出前に固定したheadを要求する。新部品のowner/3はPID、nonce、要求hash、cwd hashに加え、Windowsのnative process作成FILETIME、またはLinuxのboot ID＋開始tickを署名する。Pythonを直接起動した親processのPID/作成tokenと一致する必要がある。PIDが同じだけの古いownerやowner/2はappendへ使えない。2026-10-02に新規authority ownerとnative復旧の版判別をowner/3へ接続した。過去owner/2の原文は保持する。既存stage/receiptの明示baseline移行を追加したが、新規stage/receipt intentの通常authorityへの全面接続と旧binaryの排除は引き続き必要である。
 
 Windowsの読取は同じnative handle APIのfile ID・link数・size・作成/更新時刻を前後で照合する。PythonのWindows lstat/fstatが異なるctimeを返したため、両API間のctime比較を廃した。正規directoryのhandleを保持し、DB/fileのreparse/hardlinkを拒否する。選択headを読取後とappend直前に再確認し、全filesystem本文走査をSQLiteのwrite transactionから外した。
 
@@ -29,19 +30,19 @@ process作成tokenの候補実装はWindows/Linuxに限る。macOSのtoken取得
 
 ## 明示的な境界
 
-この独立DBが残る間、stage末尾やoperation folder全体の削除を欠落として検出できる。root/鍵/Master directoryの消失や別identityへの置換も保留する。索引がない既存の非空記録は初期化対象にせず、旧記録を保持する。初期化はcreate-onlyで、部分/旧版DBを上書きしない。
+この独立DBが残る間、stage末尾やoperation folder全体、移行済みreceiptの削除を欠落として検出できる。root/鍵/Master directoryの消失や別identityへの置換も保留する。索引がない既存の非空記録は通常初期化の対象にせず、明示preview/確認IDによる移行だけを許可する。初期化・移行はcreate-onlyで、部分/旧版DBを上書きしない。
 
 DBとauthorityを同時に過去snapshotへ戻す攻撃、同じOS userによる鍵と全保存先の変更、外部writerのABAを防ぐ外部の単調anchorではない。通常の本文改変/欠落検査と区別する。
 
-候補版はMaster別50,000 stage、DB全体も別の50,000 stage予算、Master catalog 10,000、DB size約1.5GBを上限として保留する。複数Masterの合計にも全体予算を適用し、上限に達したら新stageを保存しない。保持/archival/版移行は未実装であり、上限を理由に記録を削除しない。
+候補版は従来のstage予算をMaster別・DB全体とも50,000のまま保持し、移行済みreceiptにはMaster別10,000・DB全体50,000の独立した予算を適用する。aggregateはMaster別60,000・DB全体100,000、Master catalogは10,000、DB sizeは約1.5GBを上限として保留する。複数Masterの合計にもそれぞれの全体予算を適用する。receipt追加でstage予算を減らさない。移行中もSQLite page数×page sizeをcommit前に確認し、上限を理由に履歴を切り捨てない。保持/archivalと既存DBの版移行は未実装である。
 
 `-journal/-wal/-shm`がある場合はGET/append/registerを保留する。実transaction途中のexitで残ったjournalも読取から回復しない。**正規DB/journal、期待するproof、全owner不在とOS排他を照合し、SQLite自身へrollbackを委ねる明示DB復旧の実装が残る。** 手動でjournalを削除する実装は提供しない。
 
-既存復旧receiptの索引は未接続。空のrecoveriesは読めるが、非空receiptはこの候補部品から保留する。receipt intentをnativeの同じ解除境界で照合し、同じ確認の固定bytesを再利用すること、owner baselineのheadを対象要求/自分のreceiptだけ正規化することが必須。一般stage repairでreceiptを作成しない。
+既存復旧receiptは明示移行で索引へ原文のまま取り込める。未登録receiptや`.pending-*`は保留する。新規receipt intentをnativeの同じ解除境界で照合し、同じ確認の固定bytesを再利用すること、owner baselineのheadを対象要求/自分のreceiptだけ正規化する接続は未実装である。一般stage repairでreceiptを作成しない。
 
 ## 接続前に残る工程
 
-1. 既存journal/owner/2の明示移行、root/鍵作成前の独立DB検査、retention/version更新。
+1. 既存stage/receiptの明示移行は候補APIへ追加済み。旧binary/version fence、turn/schedulerのbaseline索引、retention/既存DB版移行と通常authorityへの全面接続を進める。root/鍵作成前の独立DB検査は保持する。
 2. 明示DB rollback復旧、欠落stageだけの認証済みpreview/repair、native receipt intent/解除の照合、owner baseline正規化。
 3. 複数Masterの並行appendと大規模履歴の実測、turn/scheduler全履歴の索引/照合、初回基盤とtarget-bearing admissionの復旧。
 4. 同じ常駐App Serverでの初回空thread/rotation、戻り値cwd/model/provider/settings、旧runtimeのtool/approval/server request/waiter静止、通常入力との共通排他。
@@ -152,3 +153,27 @@ previewとnative解除の両方へ接続した。解除はreceipt公開前と正
 初回の4 test filesは126件中123成功・2失敗・1スキップ。owner/3なのにtop-level PIDだけを書換え、内側PIDを変更していなかった既存fixtureを修正した。旧PID-onlyの保守的試験はowner/2として保持し、後続の生存ownerは実際のnative開始tokenを使う。focused6成功を経て前記最終suiteを完了し、試験の期待を緩めて不正ownerを採用していない。Python AST・client/server型検査・build・差分検査も成功。独立read-onlyレビューの指摘したfixture2件を修正後、追加の具体的な欠陥は見つからなかった。試験childの終了を待ち、実Codex/model/Jevは起動していない。
 
 これは新規writerと復旧parserのowner版を揃える実装であり、既存stage/turn/scheduler/receiptの索引移行を完成したものではない。owner/3が残った状態でowner/2専用版へrollbackすると保留され、新版の復旧経路を必要とする。旧binaryのversion fence、既存履歴の署名baselineと移行intent、索引intentの通常記録への全面接続、初回threadのdispatch/identity証拠、明示hot-journal rollback/repair、保持/性能と先行の全条件を維持する。Material 3 Expressive client assetsは`index-CvLJ6iRB.css`/`index-C-cjKz75.js`で一致し、新GUI/実機/人の受入/CI成功の確認ではない。Codex「新しい会話」は未有効化で、全73要件・Phase0–8と全体ゴールはACTIVE。
+
+### 2026-10-02: 既存stage/receiptの明示baseline移行
+
+候補APIへ`previewLegacyMigration`と`migrateLegacy`を追加した。previewは既存のauthority/key/root guardを読み、全Masterの原文stageと過去の署名付き復旧receiptを検査する。欠落root/guardを作らず、DB/sidecarが存在すれば保留する。既存guardを用意する工程はpreviewと別に必要である。通常の起動・GET・auditから移行を実行しない。
+
+stageの要求・遷移・前段hash・連続filenameと、receiptの完全なcanonical envelope・署名・owner/2またはowner/3の原文・対象Master/cwd/operation/decisionを照合する。過去receiptのownerについて現在の生存状態を推定しない。全Masterでownerとrecovery writerの不在を要求し、不明なlockを解除しない。部分file、空operation、不明なentry、重複decision、hardlink/reparseはそのまま保留する。署名済みの未完了/unknown stageは事実として保持する。
+
+原文bytesのhash/size、native file identity/stamp、directory identityと完全なfile一覧、authority/keyを繰り返し走査してpreview proofへ固定する。確認IDと正確なproofを受け取った場合だけ、既存DB不在を確認して作成する。入力は最初の非同期待機より前に固定する。全payloadを一括保持せず、原文を一件ずつ再読取してSQLiteへ保存し、commit前にも全snapshotとowner不在を再確認する。entry順はMaster catalogと相対pathの決定順であり、過去の全実行の時系列を復元したものではない。
+
+新規DBは`user_version=2`と署名付き`adoptions`を使う。adoptionはauthority hash、decision、preview proof、全Masterの署名body hashとstage/receipt件数・artifact一覧hashを結合する。移行entry/2はこの受入原文のhashへ結合し、実行当時のowner hashを捏造しない。移行後の新しいstageは従来のevent/1と正確なowner/3を要求する。新しい空Masterの明示登録も既存baselineを書き換えない。既存v1 DBは正確なv1 schemaのままaudit/appendでき、自動upgradeや再移行を行わない。v1専用inventory版へv2 DBを戻すと保留されるが、これだけで全旧binaryの排除を達成したとは扱わない。[user_version](https://www.sqlite.org/pragma.html#pragma_user_version)はアプリ側の版管理として使用する。
+
+既存DBがある同一decision/proofの再試行は、全登録Masterの全署名鎖・本文とfilesystemを読み取り専用で検査し、保存済みの受入結果を返す。別decision/proofや変更された他Master、欠落artifact、部分DB/journalは保留する。importを再送したり、DBを上書きしたりしない。commit前の実process exitでは残ったDB/journalを保存し、commit後の返答消失では同一確認の読取だけで結果を確認する。SQLiteの[transaction](https://www.sqlite.org/lang_transaction.html)を用い、独自にhot journalを削除しない。認証済み明示rollback復旧は引き続き未実装である。
+
+書込み移行helperは経過時間だけで強制停止せず、実際の終了を待つ。通常APIの30秒、読取専用previewの15分とは区別する。これは処理が必ず終了する保証ではなく、helperが終了しない間はroot guardも保持される。進捗/取消/中断後の確認UIは未接続である。出力過大などprotocol異常の保留は残し、その失敗から自動的にimportやDB修復を再実行しない。
+
+stage/receiptの容量は前記の独立した予算を用い、物理DB容量もcommit前に確認する。容量を理由に原本を切り捨てない。receipt件数はHMACで認証したadoptionのMaster別summaryから取り、冗長な未署名`events.path`列でstage/receiptの予算を分類しない。通常auditの他Master全本文検査を省く範囲と、全Masterの容量集計に使用する認証済み件数を区別する。
+
+移行proofは、初めて受け入れた時点に存在する署名済み履歴を固定する。受入前に既に失われていた完全なoperationの存在を証明する外部記録はなく、履歴の過去からの完全性はUnknownである。DB/authorityの同時rollback、同権限外部writer/ABAに対する外部単調anchorにもならない。このAPIは信頼する内部serverの明示decisionであり、認証済み人間確認UI/HTTP routeへはまだ公開していない。
+
+最終関連5 test filesは**153件中152成功・1スキップ・失敗/取消0（210,825.9579ms、exit0）**。スキップはWindows上の非Windows owner preview試験。全Master/空登録/旧新版receipt/未完了事実、proofや署名の変更、欠落/部分file、競合decision、入力固定、他Master改変、実process exit前後、35秒の固定TS→Python helper終了待ち、v1 audit/appendと容量の縮小境界を確認した。実50,000 stage、最大receipt/物理容量での性能、実停電、全platformの受入は未検証である。Python AST3件・client/server型検査・build・差分検査も成功。合成fixtureと所有するNode/Python試験childを使い、開始したchildの終了を待った。
+
+独立read-onlyレビューの移行helperを30秒でkillする問題と、他Masterの未署名path列で容量を分類する問題を修正し、最後のレビューに追加の具体的指摘はなかった。初回11/11、途中66/66、修正前の150件中149成功/1スキップ・152件中151成功/1スキップ、focused runsは別logとして保持し、最終suiteへ合算しない。追加容量試験の初期1失敗は、baseline容量で先に保留したfixtureを、移行後の通常追記を含むものへ修正した。最後のfocused6件と前記153件suiteは修正後の結果である。実Codex/model/Jev、今回の新GUI/実機/人の受入、CI成功の確認ではない。最終buildのMaterial 3 Expressive assetsは`index-CvLJ6iRB.css`/`index-C-cjKz75.js`で一致した。
+
+turn/scheduler baseline、旧binary/version fence、索引intentと通常authority/startup/予約/providerの全面接続、新規receipt intentとnative解除/owner baseline正規化、初回threadとreturned identity/旧runtime静止、明示SQLite復旧・認証済みstage repair・保持/版移行・大規模性能を継続する。移行済みDBでも未接続の通常writerは保留し、移行成功からproviderを起動しない。Material 3 Expressiveは既存の各画面に実装済みで、認証と保存APIが整った後にPC/スマホ別の確認導線へ接続する。実機safe-area/keyboardと人の受入を含む先行の全条件、全73要件・Phase0–8と全体ゴールはACTIVE。

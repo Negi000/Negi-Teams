@@ -1,6 +1,7 @@
 """Candidate inventory for Master conversation stages, independent of editable journals.
 
-No provider calls, owner removal, receipt publication, migration or automatic repair.
+No provider calls, owner removal, receipt publication or automatic repair.
+Legacy adoption is explicit, create-only, and records the accepted snapshot/decision.
 The database detects missing/rolled-back journal files while the independent database
 and signing authority survive. It is not an external monotonic anchor or a sandbox.
 One bounded stdin JSON request; keys and artifact bytes never appear in argv/env.
@@ -22,12 +23,17 @@ from concurrent.futures import ThreadPoolExecutor
 from types import MappingProxyType
 from threading import Lock
 
-VERSION = 1
+VERSION = 2
 APPLICATION_ID = 0x4E544331
-MAX_EVENTS = 50000  # Five stages for each of the existing 10,000 candidate operations.
-MAX_TOTAL_EVENTS = 50000  # Whole DB budget, separately enforced across registered Masters.
+MAX_STAGE_EVENTS = 50000  # Preserve five stages for each of 10,000 operations.
+MAX_TOTAL_STAGE_EVENTS = 50000  # Existing whole-DB stage allowance is unchanged.
+MAX_RECEIPTS = 10000
+MAX_TOTAL_RECEIPTS = 50000  # Receipts have a separate whole-DB allowance.
+MAX_EVENTS = 60000  # Per-Master aggregate; receipts do not consume stage capacity.
+MAX_TOTAL_EVENTS = 100000
 MAX_MASTERS = 10000
 MAX_ARTIFACT = 24000
+MAX_DATABASE_BYTES = 1_500_000_000
 READ_WORKERS = 8  # Concurrent operation readers; retained handles have a separate budget.
 MAX_RETAINED_HANDLES = 8192  # Per one-shot append; larger histories keep legacy full-open reads.
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
@@ -37,6 +43,7 @@ SCHEMA = [
     "CREATE TABLE meta (id INTEGER PRIMARY KEY CHECK(id=1), body BLOB NOT NULL, signature TEXT NOT NULL)",
     "CREATE TABLE masters (master_id TEXT PRIMARY KEY, body BLOB NOT NULL, seq INTEGER NOT NULL, last_sha TEXT NOT NULL, signature TEXT NOT NULL) WITHOUT ROWID",
     "CREATE TABLE events (master_id TEXT NOT NULL REFERENCES masters(master_id), seq INTEGER NOT NULL, path TEXT NOT NULL, body BLOB NOT NULL, artifact BLOB NOT NULL, entry_sha TEXT NOT NULL, signature TEXT NOT NULL, PRIMARY KEY(master_id,seq), UNIQUE(master_id,path)) WITHOUT ROWID",
+    "CREATE TABLE adoptions (id INTEGER PRIMARY KEY CHECK(id=1), body BLOB NOT NULL, signature TEXT NOT NULL)",
 ]
 
 
@@ -265,19 +272,21 @@ def schema_objects(conn):
     return conn.execute("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name").fetchall()
 
 
-def expected_schema():
+def expected_schema(version=VERSION):
     with sqlite3.connect(":memory:") as conn:
-        for sql in SCHEMA:conn.execute(sql)
+        for sql in (SCHEMA if version == 2 else SCHEMA[:3]):conn.execute(sql)
         return schema_objects(conn)
 
 
 def validate_schema(conn, integrity=True):
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
     require(conn.execute("PRAGMA application_id").fetchone()[0] == APPLICATION_ID
-            and conn.execute("PRAGMA user_version").fetchone()[0] == VERSION, "database version/application")
-    require(schema_objects(conn) == expected_schema(), "unexpected database schema")
+            and version in (1, VERSION), "database version/application")
+    require(schema_objects(conn) == expected_schema(version), "unexpected database schema")
     if integrity:
         require(conn.execute("PRAGMA quick_check").fetchall() == [("ok",)], "database integrity")
         require(conn.execute("PRAGMA foreign_key_check").fetchall() == [], "orphan inventory event")
+    return version
 
 
 def process_identity():
@@ -310,7 +319,7 @@ def process_identity():
 def storage_action(function):
     @wraps(function)
     def guarded(self, *args, **kwargs):
-        with storage_guard(self.root, create=function.__name__ not in ("audit", "lookup")):return function(self, *args, **kwargs)
+        with storage_guard(self.root, create=function.__name__ not in ("audit", "lookup", "preview_migration")):return function(self, *args, **kwargs)
     return guarded
 
 
@@ -325,6 +334,7 @@ class Inventory:
         self.master = self.masters / master_id
         self.key_path = self.root / "signing-key.json"
         self.retained = None
+        self.adoption = None
 
     def authority(self):
         normal(self.root.parent, True)
@@ -340,7 +350,7 @@ class Inventory:
                 "mastersIdentity": identity(masters_info), "keyIdentity": identity(normal(self.key_path)), "keySha256": sha(key_raw)}
 
     @contextmanager
-    def guarded(self, initialize=False):
+    def authority_guard(self):
         # On Windows hold canonical parent handles without delete sharing. Other
         # platforms retain before/after detection; hostile same-UID races are not a claim.
         with ExitStack() as stack:
@@ -351,6 +361,13 @@ class Inventory:
                     require(MASTER.fullmatch(name), "unexpected master directory")
                     stack.enter_context(windows_parent(self.masters / name))
             meta = self.authority()
+            yield meta
+            require(self.authority() == meta, "authority identity changed")
+
+    @contextmanager
+    def guarded(self, initialize=False):
+        with ExitStack() as stack:
+            meta = stack.enter_context(self.authority_guard())
             no_sidecars(self.db)
             if initialize:
                 require(absent(self.db), "existing database must never be replaced")
@@ -371,10 +388,11 @@ class Inventory:
                 handle = kernel.CreateFileW(windows_extended(self.db), 0x80000000, 3, None, 3, 0x00200000, None)
                 require(handle != ctypes.c_void_p(-1).value, "database handle unavailable")
                 stack.callback(kernel.CloseHandle, handle)
-                win_info(kernel, handle, limit=1_500_000_000)
-            require(pinned.st_size <= 1_500_000_000, "database size limit; migrate explicitly")
+                win_info(kernel, handle, limit=MAX_DATABASE_BYTES)
+            require(pinned.st_size <= MAX_DATABASE_BYTES, "database size limit; migrate explicitly")
             yield meta
             require(identity(normal(self.db)) == identity(pinned) and self.authority() == meta, "authority/database identity changed")
+            require(normal(self.db).st_size <= MAX_DATABASE_BYTES, "database size limit; preserve committed outcome for inspection")
             no_sidecars(self.db)
 
     @contextmanager
@@ -426,16 +444,190 @@ class Inventory:
                 conn.execute("INSERT INTO masters VALUES (?,?,0,?,?)", (name, body, "0" * 64, self.signed_head(body, 0, "0" * 64)))
             return {"schema": "negi-master-inventory-result/1", "action": "initialize", "masterId": self.master_id}
 
+    def validated_adoption(self, conn, meta):
+        rows = conn.execute("SELECT id,body,signature FROM adoptions").fetchall()
+        if not rows:return None
+        require(len(rows) == 1 and rows[0][0] == 1 and type(rows[0][1]) is bytes and valid_sha(rows[0][2]), "adoption envelope")
+        raw, sig = rows[0][1:]
+        require(hmac.compare_digest(sig, signature(self.key, "negi-master-inventory-adoption/1", raw)), "adoption HMAC")
+        value = json.loads(raw, object_pairs_hook=unique)
+        require(type(value) is dict and encoded(value) == raw and set(value) == {"schema", "authoritySha256", "decisionId", "proofSha256", "masters"}
+                and value["schema"] == "negi-master-inventory-adoption/1" and value["authoritySha256"] == sha(encoded(meta))
+                and valid_uuid(value["decisionId"]) and valid_sha(value["proofSha256"])
+                and type(value["masters"]) is list and 0 < len(value["masters"]) <= MAX_MASTERS, "adoption identity")
+        identifiers, stages, receipts = [], 0, 0
+        for row in value["masters"]:
+            require(type(row) is dict and set(row) == {"masterId", "masterSha256", "stageCount", "receiptCount", "artifactSha256"}
+                    and type(row["masterId"]) is str and MASTER.fullmatch(row["masterId"]) and valid_sha(row["masterSha256"])
+                    and valid_sha(row["artifactSha256"]) and type(row["stageCount"]) is int and 0 <= row["stageCount"] <= MAX_STAGE_EVENTS
+                    and type(row["receiptCount"]) is int and 0 <= row["receiptCount"] <= MAX_RECEIPTS
+                    and row["stageCount"] + row["receiptCount"] <= MAX_EVENTS, "adoption master summary")
+            identifiers.append(row["masterId"]);stages += row["stageCount"];receipts += row["receiptCount"]
+        require(identifiers == sorted(set(identifiers)) and stages <= MAX_TOTAL_STAGE_EVENTS
+                and receipts <= MAX_TOTAL_RECEIPTS and stages + receipts <= MAX_TOTAL_EVENTS, "adoption capacity/order")
+        return raw, value
+
+    def absent_owners(self):
+        for name in catalog(self.masters):
+            require(MASTER.fullmatch(name), "legacy master identity")
+            for filename in ("owner.lock", "owner-recovery.lock"):
+                require(absent(self.masters / name / filename), "all legacy owners/recovery writers must be absent")
+
+    def legacy_snapshot(self, check_database=True):
+        if check_database:
+            no_sidecars(self.db)
+            require(absent(self.db), "existing database must never be replaced or silently upgraded")
+        meta = self.authority();self.absent_owners()
+        master_names = catalog(self.masters)
+        require(self.master_id in master_names, "migration target master missing")
+        snapshot, sources, summaries, total_stages, total_receipts = [], {}, [], 0, 0
+        original_id, original_master = self.master_id, self.master
+        try:
+            for name in master_names:
+                require(MASTER.fullmatch(name), "legacy master registration")
+                self.master_id, self.master = name, self.masters / name
+                before = identity(normal(self.master, True));entries = catalog(self.master, MAX_MASTERS + 3)
+                body = encoded({"masterId": name, "path": str(self.master), "identity": before})
+                files, records, directories, decisions = [], [], [], set()
+                operations = 0;receipts = 0
+                for entry in entries:
+                    path = self.master / entry
+                    if entry == "owner-recovery-flock-v2.lock":
+                        require(read_file(path, 1) == b"", "legacy native recovery guard")
+                        files.append({"path": entry, "stamp": fingerprint(normal(path)), "sha256": sha(b""), "size": 0})
+                        continue
+                    if entry == "recoveries":
+                        directory_id = identity(normal(path, True));receipt_names = catalog(path)
+                        directories.append([entry, directory_id, receipt_names])
+                        for filename in receipt_names:
+                            relative = entry + "/" + filename
+                            raw = read_file(path / filename, 8000);payload = self.receipt(raw, filename)
+                            require(payload["decisionId"] not in decisions, "duplicate legacy recovery decision")
+                            decisions.add(payload["decisionId"]);receipts += 1
+                            require(receipts <= MAX_RECEIPTS, "migration receipt capacity; preserve legacy history")
+                            records.append(("receipt", relative, sha(raw), len(raw), payload["owner"]["operation"]["requestId"], None))
+                            files.append({"path": relative, "stamp": fingerprint(normal(path / filename)), "sha256": sha(raw), "size": len(raw)})
+                        require(directory_id == identity(normal(path, True)) and receipt_names == catalog(path), "legacy receipts changed")
+                        continue
+                    require(valid_uuid(entry), "unknown legacy entry or unresolved writer")
+                    operations += 1;require(operations <= 10000, "legacy operation capacity")
+                    directory_id = identity(normal(path, True));stage_names = catalog(path, 5)
+                    require(stage_names, "empty legacy operation needs reconciliation")
+                    previous = None;previous_sha = None
+                    for index, filename in enumerate(stage_names):
+                        raw = read_file(path / filename, MAX_ARTIFACT);payload = self.stage(raw)
+                        self.transition(previous, payload, previous_sha)
+                        require(payload["request"]["requestId"] == entry and filename == f"0{index}-{payload['stage']}.json", "legacy stage path/order")
+                        relative = entry + "/" + filename
+                        records.append(("stage", relative, sha(raw), len(raw), payload["request"]["requestId"], payload["stage"]))
+                        files.append({"path": relative, "stamp": fingerprint(normal(path / filename)), "sha256": sha(raw), "size": len(raw)})
+                        previous, previous_sha = payload, sha(raw)
+                    require(directory_id == identity(normal(path, True)) and stage_names == catalog(path, 5), "legacy operation changed")
+                    directories.append([entry, directory_id, stage_names])
+                require(before == identity(normal(self.master, True)) and entries == catalog(self.master, MAX_MASTERS + 3), "legacy master changed")
+                records.sort(key=lambda row: row[1]);files.sort(key=lambda row: row["path"])
+                stage_count = len(records) - receipts;total_stages += stage_count;total_receipts += receipts
+                require(stage_count <= MAX_STAGE_EVENTS and len(records) <= MAX_EVENTS and total_stages <= MAX_TOTAL_STAGE_EVENTS
+                        and total_receipts <= MAX_TOTAL_RECEIPTS and total_stages + total_receipts <= MAX_TOTAL_EVENTS,
+                        "migration event capacity; preserve legacy history")
+                artifacts = [{"path": row[1], "sha256": row[2], "size": row[3]} for row in records]
+                summaries.append({"masterId": name, "masterSha256": sha(body), "stageCount": stage_count, "receiptCount": receipts, "artifactSha256": sha(encoded(artifacts))})
+                snapshot.append({"masterId": name, "identity": before, "entries": entries, "directories": directories, "files": files})
+                sources[name] = (body, records)
+        finally:self.master_id, self.master = original_id, original_master
+        self.absent_owners()
+        require(meta == self.authority() and master_names == catalog(self.masters), "legacy authority changed")
+        proof = sha(encoded({"schema": "negi-master-inventory-migration-preview/1", "authority": meta, "masters": snapshot}))
+        return meta, proof, sources, summaries
+
+    def migration_result(self, action, proof, summaries, decision=None):
+        result = {"schema": "negi-master-inventory-result/1", "action": action, "masterId": self.master_id, "proofSha256": proof,
+                  "masterCount": len(summaries), "stageCount": sum(row["stageCount"] for row in summaries), "receiptCount": sum(row["receiptCount"] for row in summaries)}
+        if decision is not None:result["decisionId"] = decision
+        return result
+
+    @storage_action
+    def preview_migration(self):
+        with self.authority_guard():
+            first = self.legacy_snapshot()
+            require(first == self.legacy_snapshot(), "legacy snapshot changed during preview")
+            return self.migration_result("previewMigration", first[1], first[3])
+
+    @storage_action
+    def migrate(self, request):
+        require(set(request) == {"action", "root", "masterId", "decisionId", "expectedProofSha256"}
+                and valid_uuid(request["decisionId"]) and valid_sha(request["expectedProofSha256"]), "migration decision/proof")
+        # Exact retries inspect the accepted decision and EVERY registered Master;
+        # they never replace an existing DB or replay an import transaction.
+        if not absent(self.db):
+            with self.connection() as (conn, meta):
+                self.absent_owners();self.validated(conn, meta)
+                require(self.adoption is not None, "existing database has no accepted legacy adoption")
+                adoption = self.adoption[1]
+                require(adoption["decisionId"] == request["decisionId"] and adoption["proofSha256"] == request["expectedProofSha256"], "different migration decision or proof")
+                original_id, original_master = self.master_id, self.master
+                try:
+                    for name in catalog(self.masters):
+                        self.master_id, self.master = name, self.masters / name
+                        require(self.audited(conn, meta)[3] == [], "accepted migration has missing artifacts")
+                finally:self.master_id, self.master = original_id, original_master
+                self.absent_owners()
+                return self.migration_result("migrate", adoption["proofSha256"], adoption["masters"], adoption["decisionId"])
+        with self.authority_guard():
+            source = self.legacy_snapshot()
+            require(source[1] == request["expectedProofSha256"] and source == self.legacy_snapshot(), "migration preview changed; obtain a new preview")
+            meta, proof, masters, summaries = source
+            adoption = encoded({"schema": "negi-master-inventory-adoption/1", "authoritySha256": sha(encoded(meta)), "decisionId": request["decisionId"], "proofSha256": proof, "masters": summaries})
+            with self.connection(True, True) as (conn, current_meta):
+                require(current_meta == meta, "migration authority changed before database creation")
+                conn.execute(f"PRAGMA application_id={APPLICATION_ID}");conn.execute(f"PRAGMA user_version={VERSION}")
+                for sql in SCHEMA:conn.execute(sql)
+                raw = encoded(meta)
+                conn.execute("INSERT INTO meta VALUES (1,?,?)", (raw, signature(self.key, "negi-master-inventory-meta/1", raw)))
+                conn.execute("INSERT INTO adoptions VALUES (1,?,?)", (adoption, signature(self.key, "negi-master-inventory-adoption/1", adoption)))
+                for name, (body, records) in masters.items():
+                    last = "0" * 64
+                    conn.execute("INSERT INTO masters VALUES (?,?,0,?,?)", (name, body, last, self.signed_head(body, 0, last)))
+                    for seq, (kind, path, expected_sha, size, request_id, stage) in enumerate(records, 1):
+                        # Stream each original artifact into SQLite; do not retain
+                        # up to 1.2GB of legacy payloads in the snapshot manifest.
+                        artifact = read_file(self.masters / name / path, MAX_ARTIFACT if kind == "stage" else 8000)
+                        require(sha(artifact) == expected_sha and len(artifact) == size, "legacy artifact changed during import")
+                        event = {"schema": "negi-master-inventory-event/2", "masterId": name, "masterSha256": sha(body), "seq": seq, "previousSha256": last,
+                                 "type": kind, "relativePath": path, "requestId": request_id,
+                                 "stage": stage, "artifactSha256": sha(artifact), "migrationSha256": sha(adoption)}
+                        raw = encoded(event);sig = signature(self.key, "negi-master-inventory-event/2", raw);last = sha(raw + b"\0" + sig.encode("ascii"))
+                        conn.execute("INSERT INTO events VALUES (?,?,?,?,?,?,?)", (name, seq, path, raw, artifact, last, sig))
+                    conn.execute("UPDATE masters SET seq=?,last_sha=?,signature=? WHERE master_id=?", (len(records), last, self.signed_head(body, len(records), last), name))
+                require(conn.execute("PRAGMA page_count").fetchone()[0] * conn.execute("PRAGMA page_size").fetchone()[0] <= MAX_DATABASE_BYTES,
+                        "migration database capacity; preserve source and partial DB")
+                require(source == self.legacy_snapshot(False), "legacy bytes/owners changed before migration commit")
+                # A crash before COMMIT leaves the exact partial DB for inspection.
+                # No source file/owner/receipt is changed. SQLite manages its own
+                # transaction journal; this code never manually removes it.
+                return self.migration_result("migrate", proof, summaries, request["decisionId"])
+
     def validated(self, conn, meta, registering=False, integrity=True):
-        validate_schema(conn, integrity)
+        version = validate_schema(conn, integrity)
         rows = conn.execute("SELECT id,body,signature FROM meta").fetchall()
         require(len(rows) == 1 and rows[0][0] == 1 and rows[0][1] == encoded(meta)
                 and hmac.compare_digest(rows[0][2], signature(self.key, "negi-master-inventory-meta/1", rows[0][1])), "authority/key metadata mismatch")
+        self.adoption = self.validated_adoption(conn, meta) if version == 2 else None
         masters = conn.execute("SELECT master_id,body,seq,last_sha,signature FROM masters ORDER BY master_id").fetchall()
         require(0 < len(masters) <= MAX_MASTERS and all(MASTER.fullmatch(row[0]) for row in masters), "master registry")
-        require(conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] <= MAX_TOTAL_EVENTS, "global event capacity; migrate explicitly")
+        # Receipts are immutable imports only. Use the authenticated adoption
+        # counts, never another Master's unsigned redundant path/type columns.
+        receipt_counts = self.receipt_counts()
+        total = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0];receipts = sum(receipt_counts.values())
+        require(total <= MAX_TOTAL_EVENTS and receipts <= MAX_TOTAL_RECEIPTS and total - receipts <= MAX_TOTAL_STAGE_EVENTS,
+                "global event capacity; migrate explicitly")
         require(conn.execute("SELECT 1 FROM events WHERE typeof(seq)!='integer' OR seq<1 OR seq>? LIMIT 1", (MAX_EVENTS,)).fetchone() is None, "global event sequence type/range")
-        groups = {name: (count, first, last) for name, count, first, last in conn.execute("SELECT master_id,COUNT(*),MIN(seq),MAX(seq) FROM events GROUP BY master_id")}
+        groups = {}
+        for name, count, first, last in conn.execute("SELECT master_id,COUNT(*),MIN(seq),MAX(seq) FROM events GROUP BY master_id"):
+            receipts = receipt_counts.get(name, 0)
+            require(receipts <= count <= MAX_EVENTS and receipts <= MAX_RECEIPTS and count - receipts <= MAX_STAGE_EVENTS,
+                    "master event capacity; migrate explicitly")
+            groups[name] = (count, first, last)
         require(set(groups) <= {row[0] for row in masters}, "unregistered global inventory event")
         require(not registering or len(masters) < MAX_MASTERS, "master registry capacity; migrate explicitly")
         names = catalog(self.masters)
@@ -450,8 +642,15 @@ class Inventory:
             if seq:
                 require(conn.execute("SELECT entry_sha FROM events WHERE master_id=? AND seq=?", (name, seq)).fetchone() == (last,), "global event tail differs from signed checkpoint")
             if name == self.master_id:selected = (body, seq, last)
+        if self.adoption:
+            registered = {name: sha(body) for name, body, *_ in masters}
+            require(all(registered.get(row["masterId"]) == row["masterSha256"] for row in self.adoption[1]["masters"]), "adopted master removed or replaced")
         require(registering or selected is not None, "master not registered")
         return selected
+
+    def receipt_counts(self):
+        # Only called after validated_adoption has authenticated these summaries.
+        return {row["masterId"]: row["receiptCount"] for row in self.adoption[1]["masters"]} if self.adoption else {}
 
     @storage_action
     def register(self):
@@ -501,33 +700,78 @@ class Inventory:
             require(previous["request"] == current["request"], "stage request changed")
             if previous["identity"] is not None:require(previous["identity"] == current["identity"], "bound identity changed")
 
+    def receipt(self, raw, filename):
+        from negi_recover_writer import validate
+        envelope = canonical(raw, 8000)
+        require(set(envelope) == {"payload", "signature"} and type(envelope["payload"]) is dict and valid_sha(envelope["signature"]), "recovery envelope")
+        payload = envelope["payload"]
+        require(set(payload) == {"schemaVersion", "masterId", "decisionId", "cwdSha256", "owner", "proofSha256", "action", "at"}
+                and payload["schemaVersion"] == "negi-master-owner-recovery/1" and payload["masterId"] == self.master_id
+                and valid_uuid(payload["decisionId"]) and valid_sha(payload["cwdSha256"]) and valid_sha(payload["proofSha256"])
+                and payload["action"] == "release-owner-only" and type(payload["owner"]) is dict, "recovery payload")
+        date(payload["at"])
+        owner = payload["owner"];operation = owner.get("operation")
+        require(type(operation) is dict and set(operation) == {"domain", "requestId", "hash"} and operation["domain"] == "master-conversation"
+                and valid_uuid(operation["requestId"]) and valid_sha(operation["hash"]), "recovered owner operation")
+        validate(encoded(owner) + b"\n", "master", "master-conversation", operation["requestId"], operation["hash"])
+        require(owner["masterId"] == self.master_id and valid_uuid(owner["owner"]) and filename == owner["owner"] + ".json"
+                and owner["cwdSha256"] == payload["cwdSha256"], "recovery owner identity")
+        date(owner["createdAt"])
+        unsigned = {name: item for name, item in owner.items() if name != "signature"}
+        require(hmac.compare_digest(owner["signature"], hmac.new(self.key, encoded(unsigned), hashlib.sha256).hexdigest())
+                and hmac.compare_digest(envelope["signature"], hmac.new(self.key, encoded(payload), hashlib.sha256).hexdigest()), "recovery/owner HMAC")
+        return payload
+
     def events(self, conn, checkpoint):
         body, head_seq, head_sha = checkpoint
         last, count, paths, operations = "0" * 64, 0, {}, {}
+        adopted, receipts, seen_live = [], set(), False
         # Stream bounded artifacts rather than fetching up to 1.2GB into memory.
         for seq, path, raw, artifact, entry_sha, sig in conn.execute("SELECT seq,path,body,artifact,entry_sha,signature FROM events WHERE master_id=? ORDER BY seq", (self.master_id,)):
             count += 1
             require(count <= MAX_EVENTS and seq == count and type(raw) is bytes and len(raw) <= 2000 and valid_sha(entry_sha) and valid_sha(sig), "event sequence/shape")
             event = json.loads(raw, object_pairs_hook=unique)
-            require(type(event) is dict and encoded(event) == raw and set(event) == {"schema", "masterId", "masterSha256", "seq", "previousSha256", "type", "relativePath", "requestId", "stage", "artifactSha256", "ownerSha256"}
-                    and event["schema"] == "negi-master-inventory-event/1" and event["masterId"] == self.master_id
+            imported = type(event) is dict and event.get("schema") == "negi-master-inventory-event/2"
+            source_field = "migrationSha256" if imported else "ownerSha256"
+            require(type(event) is dict and encoded(event) == raw and set(event) == {"schema", "masterId", "masterSha256", "seq", "previousSha256", "type", "relativePath", "requestId", "stage", "artifactSha256", source_field}
+                    and event["schema"] == ("negi-master-inventory-event/2" if imported else "negi-master-inventory-event/1") and event["masterId"] == self.master_id
                     and event["masterSha256"] == sha(body) and event["seq"] == seq and event["previousSha256"] == last
-                    and event["type"] == "stage" and event["relativePath"] == path and valid_uuid(event["requestId"])
-                    and valid_sha(event["ownerSha256"]), "event identity/predecessor")
-            require(hmac.compare_digest(sig, signature(self.key, "negi-master-inventory-event/1", raw))
+                    and event["type"] in (("stage", "receipt") if imported else ("stage",)) and event["relativePath"] == path and valid_uuid(event["requestId"])
+                    and valid_sha(event[source_field]), "event identity/predecessor")
+            require(hmac.compare_digest(sig, signature(self.key, event["schema"], raw))
                     and entry_sha == sha(raw + b"\0" + sig.encode("ascii")), "event signature/hash")
+            require(path not in paths and event["artifactSha256"] == sha(artifact), "event artifact/path")
+            if imported:
+                require(not seen_live and self.adoption is not None and event["migrationSha256"] == sha(self.adoption[0]), "adopted event lacks accepted baseline")
+                adopted.append({"path": path, "sha256": sha(artifact), "size": len(artifact)})
+            else:seen_live = True
+            if event["type"] == "receipt":
+                require(path.startswith("recoveries/") and path.count("/") == 1, "receipt path")
+                payload = self.receipt(artifact, path.split("/")[1])
+                require(payload["decisionId"] not in receipts and event["stage"] is None and event["requestId"] == payload["owner"]["operation"]["requestId"], "receipt decision/event mismatch")
+                receipts.add(payload["decisionId"]);require(len(receipts) <= MAX_RECEIPTS, "receipt capacity; migrate explicitly")
+                paths[path] = {"sha256": sha(artifact), "size": len(artifact)};last = entry_sha
+                continue
+            require(count - len(receipts) <= MAX_STAGE_EVENTS, "stage capacity; migrate explicitly")
             payload = self.stage(artifact)
             request_id = payload["request"]["requestId"]
             prior = operations.get(request_id)
             index = prior[2] if prior else 0
             self.transition(prior[0] if prior else None, payload, prior[1] if prior else None)
-            require(index < 5 and path == f"{request_id}/0{index}-{payload['stage']}.json" and path not in paths
+            require(index < 5 and path == f"{request_id}/0{index}-{payload['stage']}.json"
                     and event["requestId"] == request_id and event["stage"] == payload["stage"]
                     and event["artifactSha256"] == sha(artifact), "event artifact/path")
             paths[path] = {"sha256": sha(artifact), "size": len(artifact)}
             operations[request_id] = (payload, sha(artifact), index + 1)
             require(len(operations) <= 10000, "operation capacity; migrate explicitly")
             last = entry_sha
+        if self.adoption:
+            baseline = next((row for row in self.adoption[1]["masters"] if row["masterId"] == self.master_id), None)
+            require((baseline is not None or not adopted), "adoption has no registered master baseline")
+            if baseline:
+                require(adopted == sorted(adopted, key=lambda row: row["path"]) and len(receipts) == baseline["receiptCount"]
+                        and len(adopted) == baseline["stageCount"] + baseline["receiptCount"]
+                        and sha(encoded(adopted)) == baseline["artifactSha256"], "adopted artifacts differ from accepted baseline")
         require(count == head_seq and last == head_sha, "event tail differs from signed checkpoint")
         return paths, operations
 
@@ -548,6 +792,20 @@ class Inventory:
         require(before == identity(normal(path, True)) and files == names(path), "operation changed during scan")
         return [name, before, files], actual
 
+    def scan_receipts(self, paths):
+        root = self.master / "recoveries";before = identity(normal(root, True));files = catalog(root)
+        if self.retained is not None and self.retained.enabled:self.retained.directory(root, before)
+        actual = {}
+        for filename in files:
+            relative = "recoveries/" + filename
+            require(relative in paths, "unindexed recovery receipt; preserve it")
+            raw = self.retained.read(root / filename, 8000) if self.retained is not None and self.retained.enabled else read_file(root / filename, 8000)
+            found = {"sha256": sha(raw), "size": len(raw)}
+            require(found == paths[relative], "indexed recovery receipt changed or partial")
+            actual[relative] = [found, fingerprint(normal(root / filename))]
+        require(before == identity(normal(root, True)) and files == catalog(root), "recovery receipts changed during scan")
+        return ["recoveries", before, files], actual
+
     def scan(self, paths):
         if self.retained is not None:self.retained.choose(paths)
         expected_paths = MappingProxyType({path: MappingProxyType(value) for path, value in paths.items()})
@@ -565,8 +823,8 @@ class Inventory:
                 require(read_file(path, 1) == b"", "native guard")
                 continue
             if name == "recoveries":
-                require(catalog(path) == [], "receipt indexing is not integrated; preserve legacy receipt")
-                inventory.append([name, identity(normal(path, True)), []])
+                entry, files = self.scan_receipts(expected_paths)
+                inventory.append(entry);actual.update(files)
                 continue
             require(name in expected_dirs and valid_uuid(name), "unindexed operation directory")
             operations.append(name)
@@ -682,7 +940,11 @@ class Inventory:
             require(self.validated(conn, meta, integrity=False) == checkpoint
                     and read_file(self.master / "owner.lock", 2000) == owner_raw
                     and self.owner(request["ownerSha256"])[1] == owner, "owner/checkpoint changed before commit")
-            require(conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] < MAX_TOTAL_EVENTS, "global event capacity; migrate explicitly")
+            receipt_counts = self.receipt_counts()
+            total = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0];receipts = sum(receipt_counts.values())
+            stages = seq - receipt_counts.get(self.master_id, 0)
+            require(total < MAX_TOTAL_EVENTS and total - receipts < MAX_TOTAL_STAGE_EVENTS and stages < MAX_STAGE_EVENTS,
+                    "global event capacity or master stage capacity; migrate explicitly")
             conn.execute("INSERT INTO events VALUES (?,?,?,?,?,?,?)", (self.master_id, seq + 1, relative_path, raw, artifact, entry_sha, sig))
             conn.execute("UPDATE masters SET seq=?,last_sha=?,signature=? WHERE master_id=?", (seq + 1, entry_sha, self.signed_head(body, seq + 1, entry_sha), self.master_id))
             require(read_file(self.master / "owner.lock", 2000) == owner_raw, "owner changed before commit")
@@ -715,12 +977,16 @@ def main():
         require(set(request) == {"action", "root", "masterId"}, "input fields")
         result = {"schema": "negi-master-inventory-result/1", "action": action, "masterId": inventory.master_id, "processIdentity": process_identity()}
     else:
-        with storage_guard(inventory.root, ticket, create=action not in ("audit", "lookup")):
+        with storage_guard(inventory.root, ticket, create=action not in ("audit", "lookup", "previewMigration")):
             if action in ("initialize", "register", "audit"):
                 require(set(request) == {"action", "root", "masterId"}, "input fields")
                 result = getattr(inventory, action)()
             elif action == "append":result = inventory.append(request)
             elif action == "lookup":result = inventory.lookup(request)
+            elif action == "previewMigration":
+                require(set(request) == {"action", "root", "masterId"}, "migration preview fields")
+                result = inventory.preview_migration()
+            elif action == "migrate":result = inventory.migrate(request)
             else:raise ValueError("Master inventory: unsupported action")
     sys.stdout.buffer.write(encoded(result) + b"\n")
 
