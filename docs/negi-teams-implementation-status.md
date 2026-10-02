@@ -170,3 +170,19 @@ writer復旧は固定名のnative helperへ移し、Windowsの名前付きmutex�
 NT-003/009/016/018/073の追加進捗である。部分claim/marker・旧guard/旧generic writer・旧stageの既知停止点、汎用の手動照合GUI、Windows directory fsync/停電・外部writer・旧新版同時稼働の回復は残る。Linuxの実filesystemと実UNC shareは未検証で、OS guardは同一hostの任意書込を隔離するsandboxではない。dirty初回採用/場所と契約版移行、実Taskのbroker対応終了と成果救済、旧MCP/PTY/workerの全契約と共通枠、作成元会話リンク、Jev全gate/校正/上限、Knowledgeの複数事例/矛盾/寿命/派生失効/削除、Policyの利益/承認/active/rollback、変化中履歴とimmutable snapshot検証、実機と全利用者導線など、先行記録の全条件を保持する。全73要件とPhase0–8のゴールはACTIVE。
 
 標準回帰784件中781成功・3skip・失敗/未完了0（472277.6101ms、exit0）。この実行中に最後のUNC/stage chain修正が入ったため、最後の差分はその後の関連21件全成功（111248.9946ms、exit0）と型検査・ビルドで確認した。Windowsではguardを保持した実子processを強制終了→再取得、seed mkdir時点の実子process停止→元seed保全/別seedで完了、長いcanonical rootのnative回復を確認した。UNCはnamespace変換だけを検査し、実共有を使った成功とは扱わない。GUI確認は最後のUNC/chain修正前のビルド、変更後のruntimeは最終関連試験で確認した。前の18件/2件・単独1件の実行を合算せず、CI成功や停電/全process crash耐性の主張にはしない。
+
+## 2026-10-02追加: 初回・設定改訂・Vaultの共通保存確認
+
+[Material 3の共通保存確認](negi-teams-project-setup.md#保存状態を確認する共通画面2026-10-02)へ、署名済み初回設定・設定改訂・Vault作成を接続した。承認済み保存待ちと公開済み終了確認待ちを区別し、途中candidateが消えた最終公開後のwriterも対象を表示する。完全な条件・仕様本文・観測状態を読み、明示ボタンで同じ署名済み操作だけを完了する。状態更新と完了済みVaultの確認で別プロジェクトの入力を保持し、確認previewだけを失効させる。スマホのkeyboard focusで完了ボタンが下部ナビに隠れない位置へ移動する。
+
+初回writerへ`project-setup`/要求ID/hashを束縛した。未公開の初回承認は、一つの完全な署名・現在の基準/仕様・未使用runtime・空の設定履歴が一致する場合だけ公開する。公開済み履歴は書き直さず、後のコード/Spec/Task/設定改訂を保持する。共通writerとinner writerを全て照合してから解除し、同じ要求で共通writerを取得し直す。初回writerが残る状態、署名済み未公開の初回intent、複数/不完全な初回承認は、startup・他の設定/Vault保存・別操作の完了・新しいTask admissionも保留する。
+
+native helperは固定3kindの読み取り専用観測を追加した。GETはmutex/flock fileを取得・作成・削除しない。Windowsの観測readerは通常writerの削除を妨げず、fixed pathの再open/identity/bytesで表示状態を照合する。復旧POSTは従来のnative guardと正確なhandleによる削除を使う。部分/重複JSON、live PID、別操作、hardlink、旧guardを保全する。要求IDは既存署名のUUID shapeとそろえ、過去のnil等のIDが通常保存だけ成功して復旧できない互換不整合を解消した。
+
+独立監査で、初回writerを除外した完了ボタン判定とWindowsの読み取りによる正規writer cleanup競合を修正した。primaryの最終diff確認で、writerがない署名済み未公開intent/複数初回承認に対するGETと直接APIの判定もそろえた。新規native観測とguard保持process終了、既存設定/Vault復旧、署名候補・不一致・実PID・後の履歴保全を自動試験で確認した。開発途中の29件中27成功/2失敗（既存error文の期待値とfixture文書path）と、修正後16件全成功の記録を別に保持し、試験を合算しない。
+
+NT-003/009/016/018/064/073の進捗である。汎用の取消/手動照合GUI、部分claim/marker・旧generic/guard・停電/任意外部writer/混在版、Linux実filesystem・実UNC shareは残る。dirty初回採用/場所・契約版移行、実Taskのbroker対応終了/成果救済、旧MCP/PTY/workerの全契約/共通枠、作成元会話リンク、Jev全gate/校正/上限、Knowledgeの複数事例/矛盾/寿命/派生失効/削除、Policyの利益/承認/active/rollback、変化中履歴/immutable検証、実機safe-area/仮想キーボード/全利用者導線など先行記録の条件を維持する。73要件とPhase0–8は変更せず、ゴールはACTIVE。
+
+標準回帰790件中787成功・3skip・失敗/未完了0（511334.2587ms、exit0）。この実行開始後に最後の初回intent gateとスマホfocus調整が入ったため、全最終変更を全件試験が実行したとは扱わない。最終関連34件全成功（275001.3102ms、exit0）、最後の型検査・ビルドで確認した。独立した最終レビューは追加P1/P2なし。初期失敗と修正後16件、最終34件は合算せず、CI成功を主張しない。
+
+最終ビルドのGUIで、初回署名済み未公開→live状態の無効ボタン→dead状態の明示完了→公開済み初回/設定改訂/Vaultの終了確認→store再読込・再実行なしを確認した。別プロジェクトの下書きは状態更新と完了済みVault確認の前後で保持し、後から追加したSpec本文も不変だった。Chromium1440/320/375px、明暗両テーマ、48px操作、Enter、横幅、下部ナビから離れたスマホ完了ボタン、全文詳細を確認し、対象GUIのconsole/page error0だった。Browser plugin not availableのため既存Playwright CLIを使用した。最初のfixture icon404/QA selector誤りと、修正前のナビ重なりは別記録で保持する。実Git/Vault/HTTPと合成停止状態であり、新しいモデルturn・設定した検証コマンド・Jevは開始せず、実Codex新規起動・実機・人の成果品質受入を意味しない。

@@ -6,7 +6,7 @@ import { isAbsolute, join, relative } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { HumanReviewProofStore, isReviewRequestId } from "./humanReviewProof.ts";
 import { LocalProjectSetup, type ProjectSettings, type ProjectSetupPreview } from "./projectSetup.ts";
-import { recoverWriter, type WriterOperation } from "./writerRecovery.ts";
+import { preflightWriters, recoverWriter, type WriterOperation } from "./writerRecovery.ts";
 
 const hash=(v:unknown)=>createHash("sha256").update(JSON.stringify(v)).digest("hex");
 export type ConfigurationChange={kind:"upsert";settings:ProjectSettings}|{kind:"archive";id:string}|{kind:"restore";version:number};
@@ -38,6 +38,22 @@ export class LocalProjectConfiguration {
   private path(version:number){return join(this.root,String(version).padStart(5,"0")+".json");}
   private pendingPath(version:number){return join(this.root,String(version).padStart(5,"0")+".pending.json");}
   async history():Promise<ProjectConfiguration[]>{return this.readHistory();}
+  async saveSetup(settings:unknown,expectedHash:string,requestId:string){
+    if(!isReviewRequestId(requestId)||! /^[0-9a-f]{64}$/.test(expectedHash))throw Error("Setup writer identity invalid");
+    return this.locked(async()=>{await this.history();return this.setup.save(settings,expectedHash,requestId)},
+      {domain:"project-setup",requestId:requestId.toLowerCase(),hash:expectedHash});
+  }
+  async completeSetup(requestId:string,expectedHash:string){
+    await this.setup.authorizeCompletion(requestId,expectedHash);
+    const rows=await this.history(),operation:WriterOperation={domain:"project-setup",requestId:requestId.toLowerCase(),hash:expectedHash};
+    const [shared]=await preflightWriters([{root:this.setup.root,kind:"configuration"},{root:this.setup.root,kind:"setup"}],operation);
+    // A leftover initial shared writer cannot coexist with later revisions.
+    if(shared.state!=="absent"&&rows.length>1)throw Error("Initial writer and later settings history require reconciliation");
+    await this.releaseDeadWriter(operation);
+    return this.locked(async()=>{
+      await this.history();return this.setup.complete(requestId,expectedHash);
+    },operation);
+  }
   /** Trusted file creation shares the writer and every historical source root. */
   async withStableHistory<T>(operation:(history:ProjectConfiguration[])=>Promise<T>,writer?:VaultWriter):Promise<T>{
     if(writer&&(!isReviewRequestId(writer.requestId)||! /^[0-9a-f]{64}$/.test(writer.hash)))throw Error("Vault writer identity invalid");
@@ -46,7 +62,11 @@ export class LocalProjectConfiguration {
       // history before releasing a known dead shared writer. Partial/live/unknown
       // ownership is retained by releaseDeadWriter; reads never repair it.
       await this.setup.vaults.authorizeCompletion(writer.requestId,writer.hash);
-      await this.history();await this.releaseDeadWriter({domain:"vault-initialization",requestId:writer.requestId,hash:writer.hash});
+      await this.setup.assertIdle();
+      await this.history();
+      const operation:WriterOperation={domain:"vault-initialization",requestId:writer.requestId.toLowerCase(),hash:writer.hash};
+      await preflightWriters([{root:this.setup.root,kind:"configuration"},{root:this.setup.vaults.root,kind:"vault"},{root:this.setup.root,kind:"setup"}],operation);
+      await this.releaseDeadWriter(operation);
     }
     return this.locked(async()=>operation(await this.history()),writer?{domain:"vault-initialization",requestId:writer.requestId,hash:writer.hash}:undefined);
   }
@@ -132,6 +152,7 @@ export class LocalProjectConfiguration {
   private async locked<T>(operation:()=>Promise<T>,writer?:WriterOperation):Promise<T>{
     const path=join(this.setup.root,"configuration-writer.lock"),lock=await open(path,"wx",0o600);
     try{
+      if(writer?.domain!=="project-setup")await this.setup.assertIdle();
       await lock.writeFile(JSON.stringify({schema:"negi-configuration-writer/1",pid:process.pid,owner:randomUUID(),createdAt:new Date().toISOString(),
         ...(writer?{operation:{domain:writer.domain,requestId:writer.requestId.toLowerCase(),hash:writer.hash}}:{})})+"\n");await lock.sync();
       return await operation();
@@ -178,6 +199,13 @@ export class LocalProjectConfiguration {
       (published&&!isDeepStrictEqual(await json(this.path(c.version)),saved)))throw Error("Partial configuration cannot be safely completed");
     return {requestId:saved.requestId,preview:saved.preview,published};
   }
+  /** Signed latest final also authorizes cleanup after pending unlink completed. */
+  async recoveryCandidate(){
+    const pending=await this.recovery();if(pending)return pending;
+    const current=await this.current();if(!current||current.version<2)return null;
+    const saved=await json<Publication>(this.path(current.version));
+    return {...saved,published:true};
+  }
   async recover(requestId:string,expectedHash:string){
     if(!isReviewRequestId(requestId)||! /^[0-9a-f]{64}$/.test(expectedHash))throw Error("Recovery target invalid");
     // This explicit human action may release only the exact dead writer for an
@@ -192,6 +220,8 @@ export class LocalProjectConfiguration {
         (await json<Publication>(this.path(current.version))).requestId!==requestId.toLowerCase())throw Error("Recovery already changed");
     }
     const writer:WriterOperation={domain:"project-configuration",requestId:requestId.toLowerCase(),hash:expectedHash};
+    await this.setup.assertIdle();
+    await preflightWriters([{root:this.setup.root,kind:"configuration"},{root:this.setup.root,kind:"setup"}],writer);
     await this.releaseDeadWriter(writer);
     return this.locked(async()=>{
       const pending=await this.recovery();if(!pending){const c=await this.current();if(!c||c.hash!==expectedHash||
@@ -204,7 +234,7 @@ export class LocalProjectConfiguration {
   private async releaseDeadWriter(writer:WriterOperation){return recoverWriter(this.setup.root,"configuration",writer);}
   /** Shares the settings writer with every new durable intent; existing work and stop/read stay available. */
   async admit<T>(bootHash:string,operation:()=>Promise<T>):Promise<T>{
-    return this.locked(async()=>{if((await this.current())?.hash!==bootHash)throw new ConfigurationPendingError();return operation()});
+    return this.locked(async()=>{if(await this.setup.writerHeld()||(await this.current())?.hash!==bootHash)throw new ConfigurationPendingError();return operation()});
   }
   async startup(configuration:ProjectConfiguration){
     if(await this.writerHeld())throw Error("Configuration writer requires reconciliation before startup");

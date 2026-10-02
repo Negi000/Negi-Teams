@@ -1,14 +1,15 @@
 // An authenticated human confirms an exact startup profile. No model or configured
 // verification command runs here; existing Vault notes and Git work are read only.
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { lstat, mkdir, open, readFile, realpath, unlink } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, readdir, realpath, unlink } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify, isDeepStrictEqual } from "node:util";
 import { HumanReviewProofStore, isReviewRequestId } from "./humanReviewProof.ts";
 import { parseVaultRunConfig, type VaultRunConfig } from "./vaultRunConfig.ts";
 import { LocalVaultInitialization } from "./vaultInitialization.ts";
+import { observeWriter, preflightWriters, recoverWriter, type WriterOperation } from "./writerRecovery.ts";
 
 const exec = promisify(execFile), hash = (v:unknown)=>createHash("sha256").update(JSON.stringify(v)).digest("hex");
 const inside=(a:string,b:string)=>{const r=relative(a.toLowerCase(),b.toLowerCase());return !r||(!r.startsWith("..")&&!isAbsolute(r))};
@@ -20,7 +21,7 @@ export interface ProjectSetupPreview { schema:"negi-project-setup/1"; settings:P
   sources:Array<{id:string;kind:string;version:number;sha256:string;path:string}>; hash:string }
 interface Publication { requestId:string; preview:ProjectSetupPreview }
 async function boundedJson(path:string,maximum=24000):Promise<unknown> {
-  const f=await lstat(path);if(!f.isFile()||f.isSymbolicLink()||f.size>maximum)throw Error("Setup file is invalid");
+  const f=await lstat(path);if(!f.isFile()||f.isSymbolicLink()||f.nlink!==1||f.size>maximum)throw Error("Setup file is invalid");
   const bytes=await readFile(path);if(bytes.length>maximum)throw Error("Setup file grew beyond limit");return JSON.parse(bytes.toString("utf8"));
 }
 async function existing(raw:unknown,kind:"file"|"directory"):Promise<string> {
@@ -39,14 +40,78 @@ export class LocalProjectSetup {
     await mkdir(root,{recursive:true});return new LocalProjectSetup(root,await HumanReviewProofStore.open(join(root,"profile-approvals")),canonicalRoots,
       await LocalVaultInitialization.open(root,canonicalRoots));
   }
-  async current():Promise<ProjectSetupPreview|null> {
-    let publication:Publication;try{publication=await boundedJson(join(this.root,"setup.json")) as Publication}
-    catch(e){if((e as NodeJS.ErrnoException).code==="ENOENT")return null;throw e}
+  private async signed(publication:Publication):Promise<Publication>{
+    if(!publication||Object.keys(publication).sort().join()!=="preview,requestId"||!isReviewRequestId(publication.requestId))throw Error("Setup publication identity invalid");
     const {hash:expected,...core}=publication.preview??{},receipt=await this.proofs.read(publication.requestId);
-    if(!receipt||!isReviewRequestId(publication.requestId)||expected!==hash(core)||receipt.action!=="operation"||
+    if(!receipt||core.schema!=="negi-project-setup/1"||! /^[0-9a-f]{64}$/.test(expected??"")||expected!==hash(core)||receipt.action!=="operation"||
       receipt.caseId!=="project-setup"||receipt.runId!==core.settings?.id||receipt.artifactSha256!==expected||
       receipt.verificationRef!==null||!isDeepStrictEqual(receipt.data,{domain:"project-setup",preview:JSON.stringify(publication.preview)}))throw Error("Signed setup configuration differs");
-    return publication.preview;
+    return {requestId:publication.requestId.toLowerCase(),preview:publication.preview};
+  }
+  private async publication():Promise<Publication|null> {
+    let publication:Publication;try{publication=await boundedJson(join(this.root,"setup.json")) as Publication}
+    catch(e){if((e as NodeJS.ErrnoException).code==="ENOENT")return null;throw e}
+    return this.signed(publication);
+  }
+  async current():Promise<ProjectSetupPreview|null> {return (await this.publication())?.preview??null;}
+  /** A receipt survives a crash before publication. Reads never repair files. */
+  async recovery(){
+    const names=await readdir(this.proofs.root),ids=names.filter(n=>n!=="server-signing-key");
+    if(ids.length>1||ids.some(n=>! /^[0-9a-f-]{36}\.json$/.test(n)||!isReviewRequestId(n.slice(0,-5))))throw Error("Initial setup approvals require reconciliation");
+    const publication=await this.publication();
+    if(!ids.length){if(publication)throw Error("Initial approval missing");return null;}
+    const requestId=ids[0].slice(0,-5),receipt=await this.proofs.read(requestId);
+    if(!receipt||typeof receipt.data?.preview!=="string")throw Error("Initial approval is incomplete");
+    const candidate=await this.signed({requestId,preview:JSON.parse(receipt.data.preview) as ProjectSetupPreview});
+    if(publication&&!isDeepStrictEqual(publication,candidate))throw Error("Initial setup publication differs from its approval");
+    return {...candidate,published:!!publication};
+  }
+  async authorizeCompletion(requestId:string,expectedHash:string){
+    if(!isReviewRequestId(requestId)||! /^[0-9a-f]{64}$/.test(expectedHash))throw Error("Setup completion identity invalid");
+    const candidate=await this.recovery();
+    if(!candidate||candidate.requestId!==requestId.toLowerCase()||candidate.preview.hash!==expectedHash)throw Error("Setup completion target differs");
+    if(!candidate.published){
+      await this.unusedRuntime();
+      if(!isDeepStrictEqual(await this.preview(candidate.preview.settings),candidate.preview))throw Error("Initial setup baseline or references changed; retain the approval");
+    }
+    return candidate;
+  }
+  /** Called by the trusted settings coordinator while holding the shared writer. */
+  async complete(requestId:string,expectedHash:string){
+    await this.authorizeCompletion(requestId,expectedHash);
+    const operation:WriterOperation={domain:"project-setup",requestId:requestId.toLowerCase(),hash:expectedHash};
+    await preflightWriters([{root:this.root,kind:"setup"}],operation);
+    await recoverWriter(this.root,"setup",operation);
+    return this.locked(operation,async()=>{
+      const candidate=await this.authorizeCompletion(requestId,expectedHash);
+      if(!candidate.published)await this.publish({requestId:candidate.requestId,preview:candidate.preview});
+      return candidate.preview;
+    });
+  }
+  private async publish(publication:Publication){
+    const out=await open(join(this.root,"setup.json"),"wx",0o600);
+    try{await out.writeFile(JSON.stringify(publication)+"\n");await out.sync()}finally{await out.close()}
+  }
+  private async locked<T>(operation:WriterOperation,action:()=>Promise<T>){
+    const path=join(this.root,"setup-writer.lock"),lock=await open(path,"wx",0o600);
+    try{
+      await lock.writeFile(JSON.stringify({schema:"negi-setup-writer/1",pid:process.pid,owner:randomUUID(),createdAt:new Date().toISOString(),requestId:operation.requestId,hash:operation.hash})+"\n");
+      await lock.sync();return await action();
+    }finally{await lock.close();await unlink(path)}
+  }
+  async writerHeld(){
+    for(const name of ["setup-writer.lock","setup-recovery.lock"]){
+      try{await lstat(join(this.root,name));return true}
+      catch(e){if((e as NodeJS.ErrnoException).code!=="ENOENT")throw e}
+    }
+    return false;
+  }
+  /** Other operations must also respect a signed but unpublished initial intent. */
+  async assertIdle(){
+    const writer=await observeWriter(this.root,"setup");
+    if(writer.state!=="absent"||writer.legacyGuard)throw Error("Initial setup writer requires reconciliation");
+    const candidate=await this.recovery();
+    if(candidate&&!candidate.published)throw Error("Initial setup approval requires completion before another operation");
   }
   async preview(raw:unknown):Promise<ProjectSetupPreview> {
     const p=structuredClone(raw) as Record<string,unknown>,keys=["id","title","project","repository","vault","executable","allowedPaths","astra","sol","verification","maxAttempts","timeLimitMinutes"];
@@ -94,17 +159,18 @@ export class LocalProjectSetup {
   }
   async save(raw:unknown,expectedHash:string,requestId:string):Promise<ProjectSetupPreview> {
     if(!isReviewRequestId(requestId)||!/^([0-9a-f]{64})$/.test(expectedHash))throw Error("Setup approval identity invalid");
-    const path=join(this.root,"setup-writer.lock"),lock=await open(path,"wx",0o600);
-    try{
+    requestId=requestId.toLowerCase();
+    return this.locked({domain:"project-setup",requestId,hash:expectedHash},async()=>{
       const previous=await this.current();if(previous){const publication=await boundedJson(join(this.root,"setup.json")) as Publication;
-        if(publication.requestId!==requestId||previous.hash!==expectedHash||!isDeepStrictEqual(previous.settings,raw))throw Error("Startup configuration already saved");return previous}
+        if(publication.requestId.toLowerCase()!==requestId||previous.hash!==expectedHash||!isDeepStrictEqual(previous.settings,raw))throw Error("Startup configuration already saved");return previous}
+      if(await this.recovery())throw Error("Signed initial setup requires explicit completion");
       await this.unusedRuntime();
       const preview=await this.preview(raw);if(preview.hash!==expectedHash)throw Error("Setup paths, Git baseline or references changed before approval");
       await this.proofs.create({id:requestId,action:"operation",caseId:"project-setup",runId:preview.settings.id,artifactSha256:preview.hash,verificationRef:null,
         data:{domain:"project-setup",preview:JSON.stringify(preview)}});
-      const out=await open(join(this.root,"setup.json"),"wx",0o600);try{await out.writeFile(JSON.stringify({requestId,preview})+"\n");await out.sync()}finally{await out.close()}
+      await this.publish({requestId,preview});
       return preview;
-    }finally{await lock.close();await unlink(path)}
+    });
   }
   /** Trusted startup composition. Configuration is never accepted from a model tool. */
   async startup(preview:ProjectSetupPreview) {
@@ -113,6 +179,7 @@ export class LocalProjectSetup {
   }
   /** Only the signed configuration registry supplies these immutable execution versions. */
   async runtimeProfiles(entries:Array<{id:string;preview:ProjectSetupPreview;active:boolean}>) {
+    await this.assertIdle();
     if(!entries.length||!entries.some(p=>p.active))throw Error("Active project required");
     for(const entry of entries){const p=entry.preview.settings;
     for(const source of [p.repository,p.vault]){const actual=await existing(source,"directory");if(actual!==source||inside(source,this.root)||inside(this.root,source))throw Error("Setup root identity changed")}
