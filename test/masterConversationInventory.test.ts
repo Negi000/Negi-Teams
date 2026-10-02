@@ -76,6 +76,194 @@ async function populated(f: Fixture, count: number) {
   await pythonInput([resolve("test/helpers/masterConversationInventoryFixture.py")], { root: f.root, masterId: "master", count });
 }
 
+async function pendingAppend(f: Fixture) {
+  const ownerSha256 = await f.owner();
+  return { action: "append", root: f.root, masterId: "master", expectedHead: (await f.inventory.audit()).head,
+    ownerSha256, ...stage(f, 0, "requested", null) };
+}
+const handleCount = String.raw`
+import ctypes
+from ctypes import wintypes
+k=ctypes.WinDLL('kernel32',use_last_error=True)
+k.GetCurrentProcess.restype=wintypes.HANDLE
+k.GetProcessHandleCount.argtypes=[wintypes.HANDLE,ctypes.POINTER(wintypes.DWORD)]
+k.GetProcessHandleCount.restype=wintypes.BOOL
+def handles():
+    count=wintypes.DWORD(); assert k.GetProcessHandleCount(k.GetCurrentProcess(),ctypes.byref(count)); return count.value
+`;
+
+test("Windows append reuses protected handles for three full reads and releases them before returning", { skip: process.platform !== "win32" }, async () => fixture(async f => {
+  await populated(f, 8); const request = await pendingAppend(f);
+  const code = String.raw`
+import sys,json,mmap
+sys.path.insert(0,sys.argv[1])
+import negi_master_conversation_inventory as m
+r=json.load(sys.stdin); i=m.Inventory(r['root'],'master'); opened=m.RetainedStageReads.opened; read=m.RetainedStageReads.read; scan=i.scan
+` + handleCount + String.raw`
+first=next(p for p in sorted(i.master.iterdir()) if p.is_dir())/'00-requested.json'; raw=first.read_bytes()
+assert i.audit()['state']=='clean'; assert i.lookup({'action':'lookup','root':r['root'],'masterId':'master','relativePath':first.parent.name+'/'+first.name})['bytes'].encode()==raw
+baseline=handles(); state={'fileOpens':0,'dirOpens':0,'reads':0,'passes':0,'peak':baseline}; blocked=[]
+def opening(self,path,directory=False):
+    result=opened(self,path,directory)
+    with self.lock:state['dirOpens' if directory else 'fileOpens']+=1
+    return result
+def reading(self,path,limit):
+    result=read(self,path,limit)
+    with self.lock:state['reads']+=1
+    return result
+def full(paths):
+    result=scan(paths); state['passes']+=1; state['peak']=max(state['peak'],handles())
+    if state['passes']==1:
+        actions=[lambda:first.write_bytes(b'changed'),lambda:first.unlink(),lambda:first.rename(first.with_name('replaced')),
+                 lambda:first.parent.rename(first.parent.with_name('moved')),lambda:mmap.mmap(first.open('r+b').fileno(),0)]
+        for action in actions:
+            try:action(); raise AssertionError('protected mutation succeeded')
+            except OSError as error:
+                assert getattr(error,'winerror',None) in (5,32) or error.errno==13
+                blocked.append(error.errno)
+        assert first.read_bytes()==raw
+    return result
+m.RetainedStageReads.opened=opening; m.RetainedStageReads.read=reading; i.scan=full
+result=i.append(r['request']); assert result['head']['seq']==41 and i.retained is None
+assert state['fileOpens']==40 and state['dirOpens']==8 and state['reads']==120 and state['passes']==3
+assert state['peak']>=baseline+48 and handles()<=baseline+2
+first.write_bytes(raw)
+print(json.dumps({'opens':40,'directories':8,'fullReads':120,'blocked':len(blocked),'released':True}))`;
+  assert.deepEqual(JSON.parse(await pythonInput(["-c", code, dirname(script)], { root: f.root, request })),
+    { opens: 40, directories: 8, fullReads: 120, blocked: 5, released: true });
+}));
+
+test("existing Windows writer or writable mapping holds append without fallback or database mutation", { skip: process.platform !== "win32" }, async () => {
+  for (const mode of ["writer", "mapping"]) await fixture(async f => {
+    await populated(f, 8); const request = await pendingAppend(f);
+    const code = String.raw`
+import sys,json,ctypes
+from ctypes import wintypes
+sys.path.insert(0,sys.argv[1])
+import negi_master_conversation_inventory as m
+from negi_recover_writer import windows_extended
+r=json.load(sys.stdin); i=m.Inventory(r['root'],'master'); kernel=m.native_kernel()
+first=next(p for p in sorted(i.master.iterdir()) if p.is_dir())/'00-requested.json'
+before=i.db.read_bytes(); opened=kernel.CreateFileW(windows_extended(first),0xc0000000,7,None,3,0x00200000,None)
+assert opened!=ctypes.c_void_p(-1).value
+view=None
+if r['mode']=='mapping':
+    kernel.CreateFileMappingW.argtypes=[wintypes.HANDLE,ctypes.c_void_p,wintypes.DWORD,wintypes.DWORD,wintypes.DWORD,wintypes.LPCWSTR]; kernel.CreateFileMappingW.restype=wintypes.HANDLE
+    kernel.MapViewOfFile.argtypes=[wintypes.HANDLE,wintypes.DWORD,wintypes.DWORD,wintypes.DWORD,ctypes.c_size_t]; kernel.MapViewOfFile.restype=ctypes.c_void_p
+    kernel.UnmapViewOfFile.argtypes=[ctypes.c_void_p]; kernel.UnmapViewOfFile.restype=wintypes.BOOL
+    section=kernel.CreateFileMappingW(opened,None,4,0,0,None); assert section
+    try:view=kernel.MapViewOfFile(section,2,0,0,0); assert view
+    finally:kernel.CloseHandle(section); kernel.CloseHandle(opened); opened=None
+try:
+    try:i.append(r['request']); raise AssertionError('competing writer was accepted')
+    except ValueError as error:assert 'protected stage handle unavailable' in str(error)
+    assert i.db.read_bytes()==before and i.retained is None
+finally:
+    if opened is not None:kernel.CloseHandle(opened)
+    if view is not None:assert kernel.UnmapViewOfFile(view)
+assert i.audit()['artifactCount']==40
+result=i.append(r['request']); assert result['head']['seq']==41
+print(json.dumps({'held':True,'databaseUnchanged':True,'acceptedOnlyAfterRelease':True}))`;
+    assert.deepEqual(JSON.parse(await pythonInput(["-c", code, dirname(script)], { root: f.root, request, mode })),
+      { held: true, databaseUnchanged: true, acceptedOnlyAfterRelease: true });
+  });
+});
+
+test("partial protected worker failure joins peers and releases centrally registered handles", { skip: process.platform !== "win32" }, async () => fixture(async f => {
+  await populated(f, 2); const request = await pendingAppend(f);
+  const code = String.raw`
+import sys,json,threading,time,gc
+sys.path.insert(0,sys.argv[1])
+import negi_master_conversation_inventory as m
+r=json.load(sys.stdin); i=m.Inventory(r['root'],'master'); original=i.scan_operation; closing=m.RetainedStageReads.close
+` + handleCount + String.raw`
+assert i.audit()['artifactCount']==10
+ordered=[p.name for p in sorted(i.master.iterdir()) if p.is_dir()]; ready=threading.Event(); failure=threading.Event(); release=threading.Event(); peer_done=threading.Event()
+state={'closed':False}; observed=[]; baseline=handles()
+def operation(name,paths):
+    result=original(name,paths)
+    if name==ordered[0]:
+        assert ready.wait(5); failure.set(); raise ValueError('injected-protected-failure')
+    ready.set(); assert release.wait(5); peer_done.set(); return result
+def close(self):
+    assert peer_done.is_set(); assert len(self.files)==10 and len(self.directories)==2
+    closing(self); state['closed']=True
+def controller():
+    try:
+        assert failure.wait(5); time.sleep(0.15); observed.append(state['closed'])
+    finally:release.set()
+i.scan_operation=operation; m.RetainedStageReads.close=close
+t=threading.Thread(target=controller); t.start()
+try:i.append(r['request']); raise AssertionError('failure accepted')
+except ValueError as error:assert 'injected-protected-failure' in str(error)
+t.join(5); assert observed==[False] and state['closed'] and i.retained is None
+assert not any(t.name.startswith('negi-inventory-read') for t in threading.enumerate())
+for name in ordered:
+    for p in (i.master/name).iterdir():p.write_bytes(p.read_bytes())
+    original_path=i.master/name; moved=i.root.parent/('released-'+name)
+    original_path.rename(moved); moved.rename(original_path)
+gc.collect()  # Failure tracebacks can retain completed Thread objects, not stage handles.
+assert handles()<=baseline+2,(handles(),baseline)
+i.scan_operation=original
+assert i.audit()['artifactCount']==10
+print(json.dumps({'held':True,'joined':True,'allHandlesReleased':True}))`;
+  assert.deepEqual(JSON.parse(await pythonInput(["-c", code, dirname(script)], { root: f.root, request })),
+    { held: true, joined: true, allHandlesReleased: true });
+}));
+
+test("retained handle budget selects legacy reads before opening and retains at the exact threshold", { skip: process.platform !== "win32" }, async () => {
+  for (const capacity of [47, 48]) await fixture(async f => {
+    await populated(f, 8); const request = await pendingAppend(f);
+    const code = String.raw`
+import sys,json
+sys.path.insert(0,sys.argv[1])
+import negi_master_conversation_inventory as m
+r=json.load(sys.stdin); i=m.Inventory(r['root'],'master'); m.MAX_RETAINED_HANDLES=r['capacity']; opening=m.RetainedStageReads.opened
+counts=[]
+def opened(self,path,directory=False):counts.append(directory); return opening(self,path,directory)
+m.RetainedStageReads.opened=opened
+result=i.append(r['request']); assert result['head']['seq']==41 and i.retained is None
+assert len(counts)==(48 if r['capacity']==48 else 0)
+print(json.dumps({'protectedOpens':len(counts),'head':41}))`;
+    assert.deepEqual(JSON.parse(await pythonInput(["-c", code, dirname(script)], { root: f.root, request, capacity })),
+      { protectedOpens: capacity === 48 ? 48 : 0, head: 41 });
+  });
+});
+
+test("Windows process termination releases all acquired protected stage handles", { skip: process.platform !== "win32" }, async () => fixture(async f => {
+  await populated(f, 2); const request = await pendingAppend(f);
+  const code = String.raw`
+import sys,json,threading
+sys.path.insert(0,sys.argv[1])
+from negi_master_conversation_inventory import Inventory
+r=json.load(sys.stdin); i=Inventory(r['root'],'master'); original=i.scan
+def full(paths):
+    result=original(paths)
+    sys.stderr.write('PROTECTED_READY\n'); sys.stderr.flush(); threading.Event().wait()
+    return result
+i.scan=full; i.append(r['request'])`;
+  const child = spawn("python", ["-B", "-c", code, dirname(script)], { windowsHide: true, stdio: ["pipe", "ignore", "pipe"] });
+  let stderr = "";
+  const closed = new Promise<number | null>(accept => child.on("close", accept));
+  const ready = new Promise<void>((accept, reject) => {
+    const timer = setTimeout(() => { child.kill(); reject(Error("protected child did not become ready")); }, 5000);
+    child.on("error", error => { clearTimeout(timer); reject(error); });
+    child.stderr.on("data", chunk => { stderr += chunk; if (stderr.includes("PROTECTED_READY")) { clearTimeout(timer); accept(); } });
+    child.on("close", () => { clearTimeout(timer); if (!stderr.includes("PROTECTED_READY")) reject(Error(stderr)); });
+  });
+  child.stdin.end(JSON.stringify({ root: f.root, request }));
+  try {
+    await ready;
+    const operation = (await readdir(f.master)).find(name => name !== "owner.lock")!;
+    const path = join(f.master, operation, "00-requested.json"), bytes = await readFile(path);
+    await assert.rejects(writeFile(path, bytes), /EPERM|EACCES|EBUSY/);
+  } finally { child.kill(); await closed; }
+  assert.equal((await f.inventory.audit()).artifactCount, 10);
+  for (const name of await readdir(f.master)) if (name !== "owner.lock") {
+    const path = join(f.master, name, "00-requested.json"); await writeFile(path, await readFile(path));
+  }
+}));
+
 test("parallel readers overlap within eight workers and each pass joins before the next", async () => fixture(async f => {
   await populated(f, 16);
   const code = String.raw`

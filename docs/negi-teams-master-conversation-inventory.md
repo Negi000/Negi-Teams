@@ -75,3 +75,33 @@ Windows/Node v20.17.0の同じ規模の合成履歴で、200 operation/1,000 sta
 最終の関連36件は成功・失敗0・skip0（43,682.988ms）。上限8件の実重複、二走査の完全終了、worker失敗でも他worker終了までguardを保持、読取中の部分変更、同じbytesのdirectory置換を検証した。これまでの署名・欠落・競合・crash・hot journal試験も含む。独立レビューではこの差分に具体的な正しさ/データ整合性の問題は見つからなかった。
 
 既存authority/起動/通常入力/provider/UIへの接続は引き続き未実施。全履歴を繰り返し読む追記の改善、turn/scheduler監査、journal復旧、owner/2移行、receipt、保持/版移行と前記platform/外部変更の条件を残す。既存Material 3 Expressive画面のCodex「新しい会話」はまだ有効化しない。
+
+### 2026-10-02: Windowsの追記中だけ保護した読取ハンドルを再利用する
+
+既存の一回のappend内で、最初に確認したstage fileとoperation directoryのハンドルを保持する。stageは読取だけを共有し、directoryは削除を共有しない。既存の書込みハンドルや書込み可能なmappingがある場合は保護したopenを拒否し、DBを変更せず保留する。Windowsの共有条件はcloseまで続き、WRITE共有を省くopenは既存の書込みハンドル/mappingと両立せず、DELETE共有を省くと削除・名前変更のopenを許さない（[CreateFileWの公式仕様](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew)）。属性アクセス全体を禁止する仕組みではないため、native stamp・通常path・directory identity・file一覧の前後照合は維持する。
+
+本文cacheは使わない。同じハンドルを先頭へ戻し、append内の三走査すべてで全stage bytesを読んでSHAを照合する。署名鎖・owner・SQLite・最後のwrite CASも従来通り。worker失敗時は全開始済みworkerを待ち、登録済みハンドルすべてを閉じてから戻る。未登録のopenはworker自身が失敗時に閉じる。プロセス終了によるOSの解放も検証した。常駐writer、TSの新しい通信protocol、provider RPCは追加していない。単独audit/lookupと非Windowsの追記は従来のreaderを使う。
+
+保持するstage数とoperation directory数の合計は、helperごとに最大8,192。最初のprotected open前に方式を選び、見積が上限を超える履歴は従来の全件openへ進む。保護の取得失敗を理由に従来方式へ切り替えない。この上限はハンドルの資源上限で、50,000 stageのデータ上限や保存期間を変更しない。複数helper全体で共有する8,192上限ではない。
+
+最終関連41/41成功、失敗・取消・skip0（52,275.7048ms）。追加5件は、三回の全本文読取とopen再利用、書換え/削除/名前変更の拒否、既存writerとfile/section handleを閉じた後も残る書込み可能viewの拒否、worker部分失敗時のjoinと解放、方式選択の境界、実child終了時の解放を検証した。小fixtureは40 file open・8 directory open・120本文読取。失敗時の解放試験では、GC前に全stageの再書込みと全operation directoryの往復renameが成功し、nativeの保護が解除されたことを確認した。GCは完了済みThread/Futureのtracebackが保持する診断用handle数の確認にだけ使う。初期のfocused試験でのerrno判断、診断handle数、注入したreaderの復元漏れによる失敗は別記録に保持し、最終成功へ合算していない。
+
+同じ公開`--writes`測定の1,000 operation/5,000 stageへの追記は次の値になった。OS cacheは消去せず、前回と今回の単一実行を比較した方向の確認である。
+
+| stage | intent ACK | stage保存・fsyncを含む時間 |
+| --- | ---: | ---: |
+| requested | 5,578ms | 5,584ms |
+| old_idle | 5,481ms | 5,485ms |
+| start_dispatched | 5,563ms | 5,567ms |
+| bound | 5,498ms | 5,502ms |
+| completed | 5,563ms | 5,567ms |
+
+5段階合計は前回48,572msから**27,705ms**になり、最終監査は`clean`。同じDBの二つの1,000履歴Masterへの同時helper呼出はrequested **6,044 / 6,087ms**、未送信cancelled **5,897 / 5,962ms**。全4追記を保存し、両Masterの最終監査`clean`・exit0だった。DBは47,689,728 bytes。合成owner/provider identityを使ったpublic append APIの測定であり、SQLiteの同時write競合、実RPC、scheduler/turn、UI、停電の検証やp99保証ではない。27.7秒という保存時間は、通常利用へ接続する前の応答性改善として引き続き扱う。
+
+別の1,000履歴fixtureでPython helperを直接計測した資源診断は、file open 5,000・directory open 1,000・全本文読取15,000・三走査。process handle数は**165 → 最大6,172 → 165**となり、追記後のpublic auditは`clean`だった。診断用hookと事前auditを伴うため、診断の5,532msをpublic APIの性能値へ混ぜない。実8,192上限でのOS資源負荷、50,000 stageでの性能、macOS/Linux/UNCでの新方式を検証したという主張はしない。上限超過時の従来方式には大量履歴で30秒期限に達する可能性が残る。
+
+候補は既存authority/起動/通常入力/provider/UIへ未接続のまま。turn/scheduler索引、明示hot-journal rollback、欠落stage repair、owner/2移行、native receipt intent/解除とbaseline、独立DBを先に確認するprepare、保持/版移行、外部ABAと前記接続条件を維持する。Material 3 ExpressiveのUIは維持し、Codex「新しい会話」はまだ有効化しない。全73要件・Phase0–8の追加進捗であり、全体完了ではない。
+
+最終ソースのPython AST、型検査、build、差分検査も成功。client assetsは`index-CvLJ6iRB.css`/`index-C-cjKz75.js`を維持した。今回の新しいGUI/実機/人の品質受入やCI成功は主張しない。
+
+限定した独立read-onlyレビューでも、具体的な正しさ・データ整合性・handle解放の追加問題は見つからなかった。実8,192負荷と複数helper合計の資源量、上限超過時の性能は前記の接続前条件として残す。

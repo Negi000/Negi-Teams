@@ -19,6 +19,7 @@ from datetime import datetime
 from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor
 from types import MappingProxyType
+from threading import Lock
 
 VERSION = 1
 APPLICATION_ID = 0x4E544331
@@ -26,7 +27,8 @@ MAX_EVENTS = 50000  # Five stages for each of the existing 10,000 candidate oper
 MAX_TOTAL_EVENTS = 50000  # Whole DB budget, separately enforced across registered Masters.
 MAX_MASTERS = 10000
 MAX_ARTIFACT = 24000
-READ_WORKERS = 8  # Bound native IO handles; two complete passes still compare all bytes.
+READ_WORKERS = 8  # Concurrent operation readers; retained handles have a separate budget.
+MAX_RETAINED_HANDLES = 8192  # Per one-shot append; larger histories keep legacy full-open reads.
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
 SHA = re.compile(r"[0-9a-f]{64}")
 MASTER = re.compile(r"[a-zA-Z0-9_-]{1,100}")
@@ -96,6 +98,104 @@ def native_kernel():
     return windows_kernel()
 
 
+def native_stamp(info):
+    return (info.volume, info.index_high, info.index_low, info.size_high, info.size_low, info.links,
+            info.created.dwHighDateTime, info.created.dwLowDateTime, info.written.dwHighDateTime, info.written.dwLowDateTime)
+
+
+class RetainedStageReads:
+    """One append only: retain protected handles, never cached artifact bytes.
+
+    Every pass still reads and hashes every stage. Windows denies compatible
+    write/delete opens until commit/hold and cleanup; attribute/path checks remain.
+    """
+    def __init__(self):
+        require(os.name == "nt", "protected stage handles require Windows")
+        self.kernel = native_kernel()
+        self.files, self.directories = {}, {}
+        self.lock = Lock()
+        self.enabled = None
+
+    def choose(self, paths):
+        estimate = len(paths) + len({path.split("/")[0] for path in paths})
+        if self.enabled is None:
+            require(not self.files and not self.directories, "select protection before acquiring handles")
+            self.enabled = estimate <= MAX_RETAINED_HANDLES
+        elif self.enabled:require(estimate <= MAX_RETAINED_HANDLES, "protected handle estimate changed")
+
+    def opened(self, path, directory=False):
+        from negi_recover_writer import windows_extended, windows_normal, win_info
+        import ctypes
+        flags = 0x00200000 | (0x02000000 if directory else 0)
+        # Directory access permits child creation; no DELETE sharing pins its name.
+        # Stage access permits READ only, including rejection of writable mappings.
+        handle = self.kernel.CreateFileW(windows_extended(path), 0x80 if directory else 0x80000000,
+                                         3 if directory else 1, None, 3, flags, None)
+        require(handle != ctypes.c_void_p(-1).value, "protected stage handle unavailable; preserve competing writer")
+        try:
+            win_info(self.kernel, handle, directory, MAX_ARTIFACT)
+            if directory:
+                buffer = ctypes.create_unicode_buffer(32768)
+                length = self.kernel.GetFinalPathNameByHandleW(handle, buffer, len(buffer), 0)
+                require(0 < length < len(buffer) and os.path.normcase(windows_normal(buffer.value)) == os.path.normcase(str(path)),
+                        "protected operation directory alias")
+            return handle
+        except BaseException:
+            self.kernel.CloseHandle(handle)
+            raise
+
+    def directory(self, path, before):
+        with self.lock:entry = self.directories.get(path)
+        if entry is not None:
+            require(entry[1] == tuple(before), "protected operation directory changed")
+            return
+        handle = self.opened(path, True)
+        try:
+            require(before == identity(normal(path, True)), "operation replaced before protection")
+            with self.lock:
+                require(path not in self.directories and len(self.directories) < MAX_MASTERS
+                        and len(self.files) + len(self.directories) < MAX_RETAINED_HANDLES, "protected directory capacity")
+                self.directories[path] = (handle, tuple(before))
+        except BaseException:
+            self.kernel.CloseHandle(handle)
+            raise
+
+    def read(self, path, limit):
+        from negi_recover_writer import win_info, win_bytes
+        before = tuple(fingerprint(normal(path)))
+        with self.lock:entry = self.files.get(path)
+        if entry is not None:
+            handle, stamp, pinned, bound = entry
+            require(bound == limit and pinned == before, "protected stage metadata/path changed")
+            require(stamp == native_stamp(win_info(self.kernel, handle, limit=limit)), "protected stage changed")
+            raw = win_bytes(self.kernel, handle, limit)
+            require(stamp == native_stamp(win_info(self.kernel, handle, limit=limit)) and pinned == tuple(fingerprint(normal(path)))
+                    and len(raw) == int(pinned[2]), "protected stage changed during read")
+            return raw
+        handle = self.opened(path)
+        try:
+            stamp = native_stamp(win_info(self.kernel, handle, limit=limit))
+            raw = win_bytes(self.kernel, handle, limit)
+            require(stamp == native_stamp(win_info(self.kernel, handle, limit=limit)) and before == tuple(fingerprint(normal(path)))
+                    and len(raw) == int(before[2]), "stage changed before protection")
+            with self.lock:
+                require(path not in self.files and len(self.files) < MAX_EVENTS
+                        and len(self.files) + len(self.directories) < MAX_RETAINED_HANDLES, "protected stage capacity")
+                self.files[path] = (handle, stamp, before, limit)
+            return raw
+        except BaseException:
+            self.kernel.CloseHandle(handle)
+            raise
+
+    def close(self):
+        # Caller has joined every reader first, including failures/cancellations.
+        ok = True
+        for rows in (self.files, self.directories):
+            for entry in rows.values():ok = bool(self.kernel.CloseHandle(entry[0])) and ok
+            rows.clear()
+        require(ok, "protected handles did not all close")
+
+
 def normal(path, directory=False):
     info = path.lstat()
     require((stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode))
@@ -117,20 +217,17 @@ def read_file(path, limit):
         from negi_recover_writer import win_open_reader, win_info, win_bytes
         import ctypes
         kernel = native_kernel()
-        def stamp(info):
-            return [info.volume, info.index_high, info.index_low, info.size_high, info.size_low, info.links,
-                    info.created.dwHighDateTime, info.created.dwLowDateTime, info.written.dwHighDateTime, info.written.dwLowDateTime]
         handle = win_open_reader(kernel, path)
         require(handle != ctypes.c_void_p(-1).value, "file handle unavailable")
         try:
-            pinned = stamp(win_info(kernel, handle, limit=limit))
+            pinned = native_stamp(win_info(kernel, handle, limit=limit))
             raw = win_bytes(kernel, handle, limit)
-            require(pinned == stamp(win_info(kernel, handle, limit=limit)), "file changed during read")
+            require(pinned == native_stamp(win_info(kernel, handle, limit=limit)), "file changed during read")
             current = win_open_reader(kernel, path)
             require(current != ctypes.c_void_p(-1).value, "file path changed during read")
             try:
-                require(pinned == stamp(win_info(kernel, current, limit=limit))
-                        == stamp(win_info(kernel, handle, limit=limit)), "file replaced during read")
+                require(pinned == native_stamp(win_info(kernel, current, limit=limit))
+                        == native_stamp(win_info(kernel, handle, limit=limit)), "file replaced during read")
             finally:kernel.CloseHandle(current)
             normal(path)
             return raw
@@ -219,6 +316,7 @@ class Inventory:
         self.masters = self.root / "masters"
         self.master = self.masters / master_id
         self.key_path = self.root / "signing-key.json"
+        self.retained = None
 
     def authority(self):
         normal(self.root.parent, True)
@@ -426,13 +524,14 @@ class Inventory:
     def scan_operation(self, name, paths):
         path = self.master / name
         before = identity(normal(path, True))
+        if self.retained is not None and self.retained.enabled:self.retained.directory(path, before)
         files = names(path)
         require(len(files) <= 5, "operation file capacity")
         actual = {}
         for filename in files:
             relative = name + "/" + filename
             require(relative in paths, "unindexed stage file")
-            raw = read_file(path / filename, MAX_ARTIFACT)
+            raw = self.retained.read(path / filename, MAX_ARTIFACT) if self.retained is not None and self.retained.enabled else read_file(path / filename, MAX_ARTIFACT)
             found = {"sha256": sha(raw), "size": len(raw)}
             require(found == paths[relative], "indexed stage changed or partial")
             actual[relative] = [found, fingerprint(normal(path / filename))]
@@ -440,6 +539,7 @@ class Inventory:
         return [name, before, files], actual
 
     def scan(self, paths):
+        if self.retained is not None:self.retained.choose(paths)
         expected_paths = MappingProxyType({path: MappingProxyType(value) for path, value in paths.items()})
         expected_dirs = {path.split("/")[0] for path in expected_paths}
         inventory, actual, operations = [], {}, []
@@ -521,6 +621,15 @@ class Inventory:
         return raw, value
 
     def append(self, request):
+        require(self.retained is None, "nested append is not supported")
+        if os.name != "nt":return self.append_checked(request)
+        self.retained = RetainedStageReads()
+        try:return self.append_checked(request)
+        finally:
+            try:self.retained.close()
+            finally:self.retained = None
+
+    def append_checked(self, request):
         require(set(request) == {"action", "root", "masterId", "expectedHead", "ownerSha256", "relativePath", "bytes"}, "append input fields")
         expected = request["expectedHead"]
         require(type(expected) is dict and set(expected) == {"seq", "sha256"} and type(expected["seq"]) is int

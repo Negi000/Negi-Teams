@@ -263,3 +263,21 @@ NT-067/073の追加進捗。全73要件・Phase0–8と、先行記録の全残�
 別fixtureの`--writes`測定で、1,000履歴へのpublic append APIの5段階は**13,859 / 10,262 / 9,337 / 7,898 / 7,178ms**。ACK後のstage file保存を含む合計48,572msであり、通常利用の応答性に向けた追加改善が必要。共有DBの二つの1,000履歴Masterへの同時helper呼出はrequested **10,331 / 10,501ms**、未送信cancelled **7,759 / 7,695ms**。全4追記成功・両Master最終監査`clean`・exit0。SQLiteの同時write競合を保証する測定ではない。合成owner/provider identity・一括署名DB作成を使い、実RPC、scheduler/turn、通常入力、UI、電源断を測っていない。測定専用fixtureは失敗時も削除するため、失敗証拠の保持/復旧は測定対象外。
 
 限定した独立レビューに具体的な追加問題なし。候補は既存authority/起動/通常入力/provider/UIに未接続。追記の反復全走査改善、turn/scheduler索引、明示hot-journal復旧、欠落stage repair、既存journal/owner/2移行、native receipt/解除とbaseline、保持/版移行、macOS/Linux/UNC/停電/外部ABAと先行の全残条件を維持する。Codex「新しい会話」は引き続き拒否し、Material 3 Expressiveの画面構成は維持する。NT-067/073の進捗で、全73要件・Phase0–8と全体ゴールはACTIVE。
+
+## 2026-10-02追加: Windowsの追記中だけ読取ハンドルを保護して再利用する
+
+[方式・資源上限・測定範囲](negi-teams-master-conversation-inventory.md#2026-10-02-windowsの追記中だけ保護した読取ハンドルを再利用する)。一回のappend内でstageとoperation directoryのハンドルを保持する。三走査とも全本文を再読取・hash照合し、native stamp/path/file一覧、署名鎖、owner、write CASの検査を維持する。本文cache、常駐writer、新しいTS protocolは追加しない。単独audit/lookupと非Windowsのreaderは従来通り。
+
+最初のopen前にstage+directoryの合計8,192以内なら保護方式を選び、超過する履歴は従来の全件openを使う。保護の取得失敗では従来方式へ切り替えず保留する。50,000 stageのデータ上限は維持する。worker失敗でも全開始済みworkerを待ち、全登録handleを解放してから戻る。
+
+最終41/41成功（52,275.7048ms、失敗/取消/skip0）。追加試験で40 file+8 directoryのopenを三走査で再利用し、本文120回を読んだ。書換え/削除/名前変更、既存writerと書込み可能mapping、部分worker失敗のjoin/解放、方式選択境界、実child終了時の解放を確認した。初期focused試験のerrno/診断handle数/注入復元漏れによる失敗記録は保持し、最終成功へ混ぜない。
+
+公開`--writes`の1,000履歴への5段階intent ACKは**5,578 / 5,481 / 5,563 / 5,498 / 5,563ms**。stage保存・fsync込みは**5,584 / 5,485 / 5,567 / 5,502 / 5,567ms**、合計**27,705ms**（前回48,572ms）、最終監査`clean`。二つの1,000履歴Masterへの同時helper呼出はrequested **6,044 / 6,087ms**、未送信cancelled **5,897 / 5,962ms**、全保存・両Master最終`clean`・exit0。OS cache未消去の単一実行比較で、安定した性能/p99やSQLite write同時競合を保証しない。
+
+別fixtureの直接Python資源診断は5,000 file+1,000 directoryを保持し、全本文15,000回・三走査。process handle数は**165 → 最大6,172 → 165**、追記後public auditは`clean`。hookと事前audit付きの5,532msはpublic API性能へ合算しない。実8,192上限の資源負荷、50,000 stageでの性能、全platformでの受入は未確認。新GUI/実機/人の品質受入、provider RPC/model/Jev、CI成功の主張なし。
+
+27.7秒の保存時間は引き続き応答性改善の対象。候補はauthority/起動/通常入力/provider/UIへ未接続で、turn/scheduler索引、明示hot-journal rollback、欠落stage repair、owner/2移行、native receipt intent/解除/baseline、prepare前の独立DB検査、保持/版移行と先行の全残条件を維持する。Material 3 ExpressiveのUIとCodex「新しい会話」の無効状態を維持する。NT-067/073の追加進捗で、全73要件・Phase0–8と全体ゴールはACTIVE。
+
+最終Python AST・型検査・build・差分検査も成功。既存Material 3のclient assetsは`index-CvLJ6iRB.css`/`index-C-cjKz75.js`を維持した。
+
+限定した独立read-onlyレビューに具体的な正しさ・データ整合性・handle解放の追加問題なし。実8,192負荷・複数helper合計資源・上限超過時の性能は接続前条件として残る。
