@@ -278,6 +278,17 @@ def publish_receipt_windows(kernel, root, owner_raw, text):
 
 
 def recover_windows(root, kind, domain, request_id, expected_hash, owner_sha256=None, receipt_json=None):
+    if kind == "master":
+        if root.parent.name != "masters":raise ValueError("Canonical Master authority layout required")
+        sibling_directory = str(Path(__file__).parent)
+        if sibling_directory not in sys.path:sys.path.insert(0, sibling_directory)
+        from negi_master_storage_guard import storage_guard
+        with storage_guard(root.parent.parent):
+            return _recover_windows(root, kind, domain, request_id, expected_hash, owner_sha256, receipt_json)
+    return _recover_windows(root, kind, domain, request_id, expected_hash, owner_sha256, receipt_json)
+
+
+def _recover_windows(root, kind, domain, request_id, expected_hash, owner_sha256=None, receipt_json=None):
     if kind == "master":master_inventory_absent(root)
     with windows_guard(root, kind) as kernel:
         if kind == "master":master_inventory_absent(root)

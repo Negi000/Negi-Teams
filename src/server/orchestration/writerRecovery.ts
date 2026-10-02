@@ -3,6 +3,8 @@
 import { execFile } from "node:child_process";
 import { lstat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { basename, dirname } from "node:path";
+import { invokeMasterStorage, masterStorageTicket, withMasterStorageGuard } from "./masterStorageGuard.ts";
 import { promisify } from "node:util";
 import { isReviewRequestId } from "./humanReviewProof.ts";
 
@@ -45,6 +47,18 @@ export async function recoverWriter(root:string,kind:WriterKind,operation:Writer
   if(kind==="master"&&(!ownerSha256||! /^[0-9a-f]{64}$/.test(ownerSha256)))throw Error("Master recovery requires exact owner bytes");
   if(ownerSha256!==undefined&&! /^[0-9a-f]{64}$/.test(ownerSha256))throw Error("Recovery owner hash invalid");
   if(receiptBytes!==undefined&&(kind!=="master"||Buffer.byteLength(receiptBytes)>8000))throw Error("Recovery receipt invalid");
+  if (kind === "master") {
+    if (!receiptBytes) throw Error("Master recovery requires a bounded signed receipt");
+    if (operation.domain !== "master-conversation" || basename(dirname(root)) !== "masters" || JSON.parse(receiptBytes).payload?.masterId !== basename(root)) throw Error("Master root must match exact owner and decision");
+    const authorityRoot = dirname(dirname(root)), frozenOperation = structuredClone(operation), frozenReceipt = receiptBytes;
+    return withMasterStorageGuard(authorityRoot, async () => {
+      const ticket = masterStorageTicket(authorityRoot);
+      const result = await invokeMasterStorage({ action: "recover-master", root: authorityRoot, requestId: frozenOperation.requestId.toLowerCase(),
+        hash: frozenOperation.hash, ownerSha256, receipt: frozenReceipt, ...(ticket ? { storageTicket: ticket } : {}) });
+      if (Object.keys(result).join() !== "released" || typeof result.released !== "boolean") throw Error("Native Master recovery result invalid");
+      return result.released;
+    });
+  }
   const path=await script();
   const result=await exec("python",[path,"--root",root,"--kind",kind,"--domain",operation.domain,
     "--request-id",operation.requestId.toLowerCase(),"--hash",operation.hash,...(ownerSha256?["--owner-sha256",ownerSha256]:[]),

@@ -121,3 +121,17 @@ Windows/Node v20.17.0の同じ規模の合成履歴で、200 operation/1,000 sta
 最終Python AST、client/server型検査、build、差分検査は成功。独立した読み取り専用のレビューでは、指摘した予約・lease・provider境界と例外時の後検査を修正した後、追加の具体的な欠陥は見つからなかった。Material 3 Expressiveのclient assetsは`index-CvLJ6iRB.css`/`index-C-cjKz75.js`を維持した。今回の変更を新しいGUI/実機試験やCI成功とは扱わない。
 
 明示DB復旧より先に、全Masterと参加writerが共有するOS排他、旧binaryのversion fence、owner/2からowner/3への移行、stage/receipt intentとbaseline、初回threadの耐久性あるdispatch/identity記録を接続する必要がある。`lstat`の検査間に動くwriterや、検査を持たない旧binaryの排除は未達である。hot journalの回復は[SQLiteのlockingとrollback手順](https://sqlite.org/lockingv3.html)に従い、確認済みproof・全owner不在・共通排他の下でSQLite自身へ委ねる設計が必要で、今回rollback APIを実装したとは扱わない。欠落stage repair、保持/版移行、turn/scheduler全履歴と性能、実provider切替・利用者確認、platform/外部ABA/停電と先行の全残条件を維持する。Codex「新しい会話」の有効化と全73要件・Phase0–8の受入は継続中。
+
+### 2026-10-02: 参加するMaster保存処理の共通OS排他
+
+Windowsのauthority rootごとに、固定sibling `root.storage-guard-v1.lock`を使用する。通常の空・single-link fileであり、競合を解消するために削除しない。`CreateFileW`のshare=0と親directoryのno-delete handleを保持し、helperから直接のNode親へnative handleを移す。helper終了後もNodeが排他を所有し、正確なNode所有processの終了ではOSが解放する。共有条件とhandle transferの根拠は[CreateFileW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew)と[DuplicateHandle](https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-duplicatehandle)に従う。
+
+handle ticketはstdinだけを使い、直接の親PID・native creation token・canonical path・volume/file ID・種類を照合する。file内へticketを保存しない。正確なcanonical spellingを要求し、driveや親pathの非canonicalな大文字小文字、junctionやredirect、部分file、hardlinkは保留する。Windowsのcase-sensitive directoryでも異なるrootを同じleaseへまとめない。Nodeの同一root内では開始済みの入れ子保存を全て待ち、同一processの別callerは解放を待つ。他processの競合と不明状態ではcallbackを開始せず、callbackを自動再実行しない。読取専用audit/lookupは既存guardだけを開き、欠落root/guardを作らない。読取専用呼出は従来の索引rootにguardが無い場合も保留する。旧writerとの混在を排除する明示的な移行は未達である。
+
+authorityのowner/stage更新と解除、productionの通常予約と返却済みlease、候補inventoryのinitialize/register/append/audit/lookup、native Master owner解除へ接続した。startupとturn/start/binding、Task結果とschedulerのterminal/unknown保存も同じroot排他を使う。モデル応答の待機中にはrootを保持しない。準備完了のsessionとturnEndは保存排他を解放した後に通知する。重なるstartは最初の非同期待機より前に拒否し、後続startが正常な起動processを停止したり、待機中のstopを取り消したりしない。
+
+helperのCLI/importでContextVarが二重化する問題、文字大小を潰して別rootへticketを渡す問題、重複startによるprocess停止を実装と試験で修正した。`DUPLICATE_CLOSE_SOURCE`はBOOLの成否に関係なくsourceを閉じるため、検証済みの親source→guard sourceを両方試み、コピーを保持したまま完了する。native close後にfalseを返す故障注入でも、両sourceの試行と同じNodeからの再取得を確認した。返答消失・部分transfer・release例外はprocess内のregistrationを保留するが、それだけで全native handleが残っているとは保証しない。保存済み事実は巻き戻さず、操作も再送しない。未確定状態の運用上の照合と再起動手順は引き続き必要である。
+
+関連8 test filesは**182件中181成功・1スキップ・失敗/取消0（198,548.3924ms）**。スキップはWindows上の非Windows owner preview試験。実Windowsのcase-sensitive fixture、Node所有process終了、外部helperの排除、未awaitの入れ子保存のjoin、read-only非作成、root/handle差替え拒否、inventory/native recovery/通常受付との結合を確認した。この実行開始後に追加したstartup競合修正は、後続のBrain全ファイル**24/24成功（5,841.9578ms）**で検証し、両実行を一つの最新183件suiteとして合算しない。強制停止のunknownと確認済み中断のfailedを区別するよう誤った試験期待を直した。故障fixtureのUTF-8不足など初期失敗は別logへ保持する。最終Python AST・client/server型検査・build・差分検査は成功。独立read-onlyレビューの具体的な指摘は修正済み。合成Node providerと試験専用childだけを使い、その終了を待った。
+
+これは参加writerの排他で、旧binaryや外部の同一権限processを隔離するsandboxではない。Windowsを今回の対象runtimeとし、Linux/macOSのguardは未対応で保留する。UNC/SUBST/全filesystem・停電での受入も未確認。既存owner/2の独立DB presence gateは維持する。索引intentの通常記録への接続、owner2→3/version fence、stage/receipt intent・baseline・初回thread記録、hot-journal rollback、repair、保持/版移行と性能、実provider/UI切替は未達のまま。Material 3 ExpressiveのUI assets `index-CvLJ6iRB.css`/`index-C-cjKz75.js`は一致し、今回の新しいGUI/実機/人の受入/実Codex/model/Jev/CI成功は主張しない。全73要件・Phase0–8の進捗であり、Codex「新しい会話」と全体受入は継続中。

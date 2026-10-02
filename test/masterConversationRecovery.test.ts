@@ -10,6 +10,7 @@ import { MasterConversationAuthority,MasterConversationHeldError,type MasterConv
 import { FileScheduler } from "../src/server/orchestration/scheduler.ts";
 import { scheduledMasterTurns } from "../src/server/orchestration/masterTurnAdmission.ts";
 import { observeWriter,recoverWriter } from "../src/server/orchestration/writerRecovery.ts";
+import { MasterStorageHeldError } from "../src/server/orchestration/masterStorageGuard.ts";
 
 const bytes=(value:unknown)=>JSON.stringify(value)+"\n";
 const hash=(value:string)=>createHash("sha256").update(value).digest("hex");
@@ -51,7 +52,7 @@ test("a surviving independent database or sidecar disables native owner release 
   assert.match(preview?.reason??"",/保存記録/);
   await assert.rejects(authority.releaseOwner(f.cwd,randomUUID(),before!.proofSha256),MasterConversationHeldError);
   const owner=JSON.parse(ownerBytes),receipt=await recoveryReceipt(f,ownerBytes,randomUUID(),before!.proofSha256);
-  await assert.rejects(recoverWriter(f.master,"master",owner.operation,hash(ownerBytes),receipt),/Independent Master inventory requires migration/);
+  await assert.rejects(recoverWriter(f.master,"master",owner.operation,hash(ownerBytes),receipt),MasterStorageHeldError);
   assert.equal(await readFile(join(f.master,"owner.lock"),"utf8"),ownerBytes);
   assert.deepEqual(await readdir(f.master),["owner.lock"]);
   assert.equal(await readFile(sibling,"utf8"),"retained independent evidence");
@@ -171,9 +172,10 @@ test("partial and legacy owners are not adopted or removed",async()=>fixture(asy
 }));
 
 test("native boundary refuses later dead owner with same request instead of deleting by operation identity alone",async()=>fixture(async f=>{
- const before=await stoppedOwner(f),owner=JSON.parse(before),replacement=await resign(f,{...owner,owner:randomUUID()});
+ const before=await stoppedOwner(f),owner=JSON.parse(before),preview=await f.reopen().ownerRecovery(f.cwd);
+ const receipt=await recoveryReceipt(f,before,randomUUID(),preview!.proofSha256),replacement=await resign(f,{...owner,owner:randomUUID()});
  await writeFile(join(f.master,"owner.lock"),replacement);
- await assert.rejects(recoverWriter(f.master,"master",owner.operation,hash(before)),/Observed owner bytes changed/);
+ await assert.rejects(recoverWriter(f.master,"master",owner.operation,hash(before),receipt),MasterStorageHeldError);
  assert.equal(await readFile(join(f.master,"owner.lock"),"utf8"),replacement);
 }));
 

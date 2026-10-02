@@ -16,7 +16,8 @@ import sqlite3
 import stat
 import sys
 from datetime import datetime
-from functools import lru_cache
+from functools import lru_cache, wraps
+from negi_master_storage_guard import storage_guard
 from concurrent.futures import ThreadPoolExecutor
 from types import MappingProxyType
 from threading import Lock
@@ -306,6 +307,13 @@ def process_identity():
     return {"platform": "linux", "pid": pid, "startToken": boot + ":" + ticks}
 
 
+def storage_action(function):
+    @wraps(function)
+    def guarded(self, *args, **kwargs):
+        with storage_guard(self.root, create=function.__name__ not in ("audit", "lookup")):return function(self, *args, **kwargs)
+    return guarded
+
+
 class Inventory:
     def __init__(self, root, master_id):
         require(type(root) is str and os.path.isabs(root), "absolute authority root required")
@@ -371,7 +379,7 @@ class Inventory:
 
     @contextmanager
     def connection(self, writable=False, initialize=False):
-        with self.guarded(initialize) as meta:
+        with storage_guard(self.root, create=writable), self.guarded(initialize) as meta:
             # mode=ro deliberately refuses missing DBs and hot-journal repair.
             uri = self.db.as_uri() + ("?mode=rw" if writable else "?mode=ro")
             conn = sqlite3.connect(uri, uri=True, timeout=0.1, isolation_level=None)
@@ -399,6 +407,7 @@ class Inventory:
         require(MASTER.fullmatch(master_id) and catalog(path) == [], "initialization/registration requires empty master")
         return encoded({"masterId": master_id, "path": str(path), "identity": identity(normal(path, True))})
 
+    @storage_action
     def initialize(self):
         # Validate every master BEFORE creating the sibling DB; populated old records
         # need an explicit migration, never a silent adoption from current files.
@@ -444,6 +453,7 @@ class Inventory:
         require(registering or selected is not None, "master not registered")
         return selected
 
+    @storage_action
     def register(self):
         with self.connection(True) as (conn, meta):
             self.validated(conn, meta, registering=True)
@@ -596,6 +606,7 @@ class Inventory:
                 "head": {"seq": seq, "sha256": last}, "state": "pending" if missing else "clean",
                 "artifactCount": len(paths), "missing": missing}
 
+    @storage_action
     def audit(self):
         with self.connection() as (conn, meta):
             checkpoint, paths, _, missing = self.audited(conn, meta)
@@ -620,6 +631,7 @@ class Inventory:
                 and operation["domain"] == "master-conversation" and valid_uuid(operation["requestId"]) and valid_sha(operation["hash"]), "owner operation")
         return raw, value
 
+    @storage_action
     def append(self, request):
         require(self.retained is None, "nested append is not supported")
         if os.name != "nt":return self.append_checked(request)
@@ -679,6 +691,7 @@ class Inventory:
             return {"schema": "negi-master-inventory-result/1", "action": "append", "masterId": self.master_id,
                     "head": {"seq": seq + 1, "sha256": entry_sha}, "relativePath": relative_path, "artifactSha256": sha(artifact)}
 
+    @storage_action
     def lookup(self, request):
         require(set(request) == {"action", "root", "masterId", "relativePath"} and type(request["relativePath"]) is str, "lookup input fields")
         with self.connection() as (conn, meta):
@@ -696,16 +709,19 @@ def main():
     request = json.loads(raw, object_pairs_hook=unique)
     require(type(request) is dict and {"action", "root", "masterId"} <= set(request), "input shape")
     inventory = Inventory(request["root"], request["masterId"])
+    ticket = request.pop("storageTicket", None)
     action = request["action"]
     if action == "processIdentity":
         require(set(request) == {"action", "root", "masterId"}, "input fields")
         result = {"schema": "negi-master-inventory-result/1", "action": action, "masterId": inventory.master_id, "processIdentity": process_identity()}
-    elif action in ("initialize", "register", "audit"):
-        require(set(request) == {"action", "root", "masterId"}, "input fields")
-        result = getattr(inventory, action)()
-    elif action == "append":result = inventory.append(request)
-    elif action == "lookup":result = inventory.lookup(request)
-    else:raise ValueError("Master inventory: unsupported action")
+    else:
+        with storage_guard(inventory.root, ticket, create=action not in ("audit", "lookup")):
+            if action in ("initialize", "register", "audit"):
+                require(set(request) == {"action", "root", "masterId"}, "input fields")
+                result = getattr(inventory, action)()
+            elif action == "append":result = inventory.append(request)
+            elif action == "lookup":result = inventory.lookup(request)
+            else:raise ValueError("Master inventory: unsupported action")
     sys.stdout.buffer.write(encoded(result) + b"\n")
 
 

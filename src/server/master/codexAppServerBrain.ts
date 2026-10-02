@@ -77,6 +77,7 @@ export class CodexAppServerBrain implements MasterBrain {
   private waiter: ((value: IteratorResult<MasterEvent>) => void) | null = null;
   private closed = false;
   private stopping = false;
+  private starting = false;
   private startOptions: { cwd: string; model: string } | null = null;
   private pendingSend: Promise<{ acked: boolean }> | null = null;
   private settlement: Promise<void> | null = null;
@@ -87,7 +88,7 @@ export class CodexAppServerBrain implements MasterBrain {
   sessionId(): string | null { return this.process?.client.currentThread?.threadId ?? null; }
 
   async start(options: MasterBrainStartOptions): Promise<void> {
-    if (this.process || !this.options.executable || !this.options.effort ||
+    if (this.starting || this.process || !this.options.executable || !this.options.effort ||
         !Number.isSafeInteger(this.options.turnTimeoutMs) || this.options.turnTimeoutMs < 1) {
       throw new Error("Codex App Server brain process options invalid or already started");
     }
@@ -95,8 +96,28 @@ export class CodexAppServerBrain implements MasterBrain {
         options.extraArgs.length > 0 || ![null, "default", "plan"].includes(options.permissionMode)) {
       throw new Error("read-only Codex brain does not support these start options");
     }
+    this.starting = true;
     this.closed = false;
     this.stopping = false;
+    try {
+      const session = await this.withStorage(() => this.startHeld(options));
+      if (this.closed || this.stopping) throw new Error("Codex brain stopped before readiness");
+      this.emit(session);
+    } catch (error) {
+      this.stopping = true;
+      await this.stopOwnedProcess();
+      throw error;
+    } finally { this.starting = false; }
+  }
+
+  private withStorage<T>(run: () => Promise<T>): Promise<T> {
+    return this.options.admission?.withStorage ? this.options.admission.withStorage(run) : run();
+  }
+
+  private async stopOwnedProcess(): Promise<void> { await this.process?.stop(); }
+
+  private async startHeld(options: MasterBrainStartOptions): Promise<Extract<MasterEvent, { kind: "session" }>> {
+    if (this.closed || this.stopping || this.process || !options.model) throw new Error("Codex brain stopped or already started before storage admission");
     await this.options.admission?.assertIdle?.(options.cwd);
     await this.options.admission?.assertStorageCompatible?.();
     if (this.closed || this.stopping) throw new Error("Codex brain stopped before App Server launch");
@@ -147,9 +168,9 @@ export class CodexAppServerBrain implements MasterBrain {
       await this.options.admission?.assertStorageCompatible?.();
       if (this.closed || this.stopping) throw new Error("Codex brain stopped during thread/start");
       if (identity.rerouted) throw new Error("App Server rerouted the requested model");
-      this.emit({ kind: "session", sessionId: identity.threadId, model: identity.resolvedModel,
+      return { kind: "session", sessionId: identity.threadId, model: identity.resolvedModel,
         apiKeySource: null, mcpServers: [], capabilities: ["read-only",
-          ...(this.options.taskTools ? ["registered-task-tools"] : [])] });
+          ...(this.options.taskTools ? ["registered-task-tools"] : [])] };
     } catch (error) {
       this.stopping = true;
       await process.stop();
@@ -160,7 +181,12 @@ export class CodexAppServerBrain implements MasterBrain {
   async send(input: MasterBrainInput): Promise<{ acked: boolean }> {
     if (this.pendingSend || this.settlement || this.process?.client.activeTurn || this.process?.client.pendingDynamicTools)
       throw new MasterInputNotSentError("統括は実行中です。今回の入力は未送信です。");
-    const pending = this.sendTurn(input);
+    let entered = false;
+    const pending = this.withStorage(() => { entered = true; return this.sendTurn(input); }).catch(async error => {
+      if (!entered) throw new MasterInputNotSentError("保存処理の実行枠を取得できませんでした。今回の入力は未送信です。");
+      if (!(error instanceof MasterInputNotSentError)) await this.process?.stop();
+      throw error;
+    });
     this.pendingSend = pending;
     try { return await pending; }
     finally { if (this.pendingSend === pending) this.pendingSend = null; }
@@ -231,8 +257,10 @@ export class CodexAppServerBrain implements MasterBrain {
           (observation.status === "completed" && observation.finalText === null)) {
         throw new Error("turn outcome or final answer is unknown");
       }
-      await resultContext?.terminal(observation);
-      await lease?.complete(observation);
+      await this.withStorage(async () => {
+        await resultContext?.terminal(observation);
+        await lease?.complete(observation);
+      });
       if (observation.status === "completed") {
         this.emit({ kind: "text", text: observation.finalText!, partial: false });
       }
@@ -242,8 +270,15 @@ export class CodexAppServerBrain implements MasterBrain {
         aborted: observation.status === "interrupted", usage: usageOf(observation),
         costUsd: null, errorText: observation.status === "failed" ? "Codex turn failed" : null });
     } catch (error) {
-      await this.holdUnknown(lease, "Master provider result or durable terminal evidence unknown; inspect before release");
-      try { await resultContext?.unknown(); } catch { /* terminal or incomplete receipt remains non-replayable */ }
+      try {
+        await this.withStorage(async () => {
+          await this.holdUnknown(lease, "Master provider result or durable terminal evidence unknown; inspect before release");
+          await resultContext?.unknown();
+        });
+      } catch {
+        // No storage admission proves no release; preserve the original claim.
+        this.emit({ kind: "notice", level: "error", text: "照合記録を保存できませんでした。台帳の確認が必要です。" });
+      }
       this.emit({ kind: "notice", level: "error",
         text: `Codex turn ${turnId} の結果は未確定です。再送前に照合してください: ${(error as Error).message}` });
       await process.stop();

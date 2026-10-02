@@ -257,10 +257,10 @@ export class LocalTaskService {
     const admission=scheduledMasterTurns({ root: join(this.root, "master-turns"), masterId,
       scheduler: this.scheduler, onReleased: () => this.pump() });
     const conversations = this.masterConversationAuthority(masterId);
-    // Startup is a read-only audit. The reset writer requires its inventory/recovery
-    // gates before it can be used by normal dispatch; do not create crash locks here.
+    // Startup does not create conversation owners. The shared native guard has
+    // its own persistent empty sibling; indexed reset still needs migration gates.
     return guardMasterAdmission({ reserve: request => this.configurationAdmission(() => admission.reserve(request)),
-      assertIdle: cwd => conversations.assertStartupSafe(cwd) }, () => conversations.assertStorageCompatible());
+      assertIdle: cwd => conversations.assertStartupSafe(cwd) }, () => conversations.assertStorageCompatible(), run => conversations.withStorage(run));
   }
   /** Shared server-owned exclusion and signed empty-thread journal. No provider/UI dispatch here. */
   masterConversationAuthority(masterId: string): MasterConversationAuthority {

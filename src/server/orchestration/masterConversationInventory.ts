@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { lstat } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { masterStorageTicket, withMasterStorageGuard } from "./masterStorageGuard.ts";
 
 export interface MasterInventoryHead { seq: number; sha256: string }
 export interface MasterInventoryAudit {
@@ -41,7 +42,14 @@ async function script() {
 }
 
 async function invoke(request: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const input = JSON.stringify(request) + "\n";
+  const frozen = structuredClone(request);
+  return frozen.action === "processIdentity" ? invokeHeld(frozen) : withMasterStorageGuard(String(frozen.root), () => invokeHeld(frozen),
+    { createIfMissing: !["audit", "lookup"].includes(String(frozen.action)) });
+}
+
+async function invokeHeld(request: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const ticket = request.action === "processIdentity" ? undefined : masterStorageTicket(String(request.root));
+  const input = JSON.stringify({ ...request, ...(ticket ? { storageTicket: ticket } : {}) }) + "\n";
   check(Buffer.byteLength(input) <= 100_000, "input too large");
   const filename = await script();
   // No shell, no payload/key in command line. Wait for exit even after timeout.

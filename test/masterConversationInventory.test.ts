@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { test } from "node:test";
 import { MasterConversationInventory, type MasterInventoryHead } from "../src/server/orchestration/masterConversationInventory.ts";
 import type { MasterConversationRequest } from "../src/server/orchestration/masterConversations.ts";
+import { withMasterStorageGuard } from "../src/server/orchestration/masterStorageGuard.ts";
 
 const exec = promisify(execFile);
 const hash = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
@@ -385,6 +386,15 @@ test("read-only missing inventory creates nothing; explicit bootstrap is create-
   await f.inventory.initialize(); assert.deepEqual(await f.inventory.audit(), { head: zero(), state: "clean", artifactCount: 0, missing: [] });
   const bytes = await readFile(f.inventory.databasePath); await assert.rejects(f.inventory.initialize(), /never be replaced/);
   assert.deepEqual(await readFile(f.inventory.databasePath), bytes);
+}));
+
+test("public inventory helpers borrow the Node lease while a direct helper remains excluded", { skip: process.platform !== "win32" }, async () => fixture(async f => {
+  await withMasterStorageGuard(f.root, async () => {
+    await f.inventory.initialize();assert.equal((await f.inventory.audit()).state, "clean");
+    await assert.rejects(pythonInput([script], { action: "audit", root: f.root, masterId: "master" }), /busy or unavailable/);
+    assert.equal((await f.inventory.audit()).artifactCount, 0);
+  });
+  assert.equal((await f.inventory.audit()).state, "clean");
 }));
 
 test("populated historical authority cannot be silently initialized or adopted", async () => fixture(async f => {

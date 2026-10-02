@@ -291,3 +291,13 @@ NT-067/073の追加進捗。全73要件・Phase0–8と、先行記録の全残�
 繰返しの`lstat`はDB全体の原子的排他ではない。late detectionでは完了済みreceipt・終端と確認済み枠解放が既に存在し得るため、巻き戻さない。thread/start後の検出ではprovider側の空threadと未索引identityが残る可能性を保持する。全Master共通OS guard、参加writerと旧binaryのversion fence、owner/2→3移行、stage/receipt intent・baseline、初回threadの耐久性ある記録を明示DB rollbackより先に接続する。SQLiteの回復・修復APIと新しい会話の実provider/UI接続は今回の実装範囲ではない。
 
 Material 3 Expressiveの画面構成を維持し、buildのclient assetsは`index-CvLJ6iRB.css`/`index-C-cjKz75.js`で一致した。新しい画面も共通tokensとPC/スマホそれぞれの導線へ接続する。保存性能、turn/scheduler全履歴、保持/版移行、欠落stage repair、実provider切替、人の確認、実機safe-area/keyboardと先行の全残条件を維持する。NT-067/073の追加進捗で、全73要件・Phase0–8とゴールはACTIVE。
+
+## 2026-10-02追加: Master保存処理のWindows共通排他
+
+[方式と検証範囲](negi-teams-master-conversation-inventory.md#2026-10-02-参加するmaster保存処理の共通os排他)。固定の空sibling fileと親directoryのnative handleをNodeへ移し、helper終了後もauthority root全体の排他を保持する。owner/stage・解除、production通常予約とlease、候補inventory、native recovery、Brainの起動・送信・terminal/unknown保存へ接続した。モデル応答待機には排他を保持せず、準備完了/turnEndを解放後に通知する。開始済み入れ子処理はjoinし、callbackを再実行しない。候補inventoryのread-only audit/lookupは新しいroot/guardを作らない。
+
+関連8 test filesは**182件中181成功・1スキップ・失敗/取消0（198,548.3924ms）**。この実行開始後のstartup競合修正はBrain全ファイル**24/24成功（5,841.9578ms）**で別に検証した。スキップは非Windows owner preview。CLI/importの排他状態、native closeのfalse status、実case-sensitive directoryの異なるroot、他process/handle差替え/部分file、所有Node終了、入れ子join、保存結合を確認した。初期失敗は保持し最終成功へ混ぜない。最終Python AST・型検査・build・差分検査成功。独立read-onlyレビューでの具体的指摘は修正済み。実provider/model/Jev・新GUI/実機・人の受入・CIの確認ではない。
+
+非canonicalなpath casingは保留し、productionのcanonical stateRootを使う。旧索引rootにguardが無い場合の明示移行、旧binaryのversion fence、owner2→3・receipt intent/baseline・初回thread記録、索引intentの通常記録への接続、hot-journal rollback/repair/保持と性能は引き続き必要。曖昧なtransfer/release時に残すprocess内registrationは、全native handleが残る保証ではない。Windows以外のguardは未対応で保留し、UNC/SUBST/外部同権限process/停電等の残条件も維持する。
+
+Material 3 Expressiveは作業一覧・Task・レビュー・初回設定・知識・チーム・会話・端末へ実装済みで、今回は共通tokensと保存済みPC/375px画面を確認した。最終buildのclient assetsは`index-CvLJ6iRB.css`/`index-C-cjKz75.js`のまま。実機safe-area/keyboardと人の受入は未確認。新機能の画面はAPIが整った段階で同じPC/スマホ別導線へ接続する。Codex「新しい会話」は未有効化で、先行の全残条件・全73要件・Phase0–8と全体ゴールはACTIVE。

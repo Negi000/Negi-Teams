@@ -441,6 +441,59 @@ async function scheduledBrainFixture(run: (data: { scheduler: FileScheduler; roo
   finally { await rm(dir, { recursive: true, force: true }); }
 }
 
+test("startup readiness is emitted only after storage release completes", async () => {
+ let release!:()=>void,entered!:()=>void,readySession!:()=>void;
+ const pause=new Promise<void>(accept=>{release=accept;}),ready=new Promise<void>(accept=>{entered=accept;}),session=new Promise<void>(accept=>{readySession=accept;});
+ const options:MasterBrainStartOptions={cwd:process.cwd(),model:"synthetic-astra",permissionMode:"plan",systemPrompt:null,controlMcp:null,mcpConfigPath:null,resumeSessionId:null,extraArgs:[]};
+ const brain=new CodexAppServerBrain({executable:process.execPath,args:["-e",fixture,"ok"],effort:"medium",turnTimeoutMs:5000,
+  admission:{reserve:async()=>{throw Error("must not reserve");},withStorage:async run=>{const result=await run();entered();await pause;return result;}}});
+ const events:MasterEvent[]=[],draining=(async()=>{for await(const event of brain.events()){events.push(event);if(event.kind==="session")readySession();}})();
+ try {const starting=brain.start(options);await ready;assert.equal(events.some(event=>event.kind==="session"),false);release();await starting;await session;
+  assert.equal(events.filter(event=>event.kind==="session").length,1);
+ }finally{release();await brain.stop();await draining;}
+});
+
+test("stop while storage admission waits cannot be revoked by an overlapping start", async () => {
+ let release!:()=>void,entered!:()=>void,launches=0;
+ const pause=new Promise<void>(accept=>{release=accept;}),ready=new Promise<void>(accept=>{entered=accept;});
+ const brain=new CodexAppServerBrain({executable:process.execPath,args:[],effort:"medium",turnTimeoutMs:5000,
+  admission:{reserve:async()=>{throw Error("must not reserve");},withStorage:async run=>{entered();await pause;return run();}},
+  launch:()=>{launches++;throw Error("must not launch");}});
+ const options:MasterBrainStartOptions={cwd:process.cwd(),model:"synthetic-astra",permissionMode:"plan",systemPrompt:null,controlMcp:null,mcpConfigPath:null,resumeSessionId:null,extraArgs:[]};
+ const starting=brain.start(options);await ready;await brain.stop();
+ await assert.rejects(brain.start(options),/already started/);
+ release();await assert.rejects(starting,/stopped.*storage admission/);assert.equal(launches,0);
+});
+
+test("an overlapping start rejects before storage admission without stopping the valid startup",async()=>{
+ await scheduledBrainFixture(async({options,admission,scheduler})=>{
+  let release!:()=>void,entered!:()=>void,calls=0;
+  const pause=new Promise<void>(accept=>{release=accept;}),ready=new Promise<void>(accept=>{entered=accept;});
+  const brain=new CodexAppServerBrain({executable:process.execPath,args:["-e",fixture,"ok"],effort:"medium",turnTimeoutMs:5000,
+   admission:{...admission,withStorage:async run=>{calls++;if(calls===1){entered();await pause;}return run();}}});
+  try{const starting=brain.start(options);await ready;await assert.rejects(brain.start(options),/already started/);
+   assert.equal(calls,1);release();await starting;assert.equal(brain.sessionId(),"synthetic-thread");
+   await brain.send({text:"valid first startup remains usable"});const events=await collectUntil(brain,"turnEnd");
+   assert.equal(events.filter(event=>event.kind==="session").length,1);assert.equal((await scheduler.read()).state?.entries[0].status,"verified");
+  }finally{release();await brain.stop();}
+ });
+});
+
+test("production-shaped storage admission releases the root while a provider turn waits", {skip:process.platform!=="win32"}, async()=>{
+ await scheduledBrainFixture(async({scheduler,root,options,admission})=>{
+  const authority=new MasterConversationAuthority({root:root+"-conversations",turnRoot:root,masterId:"master",scheduler});
+  const guarded=guardMasterAdmission({...admission,assertIdle:cwd=>authority.assertStartupSafe(cwd)},()=>authority.assertStorageCompatible(),run=>authority.withStorage(run));
+  const brain=new CodexAppServerBrain({executable:process.execPath,args:["-e",fixture,"hold"],effort:"medium",turnTimeoutMs:5000,admission:guarded});
+  try {await brain.start(options);assert.equal((await brain.send({text:"wait without holding storage"})).acked,true);
+   assert.equal((await scheduler.read()).state?.entries[0].status,"running");let admitted=false;
+   await authority.withStorage(async()=>{admitted=true;});assert.equal(admitted,true);
+   await brain.interrupt();const events=await collectUntil(brain,"turnEnd"),end=events.at(-1);
+   assert.ok(end?.kind==="turnEnd");assert.equal(end.aborted,true);
+  }finally{await brain.stop();}
+  assert.equal((await scheduler.read()).state?.entries[0].status,"failed");
+ });
+});
+
 test("an index appearing after model discovery prevents thread/start and stops the synthetic process",async()=>{
  await scheduledBrainFixture(async ({scheduler,root,options})=>{
   const conversations=root+"-conversations",database=conversations+".inventory.sqlite3",log=root+"-provider.jsonl";

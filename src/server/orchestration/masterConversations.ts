@@ -11,6 +11,7 @@ import type { FileScheduler } from "./scheduler.ts";
 import { masterOwnerAuxiliary, masterOwnerEvidence, signedMasterOwner, validatedMasterOwner, type MasterOwnerKind, type MasterOwner } from "./masterConversationOwner.ts";
 import { observeWriter, recoverWriter, type WriterOperation } from "./writerRecovery.ts";
 import { guardMasterAdmission, scheduledMasterTurns, type MasterTurnRequest, type MasterTurnLease } from "./masterTurnAdmission.ts";
+import { MasterStorageHeldError, withMasterStorageGuard } from "./masterStorageGuard.ts";
 
 type Stage = "requested" | "old_idle" | "start_dispatched" | "bound" | "completed" | "cancelled" | "needs_reconciliation";
 export interface MasterConversationRequest {
@@ -96,6 +97,10 @@ export class MasterConversationAuthority {
 
   /** Read-only compatibility gate for process/thread/turn dispatch and leases. */
   async assertStorageCompatible(): Promise<void> { await this.requireLegacyInventoryAbsent(); }
+  async withStorage<T>(run: () => Promise<T>): Promise<T> {
+    try { return await withMasterStorageGuard(this.root, run); }
+    catch (error) { if (error instanceof MasterStorageHeldError) throw new MasterConversationHeldError(); throw error; }
+  }
 
   private async prepare(cwd: string) {
     // Check before any mkdir or key creation, including when the entire old
@@ -127,6 +132,11 @@ export class MasterConversationAuthority {
   }
 
   private async withLock<T>(cwd: string, run: (state: Awaited<ReturnType<MasterConversationAuthority["prepare"]>>) => Promise<T>,
+      target?: { kind: MasterOwnerKind; operation: WriterOperation }): Promise<T> {
+    return this.withStorage(() => this.withLockHeld(cwd, run, target));
+  }
+
+  private async withLockHeld<T>(cwd: string, run: (state: Awaited<ReturnType<MasterConversationAuthority["prepare"]>>) => Promise<T>,
       target?: { kind: MasterOwnerKind; operation: WriterOperation }): Promise<T> {
     let state;
     try { state = await this.prepare(cwd); } catch { throw new MasterConversationHeldError(); }
@@ -298,6 +308,10 @@ export class MasterConversationAuthority {
 
   /** Explicit exact-owner cleanup. Repeating the same decision never executes a model operation. */
   async releaseOwner(cwd:string,decisionId:string,expectedProofSha256:string):Promise<{decisionId:string;requestId:string;ownerReleased:true;operationComplete:false}> {
+    return this.withStorage(() => this.releaseOwnerHeld(cwd, decisionId, expectedProofSha256));
+  }
+
+  private async releaseOwnerHeld(cwd:string,decisionId:string,expectedProofSha256:string):Promise<{decisionId:string;requestId:string;ownerReleased:true;operationComplete:false}> {
     check(uuid.test(decisionId)&&/^[0-9a-f]{64}$/.test(expectedProofSha256),"recovery decision invalid");
     try{
       await this.requireLegacyInventoryAbsent();
@@ -367,7 +381,7 @@ export class MasterConversationAuthority {
       try { await this.idle(state); } catch { throw new MasterConversationHeldError(); }
       await this.requireLegacyInventoryAbsent();
       return guardMasterAdmission(scheduledMasterTurns({...this.options,root:this.options.turnRoot,workId,requestedAt}),
-        () => this.requireLegacyInventoryAbsent()).reserve(request);
+        () => this.requireLegacyInventoryAbsent(), run => this.withStorage(run)).reserve(request);
     },{kind:"turn-admission",operation:{domain:"master-conversation",requestId:raw.requestId,hash:hash(requestBytes)}});
   }
 

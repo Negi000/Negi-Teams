@@ -25,17 +25,21 @@ export interface MasterTurnAdmission {
   assertIdle?(cwd: string): Promise<void>;
   /** Lightweight compatibility check; this is not a cross-process storage lock. */
   assertStorageCompatible?(): Promise<void>;
+  withStorage?<T>(run: () => Promise<T>): Promise<T>;
 }
 
 /** Keep an admitted lease subject to the same compatibility check until its
  * terminal record. Snapshot caller objects before awaiting the check. This
- * detects known incompatible storage; it does not make check/write atomic. */
-export function guardMasterAdmission(admission: MasterTurnAdmission, checkStorage: () => Promise<void>): MasterTurnAdmission {
-  const checked = async <T>(run: () => Promise<T>): Promise<T> => {
+ * detects known incompatible storage. The supplied storage wrapper also excludes
+ * participating writers; older binaries and independent writes remain outside it. */
+export function guardMasterAdmission(admission: MasterTurnAdmission, checkStorage: () => Promise<void>, withStorage?: <T>(run: () => Promise<T>) => Promise<T>): MasterTurnAdmission {
+  const operation = async <T>(run: () => Promise<T>): Promise<T> => {
     await checkStorage();
     try { return await run(); } finally { await checkStorage(); }
   };
+  const checked = <T>(run: () => Promise<T>): Promise<T> => withStorage ? withStorage(() => operation(run)) : operation(run);
   return {
+    withStorage,
     assertIdle: admission.assertIdle ? cwd => admission.assertIdle!(cwd) : undefined,
     assertStorageCompatible: checkStorage,
     reserve: raw => {
