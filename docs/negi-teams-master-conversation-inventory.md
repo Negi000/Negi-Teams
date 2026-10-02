@@ -1,6 +1,6 @@
 # Master会話の独立索引候補
 
-NT-067/073の追加部品。`MasterConversationInventory`と固定Python helperを実装した。既存の会話authority、起動検査、通常入力、provider RPC、復旧解除、認証済み確認UIへの接続は次の工程である。全73要件・Phase0–8のゴールは継続中。
+NT-067/073の追加部品。`MasterConversationInventory`と固定Python helperを実装した。既存処理には、独立DBが残る場合に旧writerを保留する互換性検査を接続した。索引intentを使う会話authority、起動検査、通常入力、provider RPC、復旧解除、認証済み確認UIの全面接続は次の工程である。全73要件・Phase0–8のゴールは継続中。
 
 ## 保存するもの
 
@@ -105,3 +105,19 @@ Windows/Node v20.17.0の同じ規模の合成履歴で、200 operation/1,000 sta
 最終ソースのPython AST、型検査、build、差分検査も成功。client assetsは`index-CvLJ6iRB.css`/`index-C-cjKz75.js`を維持した。今回の新しいGUI/実機/人の品質受入やCI成功は主張しない。
 
 限定した独立read-onlyレビューでも、具体的な正しさ・データ整合性・handle解放の追加問題は見つからなかった。実8,192負荷と複数helper合計の資源量、上限超過時の性能は前記の接続前条件として残す。
+
+### 2026-10-02: 旧writerと独立DBの互換性検査
+
+既存のowner/2 writerは索引intentを保存しないため、正しい独立DBが存在する場合も、そのまま会話記録を変更できない。authority rootの隣の固定DB pathと`-journal/-wal/-shm`を`lstat`だけで調べ、何らかのentryが存在する場合やアクセスを確定できない場合は保留する。空・部分DB、sidecarだけ、directory、hardlink、redirected pathも同じ扱いとする。SQLiteで開く操作や内容による自動採用を行わない。DBだけが残りauthorityや鍵が消えた場合は、最初のmkdir・鍵作成より前に止める。
+
+検査はauthorityの準備、owner取得後、stage保存、admission、起動監査、owner解除へ接続した。通常のTaskServiceの予約と返却済みleaseにも、更新の前後で同じ検査を適用する。更新が例外になった場合も後検査を行う。入力と終端観測は最初の非同期検査より前に固定する。providerのprocess起動、初期化、model discovery後、thread/start後、turn/start前にも確認する。Windowsのnative owner解除を直接呼ぶ場合も、同じcanonical Master layoutのDBを調べ、receipt作成・公開・正確なowner削除の前に確認する。
+
+更新・owner解除の前にDBを検出した場合、既存stage・owner・実行枠を照合の証拠として保持する。旧`status()`は読み取り専用の診断として利用できるが、独立DBを含む開始可能判定ではない。owner previewは署名と終了状態の証拠を読めても、DBがあれば`canRelease=false`とする。
+
+**これは互換性の検出であり、検査と書込みを原子的にする共通排他ではない。** 遅い検出では、保存済みreceiptや終端記録、確認済みschedulerの枠解放が既に存在し得る。それらの事実を巻き戻さず、モデルや保存操作を自動再実行しない。thread/start中の出現ではprovider側に空threadが作られた後に準備完了を拒否するため、耐久性のある索引へ未結付けのidentityが残る可能性がある。process停止だけをprovider側の削除や完全な会話復旧と扱わない。
+
+最終の関連6ファイルの試験は**127件中126成功・1スキップ・失敗/取消0（35,441.5502ms）**。スキップはWindows上の非Windows owner preview試験であり、実モデル依存ではない。DB/鍵/authorityの消失、owner fsync後、予約済みlease、起動監査・model discovery・thread/start・dispatch保存中、失敗した予約・終端保存後、native receipt公開後の出現を検証した。保存済みの正確なbytesと枠・終端を確認し、late detectionを無変更の保証へ置き換えない。provider試験は合成Node App Serverで、実Codex/model/Jevを起動していない。native試験の停止済みNode/Python childは終了を待った。
+
+最終Python AST、client/server型検査、build、差分検査は成功。独立した読み取り専用のレビューでは、指摘した予約・lease・provider境界と例外時の後検査を修正した後、追加の具体的な欠陥は見つからなかった。Material 3 Expressiveのclient assetsは`index-CvLJ6iRB.css`/`index-C-cjKz75.js`を維持した。今回の変更を新しいGUI/実機試験やCI成功とは扱わない。
+
+明示DB復旧より先に、全Masterと参加writerが共有するOS排他、旧binaryのversion fence、owner/2からowner/3への移行、stage/receipt intentとbaseline、初回threadの耐久性あるdispatch/identity記録を接続する必要がある。`lstat`の検査間に動くwriterや、検査を持たない旧binaryの排除は未達である。hot journalの回復は[SQLiteのlockingとrollback手順](https://sqlite.org/lockingv3.html)に従い、確認済みproof・全owner不在・共通排他の下でSQLite自身へ委ねる設計が必要で、今回rollback APIを実装したとは扱わない。欠落stage repair、保持/版移行、turn/scheduler全履歴と性能、実provider切替・利用者確認、platform/外部ABA/停電と先行の全残条件を維持する。Codex「新しい会話」の有効化と全73要件・Phase0–8の受入は継続中。

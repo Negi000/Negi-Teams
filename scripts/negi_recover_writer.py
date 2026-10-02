@@ -31,6 +31,17 @@ def paths(kind):
             else ("configuration-writer.lock", "configuration-recovery.lock", "configuration-recovery-flock-v2.lock"))
 
 
+def master_inventory_absent(root):
+    # Owner/2 receipt publication/deletion is not integrated with the independent
+    # index yet. A TS-only fence would leave this direct native entry unprotected.
+    if root.parent.name != "masters":raise ValueError("Canonical Master authority layout required")
+    database = str(root.parent.parent) + ".inventory.sqlite3"
+    for suffix in ("", "-journal", "-wal", "-shm"):
+        try:Path(database + suffix).lstat()
+        except FileNotFoundError:continue
+        else:raise ValueError("Independent Master inventory requires migration; preserve owner and receipt")
+
+
 def validate(raw, kind, domain, request_id, expected_hash):
     def unique(pairs):
         result = {}
@@ -229,6 +240,7 @@ def receipt_names(names, pending, final):
 
 def publish_receipt_windows(kernel, root, owner_raw, text):
     raw, final_name, pending_name = receipt_data(root, owner_raw, text)
+    master_inventory_absent(root)
     receipts = root / "recoveries"
     try:receipts.mkdir(mode=0o700)
     except FileExistsError:pass
@@ -244,6 +256,7 @@ def publish_receipt_windows(kernel, root, owner_raw, text):
             return
         if ctypes.get_last_error() != 2:raise ctypes.WinError(ctypes.get_last_error())
         # Do not truncate until the opened entry is proven ordinary and unshared.
+        master_inventory_absent(root)
         handle = kernel.CreateFileW(windows_extended(pending), 0xc0000000, 0, None, 4, 0x00200000, None)
         if handle == ctypes.c_void_p(-1).value:raise ctypes.WinError(ctypes.get_last_error())
         try:
@@ -255,6 +268,7 @@ def publish_receipt_windows(kernel, root, owner_raw, text):
             if win_bytes(kernel, handle, 8000) != raw:raise ValueError("Staged receipt changed")
         finally:kernel.CloseHandle(handle)
         # No REPLACE_EXISTING/COPY_ALLOWED fallback. Same-volume create-only move.
+        master_inventory_absent(root)
         if not kernel.MoveFileExW(windows_extended(pending), windows_extended(final), 0x8):raise ctypes.WinError(ctypes.get_last_error())
         handle = win_open_reader(kernel, final)
         if handle == ctypes.c_void_p(-1).value:raise ctypes.WinError(ctypes.get_last_error())
@@ -264,7 +278,9 @@ def publish_receipt_windows(kernel, root, owner_raw, text):
 
 
 def recover_windows(root, kind, domain, request_id, expected_hash, owner_sha256=None, receipt_json=None):
+    if kind == "master":master_inventory_absent(root)
     with windows_guard(root, kind) as kernel:
+        if kind == "master":master_inventory_absent(root)
         path = root / paths(kind)[0]
         handle = kernel.CreateFileW(windows_extended(path), 0x80000000 | 0x10000, 3, None, 3, 0x00200000, None)
         if handle == ctypes.c_void_p(-1).value:
@@ -278,6 +294,7 @@ def recover_windows(root, kind, domain, request_id, expected_hash, owner_sha256=
             if kind == "master":publish_receipt_windows(kernel, root, raw, receipt_json)
             if win_bytes(kernel, handle) != raw:raise ValueError("Writer changed during recovery")
             win_dead(kernel, pid)
+            if kind == "master":master_inventory_absent(root)
             # Delete the exact opened file on close; path substitution cannot make
             # us unlink another entry. The handle denies FILE_SHARE_DELETE.
             disposition = ctypes.c_ubyte(1)

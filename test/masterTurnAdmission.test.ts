@@ -3,9 +3,10 @@ import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { scheduledMasterTurns, MasterInputNotSentError } from "../src/server/orchestration/masterTurnAdmission.ts";
+import { guardMasterAdmission, scheduledMasterTurns, MasterInputNotSentError } from "../src/server/orchestration/masterTurnAdmission.ts";
 import { FileScheduler } from "../src/server/orchestration/scheduler.ts";
 import type { CodexTurnObservation } from "../src/server/master/appServerClient.ts";
+import { MasterConversationAuthority, MasterConversationHeldError } from "../src/server/orchestration/masterConversations.ts";
 
 const observation: CodexTurnObservation = { turnId: "turn-a", status: "completed", finalText: "A plan",
   contextInputTokens: 10, contextWindow: 100, lastUsage: { inputTokens: 10, outputTokens: 2 } };
@@ -44,6 +45,48 @@ test("a Master occupies the shared slot, pins intent and settles only with bound
     assert.equal(released, 2);
   });
 });
+
+test("compatibility checks cannot change reserved input or terminal evidence through caller mutation",async()=>fixture(async f=>{
+ let release!:()=>void,entered!:()=>void,pause=new Promise<void>(accept=>{release=accept;}),ready=new Promise<void>(accept=>{entered=accept;});
+ const guarded=guardMasterAdmission(scheduledMasterTurns({root:f.root,masterId:"master",scheduler:f.scheduler}),async()=>{entered();await pause;});
+ const original={...f.request},pending=guarded.reserve(f.request);await ready;f.request.text="changed while checking";f.request.model="wrong model";
+ release();const lease=await pending;
+ const stored=JSON.parse(await readFile(join(f.root,lease.workId,"request.json"),"utf8"));assert.equal(stored.text,original.text);assert.equal(stored.model,original.model);
+ await lease.dispatching();await lease.bind(observation.turnId);
+ pause=new Promise<void>(accept=>{release=accept;});ready=new Promise<void>(accept=>{entered=accept;});
+ const mutable=structuredClone(observation),completing=lease.complete(mutable);await ready;mutable.finalText="changed while checking";mutable.turnId="wrong";
+ release();await completing;
+ const terminal=JSON.parse(await readFile(join(f.root,lease.workId,"outcome.json"),"utf8"));assert.equal(terminal.finalText,observation.finalText);assert.equal(terminal.turnId,observation.turnId);
+}));
+
+test("partial reservation failure still checks storage and preserves the admitted claim",async()=>fixture(async f=>{
+ const authorityRoot=join(f.dir,"conversations"),database=authorityRoot+".inventory.sqlite3";
+ const authority=new MasterConversationAuthority({root:authorityRoot,turnRoot:f.root,masterId:"master",scheduler:f.scheduler});
+ const base=scheduledMasterTurns({root:f.root,masterId:"master",scheduler:f.scheduler});let workId="";
+ const guarded=guardMasterAdmission({reserve:async request=>{
+  const lease=await base.reserve(request);workId=lease.workId;await writeFile(database,"new index");throw Error("partial reservation failure");
+ }},()=>authority.assertStorageCompatible());
+ await assert.rejects(guarded.reserve(f.request),MasterConversationHeldError);
+ assert.deepEqual(await readdir(join(f.root,workId)),["request.json"]);assert.equal((await f.scheduler.read()).state?.entries[0].status,"running");
+ assert.equal(await readFile(database,"utf8"),"new index");
+}));
+
+test("late storage detection reports a hold without undoing already saved terminal facts",async()=>fixture(async f=>{
+ const authorityRoot=join(f.dir,"conversations"),database=authorityRoot+".inventory.sqlite3";
+ const authority=new MasterConversationAuthority({root:authorityRoot,turnRoot:f.root,masterId:"master",scheduler:f.scheduler});
+ const base=scheduledMasterTurns({root:f.root,masterId:"master",scheduler:f.scheduler});
+ const guarded=guardMasterAdmission({reserve:async request=>{
+  const lease=await base.reserve(request);return {...lease,complete:async result=>{
+   await lease.complete(result);await writeFile(database,"new index");throw Error("error after terminal persistence");
+  }};
+ }},()=>authority.assertStorageCompatible());
+ const lease=await guarded.reserve(f.request);await lease.dispatching();await lease.bind(observation.turnId);
+ await assert.rejects(lease.complete(observation),MasterConversationHeldError);
+ const terminal=await readFile(join(f.root,lease.workId,"outcome.json")),scheduler=await readFile(f.scheduler.path);
+ assert.equal(JSON.parse(terminal.toString()).finalText,observation.finalText);assert.equal((await f.scheduler.read()).state?.entries[0].status,"verified");
+ await assert.rejects(lease.complete(observation),MasterConversationHeldError);
+ assert.deepEqual(await readFile(f.scheduler.path),scheduler);assert.deepEqual(await readFile(join(f.root,lease.workId,"outcome.json")),terminal);
+}));
 
 test("unknown Master results retain capacity across reload without restarting the provider", async () => {
   await fixture(async ({ root, scheduler, request }) => {

@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile, symlink, link, unlink } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile, symlink, link, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { MasterConversationAuthority, MasterConversationHeldError, type MasterConversationRequest } from "../src/server/orchestration/masterConversations.ts";
+import { MasterConversationInventory } from "../src/server/orchestration/masterConversationInventory.ts";
 import { scheduledMasterTurns } from "../src/server/orchestration/masterTurnAdmission.ts";
 import { FileScheduler } from "../src/server/orchestration/scheduler.ts";
 import type { CodexThreadIdentity, CodexTurnObservation } from "../src/server/master/appServerClient.ts";
@@ -28,6 +29,129 @@ async function fixture(run: (data: { dir: string; cwd: string; root: string; tur
 }
 const turnRequest=(cwd:string)=>({cwd,model:"fixture-astra",effort:"low",threadId:"old-thread",text:"Fixture input"});
 const operationPath=(root:string,request:MasterConversationRequest)=>join(root,"masters",request.masterId,request.requestId);
+
+for (const [label,suffix,bytes] of [
+ ["empty database","",""], ["partial database","","SQLite format 3\0partial"],
+ ["rollback journal only","-journal","interrupted rollback"], ["WAL only","-wal","pending WAL"], ["SHM only","-shm","pending SHM"],
+] as const) test("surviving "+label+" holds startup and legacy writers before creating an authority",async()=>fixture(async f=>{
+ const sibling=f.root+".inventory.sqlite3"+suffix;await writeFile(sibling,bytes);let calls=0,launches=0;
+ await assert.rejects(f.authority.assertIdle(f.cwd),MasterConversationHeldError);
+ await assert.rejects(f.authority.start(f.request,async mark=>{calls++;await mark();return identity;}),MasterConversationHeldError);
+ await assert.rejects(f.authority.admitTurn({...turnRequest(f.cwd),requestId:randomUUID()}),MasterConversationHeldError);
+ const brain=new CodexAppServerBrain({executable:process.execPath,args:[],effort:"low",turnTimeoutMs:1000,
+  admission:{reserve:async()=>{throw Error("must not reserve");},assertIdle:cwd=>f.authority.assertStartupSafe(cwd)},
+  launch:()=>{launches++;throw Error("must not launch");}});
+ try {await assert.rejects(brain.start({cwd:f.cwd,model:"fixture-astra",permissionMode:"plan",systemPrompt:null,controlMcp:null,mcpConfigPath:null,resumeSessionId:null,extraArgs:[]}),MasterConversationHeldError);}
+ finally {await brain.stop();}
+ assert.equal(calls,0);assert.equal(launches,0);assert.equal(await readFile(sibling,"utf8"),bytes);
+ await assert.rejects(readdir(f.root),{code:"ENOENT"});await assert.rejects(readdir(f.turnRoot),{code:"ENOENT"});
+ assert.equal((await f.scheduler.read()).state,null);
+}));
+
+test("unexpected sibling directory, hardlink and redirected path remain untouched",async()=>{
+ for(const kind of ["directory","hardlink","alias"] as const) await fixture(async f=>{
+  const sibling=f.root+".inventory.sqlite3",target=join(f.dir,"retained-target");
+  if(kind==="hardlink"){await writeFile(target,"retained bytes");await link(target,sibling);}
+  else {await mkdir(target);await writeFile(join(target,"keep.txt"),"retained bytes");
+   if(kind==="directory")await mkdir(sibling);else await symlink(target,sibling,process.platform==="win32"?"junction":"dir");}
+  await assert.rejects(f.authority.assertStartupSafe(f.cwd),MasterConversationHeldError);
+  await assert.rejects(f.authority.assertIdle(f.cwd),MasterConversationHeldError);
+  await assert.rejects(readdir(f.root),{code:"ENOENT"});
+  assert.equal(await readFile(kind==="hardlink"?target:join(target,"keep.txt"),"utf8"),"retained bytes");
+  if(kind==="directory")assert.deepEqual(await readdir(sibling),[]);
+ });
+});
+
+test("a valid independent database still rejects unindexed owner/2 mutation",async()=>fixture(async f=>{
+ await f.authority.assertIdle(f.cwd);
+ const inventory=new MasterConversationInventory({root:f.root,masterId:"master"});await inventory.initialize();
+ const before=await readFile(inventory.databasePath),key=await readFile(join(f.root,"signing-key.json"));
+ assert.equal((await inventory.audit()).state,"clean");let calls=0;
+ await assert.rejects(f.authority.start(f.request,async()=>{calls++;return identity;}),MasterConversationHeldError);
+ await assert.rejects(f.authority.assertStartupSafe(f.cwd),MasterConversationHeldError);
+ await assert.rejects(f.authority.admitTurn({...turnRequest(f.cwd),requestId:randomUUID()}),MasterConversationHeldError);
+ assert.equal(calls,0);assert.deepEqual(await readdir(join(f.root,"masters","master")),[]);
+ assert.deepEqual(await readFile(join(f.root,"signing-key.json")),key);assert.deepEqual(await readFile(inventory.databasePath),before);
+ assert.deepEqual((await inventory.audit()).head,{seq:0,sha256:"0".repeat(64)});
+ // The legacy diagnostic remains read-only; it is not an indexed safe-start verdict.
+ assert.equal(await f.authority.status(f.request.requestId),null);
+}));
+
+for(const lost of ["authority","key"] as const) test("surviving valid index cannot recreate a lost "+lost,async()=>fixture(async f=>{
+ await f.authority.assertIdle(f.cwd);const inventory=new MasterConversationInventory({root:f.root,masterId:"master"});
+ await inventory.initialize();const before=await readFile(inventory.databasePath);
+ if(lost==="authority")await rename(f.root,join(f.dir,"retained-authority"));else await unlink(join(f.root,"signing-key.json"));
+ await assert.rejects(f.reopen().assertIdle(f.cwd),MasterConversationHeldError);
+ await assert.rejects(f.reopen().assertStartupSafe(f.cwd),MasterConversationHeldError);
+ await assert.rejects(readFile(join(f.root,"signing-key.json")),{code:"ENOENT"});
+ if(lost==="authority")await assert.rejects(readdir(f.root),{code:"ENOENT"});
+ else assert.deepEqual(await readdir(join(f.root,"masters","master")),[]);
+ assert.deepEqual(await readFile(inventory.databasePath),before);
+}));
+
+test("a sibling appearing during the startup turn audit prevents provider launch",async()=>fixture(async f=>{
+ const read=f.scheduler.read.bind(f.scheduler),sibling=f.root+".inventory.sqlite3-journal";let appeared=false,launches=0;
+ f.scheduler.read=async()=>{if(!appeared){appeared=true;await writeFile(sibling,"late journal");}return read();};
+ const brain=new CodexAppServerBrain({executable:process.execPath,args:[],effort:"low",turnTimeoutMs:1000,
+  admission:{reserve:async()=>{throw Error("must not reserve");},assertIdle:cwd=>f.authority.assertStartupSafe(cwd)},
+  launch:()=>{launches++;throw Error("must not launch");}});
+ try {await assert.rejects(brain.start({cwd:f.cwd,model:"fixture-astra",permissionMode:"plan",systemPrompt:null,controlMcp:null,mcpConfigPath:null,resumeSessionId:null,extraArgs:[]}),MasterConversationHeldError);}
+ finally {await brain.stop();}
+ assert.equal(appeared,true);assert.equal(launches,0);await assert.rejects(readdir(f.root),{code:"ENOENT"});
+ assert.equal(await readFile(sibling,"utf8"),"late journal");
+}));
+
+test("an index appearing after owner fsync keeps the signed owner without dispatching or reserving",async()=>{
+ for(const action of ["start","admit"] as const)await fixture(async f=>{
+  const owner=join(f.root,"masters","master","owner.lock"),sibling=f.root+".inventory.sqlite3";
+  const read=f.scheduler.read.bind(f.scheduler);let pinned:string|null=null,calls=0;
+  f.scheduler.read=async()=>{
+   if(!pinned){let raw:string|null=null;try{raw=await readFile(owner,"utf8");}catch(error){if((error as NodeJS.ErrnoException).code!=="ENOENT")throw error;}
+    if(raw){pinned=raw;await writeFile(sibling,"late index");}}
+   return read();
+  };
+  await assert.rejects(action==="start"?f.authority.start(f.request,async()=>{calls++;return identity;}):
+   f.authority.admitTurn({...turnRequest(f.cwd),requestId:randomUUID()}),MasterConversationHeldError);
+  assert.ok(pinned);assert.equal(JSON.parse(pinned).schema,"negi-master-conversation-owner/2");assert.equal(calls,0);
+  assert.equal(await readFile(owner,"utf8"),pinned);assert.deepEqual(await readdir(join(f.root,"masters","master")),["owner.lock"]);
+  assert.equal(await readFile(sibling,"utf8"),"late index");assert.equal((await read()).state,null);
+  await assert.rejects(readdir(f.turnRoot),{code:"ENOENT"});
+ });
+});
+
+test("an already admitted legacy lease cannot change records after an index appears",async()=>{
+ for(const phase of ["dispatch","bind","complete","unknown","cancel"] as const)await fixture(async f=>{
+  const lease=await f.authority.admitTurn({...turnRequest(f.cwd),requestId:randomUUID()});
+  if(["bind","complete","unknown"].includes(phase))await lease.dispatching();
+  if(["complete","unknown"].includes(phase))await lease.bind(outcome.turnId);
+  const path=join(f.turnRoot,lease.workId),names=(await readdir(path)).sort(),bytes=await Promise.all(names.map(name=>readFile(join(path,name))));
+  const scheduler=await readFile(f.scheduler.path),sibling=f.root+".inventory.sqlite3";await writeFile(sibling,"new index");
+  const mutation=()=>phase==="dispatch"?lease.dispatching():phase==="bind"?lease.bind(outcome.turnId):phase==="complete"?lease.complete(outcome):phase==="unknown"?lease.unknown("do not rewrite"):lease.cancelBeforeDispatch();
+  await assert.rejects(mutation(),MasterConversationHeldError);
+  assert.deepEqual((await readdir(path)).sort(),names);assert.deepEqual(await Promise.all(names.map(name=>readFile(join(path,name)))),bytes);
+  assert.deepEqual(await readFile(f.scheduler.path),scheduler);assert.equal((await f.scheduler.read()).state?.entries[0].status,"running");
+  assert.equal(await readFile(sibling,"utf8"),"new index");
+ });
+});
+
+for(const phase of ["before-dispatch","after-dispatch"] as const) test("a sibling appearing "+phase+" preserves the exact old evidence without a synthetic cancellation",async()=>fixture(async f=>{
+ const sibling=f.root+".inventory.sqlite3-journal",owner=join(f.root,"masters","master","owner.lock");let ownerBytes="",requests=0;
+ await assert.rejects(f.authority.start(f.request,async mark=>{
+  ownerBytes=await readFile(owner,"utf8");
+  if(phase==="after-dispatch"){await mark();requests++;}
+  await writeFile(sibling,"late pending write");
+  if(phase==="before-dispatch"){await mark();requests++;}
+  return identity;
+ }),MasterConversationHeldError);
+ const files=await readdir(operationPath(f.root,f.request));
+ assert.deepEqual(files.sort(),phase==="after-dispatch"?["00-requested.json","01-old_idle.json","02-start_dispatched.json"]:["00-requested.json","01-old_idle.json"]);
+ assert.equal(requests,phase==="after-dispatch"?1:0);assert.equal(await readFile(owner,"utf8"),ownerBytes);
+ assert.equal(await readFile(sibling,"utf8"),"late pending write");
+ // Read-only reconnect preserves the last known stage instead of declaring completion.
+ const status=await f.reopen().status(f.request.requestId);assert.equal(status?.stage,phase==="after-dispatch"?"start_dispatched":"old_idle");assert.equal(status?.exclusionHeld,true);
+ await assert.rejects(f.reopen().start(f.request,async()=>{requests++;return identity;}),MasterConversationHeldError);
+ assert.equal(requests,phase==="after-dispatch"?1:0);
+}));
 
 test("signed ordered stages persist before empty thread callback; exact replay never invokes it twice",async()=>fixture(async f=>{
  let calls=0;const result=await f.authority.start(f.request,async mark=>{calls++;await mark();const files=await readdir(operationPath(f.root,f.request));assert.deepEqual(files.sort(),["00-requested.json","01-old_idle.json","02-start_dispatched.json"]);return identity;});
@@ -164,6 +288,16 @@ test("production startup guard rejects unknown claim before any provider process
  assert.equal(await readFile(f.scheduler.path,"utf8"),before);await assert.rejects(readdir(f.root),{code:"ENOENT"});
 }));
 
+test("a sibling appearing after startup approval still prevents process launch",async()=>fixture(async f=>{
+ const sibling=f.root+".inventory.sqlite3";let launches=0;
+ const brain=new CodexAppServerBrain({executable:process.execPath,args:[],effort:"low",turnTimeoutMs:1000,
+  admission:{reserve:async()=>{throw Error("must not reserve");},assertIdle:async cwd=>{await f.authority.assertStartupSafe(cwd);await writeFile(sibling,"late index");},
+   assertStorageCompatible:()=>f.authority.assertStorageCompatible()},launch:()=>{launches++;throw Error("must not launch");}});
+ try {await assert.rejects(brain.start({cwd:f.cwd,model:"fixture-astra",permissionMode:"plan",systemPrompt:null,controlMcp:null,mcpConfigPath:null,resumeSessionId:null,extraArgs:[]}),MasterConversationHeldError);}
+ finally {await brain.stop();}
+ assert.equal(launches,0);assert.equal(await readFile(sibling,"utf8"),"late index");await assert.rejects(readdir(f.root),{code:"ENOENT"});
+}));
+
 test("stop during asynchronous startup admission cannot launch after guard returns",async()=>fixture(async f=>{
  let release!:()=>void;const held=new Promise<void>(resolve=>{release=resolve;});let launches=0;
  const brain=new CodexAppServerBrain({executable:process.execPath,args:[],effort:"low",turnTimeoutMs:1000,admission:{reserve:async()=>{throw Error("unexpected");},assertIdle:async()=>held},launch:()=>{launches++;throw Error("must not launch");}});
@@ -222,6 +356,20 @@ test("TaskService wires read-only startup and keeps ordinary reservation inside 
   assert.equal(await readFile(f.config.schedulerPath,"utf8"),before);assert.equal(admissions,1);
   await assert.rejects(readdir(conversationRoot),{code:"ENOENT"});assert.deepEqual(f.calls(),{astra:0,sol:0});
  } finally {await f.close();}
+});
+
+test("TaskService keeps its normal returned lease fenced after reservation",async()=>{
+ const f=await taskFixture();try{
+  let admissions=0;f.tasks.bindConfigurationAdmission(async operation=>{admissions++;return operation();});
+  const admission=f.tasks.masterTurnAdmission("master"),lease=await admission.reserve(turnRequest(f.repo));assert.equal(admissions,1);
+  const turn=join(f.catalog.stateRoot,"master-turns",lease.workId),names=await readdir(turn),before=await readFile(f.config.schedulerPath);
+  const sibling=join(f.catalog.stateRoot,"master-conversations")+".inventory.sqlite3";await writeFile(sibling,"new index");
+  await assert.rejects(lease.dispatching(),MasterConversationHeldError);await assert.rejects(lease.cancelBeforeDispatch(),MasterConversationHeldError);
+  await assert.rejects(admission.assertStorageCompatible!(),MasterConversationHeldError);
+  await assert.rejects(admission.reserve(turnRequest(f.repo)),MasterConversationHeldError);assert.equal(admissions,1);
+  assert.deepEqual(await readdir(turn),names);assert.deepEqual(await readFile(f.config.schedulerPath),before);
+  assert.equal(await readFile(sibling,"utf8"),"new index");assert.deepEqual(f.calls(),{astra:0,sol:0});
+ }finally{await f.close();}
 });
 
 test("normal Sol Task registered through submitVaultRun may use a Master-shaped UUID without blocking startup",async()=>{

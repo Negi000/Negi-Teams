@@ -23,6 +23,37 @@ export interface MasterTurnAdmission {
   reserve(request: MasterTurnRequest): Promise<MasterTurnLease>;
   /** Before App Server process launch; callers already own configuration admission. */
   assertIdle?(cwd: string): Promise<void>;
+  /** Lightweight compatibility check; this is not a cross-process storage lock. */
+  assertStorageCompatible?(): Promise<void>;
+}
+
+/** Keep an admitted lease subject to the same compatibility check until its
+ * terminal record. Snapshot caller objects before awaiting the check. This
+ * detects known incompatible storage; it does not make check/write atomic. */
+export function guardMasterAdmission(admission: MasterTurnAdmission, checkStorage: () => Promise<void>): MasterTurnAdmission {
+  const checked = async <T>(run: () => Promise<T>): Promise<T> => {
+    await checkStorage();
+    try { return await run(); } finally { await checkStorage(); }
+  };
+  return {
+    assertIdle: admission.assertIdle ? cwd => admission.assertIdle!(cwd) : undefined,
+    assertStorageCompatible: checkStorage,
+    reserve: raw => {
+      const request = structuredClone(raw);
+      return checked(async () => {
+        const lease = await admission.reserve(request);
+        // A failed check leaves durable admission evidence for reconciliation.
+        // Never cancel/release an outcome automatically because the DB changed.
+        return { workId: lease.workId,
+          dispatching: () => checked(() => lease.dispatching()),
+          bind: id => checked(() => lease.bind(id)),
+          complete: rawObservation => { const observation = structuredClone(rawObservation); return checked(() => lease.complete(observation)); },
+          unknown: reason => checked(() => lease.unknown(reason)),
+          cancelBeforeDispatch: () => checked(() => lease.cancelBeforeDispatch()),
+        };
+      });
+    },
+  };
 }
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 function inside(root: string, path: string): boolean {

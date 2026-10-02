@@ -41,6 +41,54 @@ async function resign(f:F,value:Record<string,unknown>){
  const key=JSON.parse(await readFile(join(f.root,"signing-key.json"),"utf8")).key;
  delete value.signature;return bytes({...value,signature:createHmac("sha256",Buffer.from(key,"hex")).update(JSON.stringify(value)).digest("hex")});
 }
+
+test("a surviving independent database or sidecar disables native owner release and preserves its evidence",async()=>{
+ for(const suffix of ["","-journal","-wal","-shm"] as const)await fixture(async f=>{
+  const ownerBytes=await stoppedOwner(f),authority=f.reopen(),before=await authority.ownerRecovery(f.cwd);
+  assert.equal(before?.canRelease,true);const sibling=f.root+".inventory.sqlite3"+suffix;
+  await writeFile(sibling,"retained independent evidence");
+  const preview=await authority.ownerRecovery(f.cwd);assert.equal(preview?.ownerState,"dead");assert.equal(preview?.canRelease,false);
+  assert.match(preview?.reason??"",/保存記録/);
+  await assert.rejects(authority.releaseOwner(f.cwd,randomUUID(),before!.proofSha256),MasterConversationHeldError);
+  const owner=JSON.parse(ownerBytes),receipt=await recoveryReceipt(f,ownerBytes,randomUUID(),before!.proofSha256);
+  await assert.rejects(recoverWriter(f.master,"master",owner.operation,hash(ownerBytes),receipt),/Independent Master inventory requires migration/);
+  assert.equal(await readFile(join(f.master,"owner.lock"),"utf8"),ownerBytes);
+  assert.deepEqual(await readdir(f.master),["owner.lock"]);
+  assert.equal(await readFile(sibling,"utf8"),"retained independent evidence");
+ });
+});
+
+test("a sibling appearing after native receipt publication preserves the exact owner and durable receipt",async()=>fixture(async f=>{
+ const ownerBytes=await stoppedOwner(f),preview=await f.reopen().ownerRecovery(f.cwd),decisionId=randomUUID();assert.equal(preview?.canRelease,true);
+ const receipt=await recoveryReceipt(f,ownerBytes,decisionId,preview!.proofSha256),owner=JSON.parse(ownerBytes),database=f.root+".inventory.sqlite3";
+ const code=String.raw`
+import sys,json
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+import negi_recover_writer as m
+r=json.load(sys.stdin); original=m.publish_receipt_windows
+def published(*args):
+    original(*args)
+    Path(r['database']).write_bytes(b'late independent index')
+m.publish_receipt_windows=published
+try:
+    m.recover_windows(Path(r['master']),'master','master-conversation',r['operation']['requestId'],r['operation']['hash'],r['ownerSha256'],r['receipt'])
+    raise AssertionError('owner was removed')
+except ValueError as error:
+    assert 'Independent Master inventory requires migration' in str(error)
+print(json.dumps({'held':True}))`;
+ const child=spawn("python",["-B","-c",code,join(process.cwd(),"scripts")],{windowsHide:true,stdio:["pipe","pipe","pipe"]});
+ let stdout="",stderr="";child.stdout.on("data",bytes=>{stdout+=bytes;});child.stderr.on("data",bytes=>{stderr+=bytes;});
+ const timer=setTimeout(()=>child.kill(),5000);
+ const closed=new Promise<number|null>((resolve,reject)=>{child.once("error",reject);child.once("close",resolve);});
+ child.stdin.end(JSON.stringify({master:f.master,database,operation:owner.operation,ownerSha256:hash(ownerBytes),receipt}));
+ try {assert.equal(await closed,0,stderr);}finally {clearTimeout(timer);child.kill();await closed;}
+ assert.deepEqual(JSON.parse(stdout),{held:true});
+ assert.equal(await readFile(join(f.master,"owner.lock"),"utf8"),ownerBytes);
+ assert.deepEqual((await readdir(join(f.master,"recoveries"))).sort(),[owner.owner+".json"]);
+ assert.equal(await readFile(join(f.master,"recoveries",owner.owner+".json"),"utf8"),receipt);
+ assert.equal(await readFile(database,"utf8"),"late independent index");
+}));
 async function recoveryReceipt(f:F,ownerBytes:string,decisionId:string,proofSha256:string){
  const key=JSON.parse(await readFile(join(f.root,"signing-key.json"),"utf8")).key;
  const payload={schemaVersion:"negi-master-owner-recovery/1",masterId:"master",decisionId,cwdSha256:hash(f.cwd),owner:JSON.parse(ownerBytes),proofSha256,action:"release-owner-only",at:new Date().toISOString()};

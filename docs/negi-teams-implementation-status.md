@@ -281,3 +281,13 @@ NT-067/073の追加進捗。全73要件・Phase0–8と、先行記録の全残�
 最終Python AST・型検査・build・差分検査も成功。既存Material 3のclient assetsは`index-CvLJ6iRB.css`/`index-C-cjKz75.js`を維持した。
 
 限定した独立read-onlyレビューに具体的な正しさ・データ整合性・handle解放の追加問題なし。実8,192負荷・複数helper合計資源・上限超過時の性能は接続前条件として残る。
+
+## 2026-10-02追加: 独立DBが残る場合の旧Master処理の保留
+
+[互換性検査と残る回復条件](negi-teams-master-conversation-inventory.md#2026-10-02-旧writerと独立dbの互換性検査)。既存owner/2 writerに対し、authorityの隣のDBとjournal/WAL/SHMを`lstat`で確認する。正しいDBも含め存在・アクセス不明時は保留し、authority/鍵の再作成より前に止める。準備・owner/stage・起動監査・通常予約と返却済みlease・provider process/thread/turn境界・Windows native owner解除へ接続した。更新の成功/例外双方で後検査し、非同期検査より前に入力・終端観測を固定する。旧診断は読み取り専用として保持し、owner解除previewは不可を示す。
+
+最終関連6ファイルは**127件中126成功・1スキップ・失敗/取消0（35,441.5502ms）**。スキップはWindows上の非Windows owner preview試験。空/部分/正規DB・sidecarだけ・異なるentry種別、authority/鍵の消失、起動と予約後の出現、leaseの全更新、失敗した部分予約・終端保存、合成thread/turn dispatch、native receipt公開後を確認した。新しく開始できない境界と、既に保存された証拠を保持する境界を区別する。実Codex/model/Jev、GUI/実機・人の受入・CIの確認ではない。試験専用childの終了を待ち、Python AST・client/server型検査・build・差分検査も成功。独立read-onlyレビューの具体的な指摘は修正済みで、追加指摘なし。
+
+繰返しの`lstat`はDB全体の原子的排他ではない。late detectionでは完了済みreceipt・終端と確認済み枠解放が既に存在し得るため、巻き戻さない。thread/start後の検出ではprovider側の空threadと未索引identityが残る可能性を保持する。全Master共通OS guard、参加writerと旧binaryのversion fence、owner/2→3移行、stage/receipt intent・baseline、初回threadの耐久性ある記録を明示DB rollbackより先に接続する。SQLiteの回復・修復APIと新しい会話の実provider/UI接続は今回の実装範囲ではない。
+
+Material 3 Expressiveの画面構成を維持し、buildのclient assetsは`index-CvLJ6iRB.css`/`index-C-cjKz75.js`で一致した。新しい画面も共通tokensとPC/スマホそれぞれの導線へ接続する。保存性能、turn/scheduler全履歴、保持/版移行、欠落stage repair、実provider切替、人の確認、実機safe-area/keyboardと先行の全残条件を維持する。NT-067/073の追加進捗で、全73要件・Phase0–8とゴールはACTIVE。

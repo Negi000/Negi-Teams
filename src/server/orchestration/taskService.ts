@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { lstat, mkdir, open, readFile, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { FileScheduler, parseSchedulerCapacity, schedulerCapacityUsage, schedulerWorkEligible, type ScheduledPhase } from "./scheduler.ts";
-import { scheduledMasterTurns, type MasterTurnAdmission } from "./masterTurnAdmission.ts";
+import { guardMasterAdmission, scheduledMasterTurns, type MasterTurnAdmission } from "./masterTurnAdmission.ts";
 import { MasterConversationAuthority } from "./masterConversations.ts";
 import type { ConfigurationAdmission } from "./projectConfiguration.ts";
 import { FileTaskLedger, type TaskEvent, type TaskSnapshot } from "./singleTask.ts";
@@ -259,8 +259,8 @@ export class LocalTaskService {
     const conversations = this.masterConversationAuthority(masterId);
     // Startup is a read-only audit. The reset writer requires its inventory/recovery
     // gates before it can be used by normal dispatch; do not create crash locks here.
-    return { reserve: request => this.configurationAdmission(() => admission.reserve(request)),
-      assertIdle: cwd => conversations.assertStartupSafe(cwd) };
+    return guardMasterAdmission({ reserve: request => this.configurationAdmission(() => admission.reserve(request)),
+      assertIdle: cwd => conversations.assertStartupSafe(cwd) }, () => conversations.assertStorageCompatible());
   }
   /** Shared server-owned exclusion and signed empty-thread journal. No provider/UI dispatch here. */
   masterConversationAuthority(masterId: string): MasterConversationAuthority {

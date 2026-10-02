@@ -10,7 +10,7 @@ import { readMasterTurnArtifact as artifact, verifyMasterTurnDirectory as direct
 import type { FileScheduler } from "./scheduler.ts";
 import { masterOwnerAuxiliary, masterOwnerEvidence, signedMasterOwner, validatedMasterOwner, type MasterOwnerKind, type MasterOwner } from "./masterConversationOwner.ts";
 import { observeWriter, recoverWriter, type WriterOperation } from "./writerRecovery.ts";
-import { scheduledMasterTurns, type MasterTurnRequest, type MasterTurnLease } from "./masterTurnAdmission.ts";
+import { guardMasterAdmission, scheduledMasterTurns, type MasterTurnRequest, type MasterTurnLease } from "./masterTurnAdmission.ts";
 
 type Stage = "requested" | "old_idle" | "start_dispatched" | "bound" | "completed" | "cancelled" | "needs_reconciliation";
 export interface MasterConversationRequest {
@@ -77,24 +77,52 @@ export class MasterConversationAuthority {
     this.root = resolve(options.root);
   }
 
+  private async legacyInventoryAbsent(): Promise<boolean> {
+    const database = this.root + ".inventory.sqlite3";
+    const present = await Promise.all(["", "-journal", "-wal", "-shm"].map(async suffix => {
+      try { await lstat(database + suffix); return true; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
+    }));
+    // The owner/2 writer does not index stage or recovery receipt intents yet.
+    // Even a valid DB must not silently admit this older writer. Do not open it
+    // with SQLite: a read could roll back a hot journal before explicit recovery.
+    return present.every(value => !value);
+  }
+
+  private async requireLegacyInventoryAbsent(): Promise<void> {
+    try { if (await this.legacyInventoryAbsent()) return; } catch { /* Ambiguous access remains a hold. */ }
+    throw new MasterConversationHeldError("会話の保存記録を照合してください。新しい操作は保留されています。");
+  }
+
+  /** Read-only compatibility gate for process/thread/turn dispatch and leases. */
+  async assertStorageCompatible(): Promise<void> { await this.requireLegacyInventoryAbsent(); }
+
   private async prepare(cwd: string) {
+    // Check before any mkdir or key creation, including when the entire old
+    // authority disappeared but its independent sibling DB survived.
+    await this.requireLegacyInventoryAbsent();
     const canonicalCwd = await realpath(resolve(cwd));
     await directory(dirname(this.root));
     check(!inside(canonicalCwd, this.root) && !inside(canonicalCwd, this.options.turnRoot) && !inside(canonicalCwd, this.options.scheduler.path), "state must be outside the checkout");
+    await this.requireLegacyInventoryAbsent();
     await mkdir(this.root, { recursive: true }); await directory(this.root);
     const entries = await readdir(this.root);
     check(entries.every(name => ["signing-key.json", "masters"].includes(name)), "unexpected authority entry");
     let key = await artifact(join(this.root, "signing-key.json"), 1000);
     if (!key) {
       if (entries.includes("masters")) { await directory(join(this.root, "masters")); check((await readdir(join(this.root, "masters"))).length === 0, "signing key missing for existing records"); }
+      await this.requireLegacyInventoryAbsent();
       try { await writeNew(join(this.root, "signing-key.json"), JSON.stringify({ schemaVersion: "negi-master-conversation-key/1", key: randomBytes(32).toString("hex") }) + "\n"); }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
       key = await artifact(join(this.root, "signing-key.json"), 1000);
     }
     check(key && Object.keys(key.value).length === 2 && key.value.schemaVersion === "negi-master-conversation-key/1" &&
       typeof key.value.key === "string" && /^[0-9a-f]{64}$/.test(key.value.key), "signing key invalid");
+    await this.requireLegacyInventoryAbsent();
     const masters = join(this.root, "masters"); await mkdir(masters, { recursive: true }); await directory(masters);
+    await this.requireLegacyInventoryAbsent();
     const master = join(masters, this.options.masterId); await mkdir(master, { recursive: true }); await directory(master);
+    await this.requireLegacyInventoryAbsent();
     return { master, key: Buffer.from(key.value.key, "hex"), keyBytes: key.bytes, canonicalCwd };
   }
 
@@ -110,16 +138,22 @@ export class MasterConversationAuthority {
     try{evidenceSha256 = await masterOwnerEvidence(evidenceOptions,kind,operation.requestId);}catch{throw new MasterConversationHeldError();}
     const bytes = signedMasterOwner({ schema:"negi-master-conversation-owner/2", owner:randomUUID(), pid:process.pid,
       createdAt:new Date().toISOString(), masterId:this.options.masterId, kind, cwdSha256:hash(state.canonicalCwd), operation, evidenceSha256 },state.key);
+    await this.requireLegacyInventoryAbsent();
     let file;
     try { file = await open(path, "wx", 0o600); }
     catch { throw new MasterConversationHeldError("会話の変更または実行受付が進行中か、所有者の照合が必要です。自動では再試行しません。"); }
     const pinned = await file.stat();
     try {
       await file.writeFile(bytes, "utf8"); await file.sync();
+      await this.requireLegacyInventoryAbsent();
       check(evidenceSha256 === await masterOwnerEvidence(evidenceOptions,kind,operation.requestId), "evidence changed before owner admission");
+      await this.requireLegacyInventoryAbsent();
       return await run(state);
     } finally {
       try {
+        // An index appearing during this operation makes its owner evidence
+        // part of the required migration/reconciliation. Preserve it.
+        await this.requireLegacyInventoryAbsent();
         const current = await lstat(path), record = await artifact(path, 8000);
         check(current.dev === pinned.dev && current.ino === pinned.ino && record?.bytes === bytes, "owner lock replaced; keep hold");
         await unlink(path); // Remove only this exact live owner; never steal an old lock.
@@ -255,9 +289,10 @@ export class MasterConversationAuthority {
       check(before.proofSha256===after.proofSha256&&(await artifact(join(state.master,"owner.lock"),2000))?.bytes===record.bytes,"owner evidence changed during preview");
       const ownerState=observed.state==="dead"?"dead":observed.state==="live"?"live":"unknown";
       const supported=process.platform==="win32";
+      const compatible=await this.legacyInventoryAbsent();
       return {ownerId:owner.owner,requestId:owner.operation.requestId,kind:owner.kind,ownerState,ownerSha256:hash(record.bytes),
-        proofSha256:before.proofSha256,canRelease:ownerState==="dead"&&supported,
-        reason:ownerState!=="dead"?"所有者の終了を確認できません。所有記録を保持しています。":supported?null:"このOSでは正確な所有記録の解除を保証できません。所有記録を保持しています。"};
+        proofSha256:before.proofSha256,canRelease:ownerState==="dead"&&supported&&compatible,
+        reason:!compatible?"会話の保存記録との照合が必要です。所有記録を保持しています。":ownerState!=="dead"?"所有者の終了を確認できません。所有記録を保持しています。":supported?null:"このOSでは正確な所有記録の解除を保証できません。所有記録を保持しています。"};
     }catch{throw new MasterConversationHeldError();}
   }
 
@@ -265,6 +300,7 @@ export class MasterConversationAuthority {
   async releaseOwner(cwd:string,decisionId:string,expectedProofSha256:string):Promise<{decisionId:string;requestId:string;ownerReleased:true;operationComplete:false}> {
     check(uuid.test(decisionId)&&/^[0-9a-f]{64}$/.test(expectedProofSha256),"recovery decision invalid");
     try{
+      await this.requireLegacyInventoryAbsent();
       const state=await this.recoveryState(cwd);check(state,"recovery authority absent");
       let record=await artifact(join(state.master,"owner.lock"),2000);
       const owner=record?validatedMasterOwner(record.value,this.options.masterId,state.key):null;
@@ -276,6 +312,7 @@ export class MasterConversationAuthority {
         check((await artifact(join(state.master,"recoveries",existing.payload.owner.owner+".json"),8000))?.bytes===existing.bytes&&
           (await artifact(join(this.root,"signing-key.json"),1000))?.bytes===state.keyBytes,"saved decision changed");
         check(await artifact(join(state.master,"owner.lock"),2000)===null,"a new owner appeared");
+        await this.requireLegacyInventoryAbsent();
         return {decisionId,requestId:existing.payload.owner.operation.requestId,ownerReleased:true,operationComplete:false};
       }
       check(owner,"owner absent");const preview=await this.ownerRecovery(cwd);
@@ -299,10 +336,12 @@ export class MasterConversationAuthority {
       check(payload.decisionId===decisionId&&payload.cwdSha256===hash(state.canonicalCwd)&&payload.proofSha256===expectedProofSha256&&
         isDeepStrictEqual(payload.owner,owner),"recovery decision changed");
       check((await this.ownerRecovery(cwd))?.proofSha256===expectedProofSha256,"evidence changed before native owner release");
+      await this.requireLegacyInventoryAbsent();
       await recoverWriter(state.master,"master",owner.operation,hash(record.bytes),receiptBytes);
       check(await artifact(join(state.master,"owner.lock"),2000)===null,"owner was replaced after native release");
       check((await artifact(path,8000))?.bytes===receiptBytes&&(await this.ownerRecoveryEvidence(state,owner)).proofSha256===expectedProofSha256,"recovery evidence changed after native release");
       check(await artifact(join(state.master,"owner.lock"),2000)===null,"new owner appeared after recovery");
+      await this.requireLegacyInventoryAbsent();
       return {decisionId,requestId:owner.operation.requestId,ownerReleased:true,operationComplete:false};
     }catch{throw new MasterConversationHeldError();}
   }
@@ -326,11 +365,14 @@ export class MasterConversationAuthority {
     const requestBytes=JSON.stringify({schemaVersion:"negi-master-turn/1",workId,masterId:this.options.masterId,...request,inputSha256:hash(request.text),at:requestedAt})+"\n";
     return this.withLock(cwd, async state => {
       try { await this.idle(state); } catch { throw new MasterConversationHeldError(); }
-      return scheduledMasterTurns({...this.options,root:this.options.turnRoot,workId,requestedAt}).reserve(request);
+      await this.requireLegacyInventoryAbsent();
+      return guardMasterAdmission(scheduledMasterTurns({...this.options,root:this.options.turnRoot,workId,requestedAt}),
+        () => this.requireLegacyInventoryAbsent()).reserve(request);
     },{kind:"turn-admission",operation:{domain:"master-conversation",requestId:raw.requestId,hash:hash(requestBytes)}});
   }
 
   private async startupEvidence() {
+    await this.requireLegacyInventoryAbsent();
     await directory(dirname(this.root));
     let rootIdentity: string;
     try { rootIdentity = await directory(this.root); }
@@ -356,6 +398,7 @@ export class MasterConversationAuthority {
     check(rootIdentity === await directory(this.root) && mastersIdentity === await directory(masters) &&
       isDeepStrictEqual(names, (await readdir(this.root)).sort()) && isDeepStrictEqual(mastersNames, (await readdir(masters)).sort()) &&
       (await artifact(join(this.root, "signing-key.json"), 1000))?.bytes === key.bytes, "startup authority changed");
+    await this.requireLegacyInventoryAbsent();
     return { rootIdentity, mastersIdentity, mastersNames, masterIdentity, keyBytes: key.bytes, operations };
   }
 
@@ -408,11 +451,13 @@ export class MasterConversationAuthority {
         return structuredClone({ request, stage: ["completed", "cancelled"].includes(last.stage) ? last.stage : "needs_reconciliation", identity: last.identity, reason: last.reason });
       }
       try { await this.idle(state); } catch { throw new MasterConversationHeldError(); }
+      await this.requireLegacyInventoryAbsent();
       const path = join(state.master, request.requestId); await mkdir(path);
       const operation: Operation = { path, records: [], bytes: [] };
       const append = async (stage: Stage, identity: CodexThreadIdentity | null = null, reason: string | null = null) => {
         check(nextStage(operation.records.at(-1)?.stage ?? null, stage), "invalid transition");
         check((await artifact(join(this.root, "signing-key.json"), 1000))?.bytes === state.keyBytes, "signing key changed");
+        await this.requireLegacyInventoryAbsent();
         const payload: RecordPayload = { schemaVersion: "negi-master-conversation/1", request, stage,
           previousSha256: operation.bytes.length ? hash(operation.bytes.at(-1)!) : null, identity, reason, at: new Date().toISOString() };
         const signature = createHmac("sha256", state.key).update(JSON.stringify(payload)).digest("hex");
@@ -423,8 +468,10 @@ export class MasterConversationAuthority {
       await append("requested"); await append("old_idle");
       let dispatched = false, marking = false;
       try {
+        await this.requireLegacyInventoryAbsent();
         const identity = structuredClone(await run(async () => {
           check(!dispatched && !marking, "dispatch intent already requested"); marking = true;
+          await this.requireLegacyInventoryAbsent();
           await append("start_dispatched"); dispatched = true;
         }));
         check(dispatched, "provider callback omitted dispatch intent");

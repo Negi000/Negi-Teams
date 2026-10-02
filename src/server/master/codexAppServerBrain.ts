@@ -98,6 +98,7 @@ export class CodexAppServerBrain implements MasterBrain {
     this.closed = false;
     this.stopping = false;
     await this.options.admission?.assertIdle?.(options.cwd);
+    await this.options.admission?.assertStorageCompatible?.();
     if (this.closed || this.stopping) throw new Error("Codex brain stopped before App Server launch");
     this.startOptions = { cwd: options.cwd, model: options.model };
     const process = (this.options.launch ?? AppServerProcess.launch)({
@@ -123,6 +124,7 @@ export class CodexAppServerBrain implements MasterBrain {
       this.finish();
     });
     try {
+      await this.options.admission?.assertStorageCompatible?.();
       await process.client.initialize();
       if (this.options.subscriptionOnly) {
         const account=await process.client.readAccountMode();
@@ -133,6 +135,8 @@ export class CodexAppServerBrain implements MasterBrain {
           model.efforts.includes(role.effort) && model.inputModalities.includes("text")))) {
         throw new Error("requested model, effort or text input unavailable in account catalog");
       }
+      await this.options.admission?.assertStorageCompatible?.();
+      if (this.closed || this.stopping) throw new Error("Codex brain stopped before thread/start");
       const identity = await process.client.startThread({ cwd: options.cwd, model: options.model,
         sandbox: "read-only",
         ...((options.systemPrompt || this.options.taskTools) ? {
@@ -140,6 +144,8 @@ export class CodexAppServerBrain implements MasterBrain {
             (this.options.taskTools?.authoring ? authoringInstructions : "") } : {}),
         ...(this.options.taskTools ? { dynamicTools: this.options.taskTools.definitions,
           dynamicToolLimits: this.options.taskTools.limits } : {}) });
+      await this.options.admission?.assertStorageCompatible?.();
+      if (this.closed || this.stopping) throw new Error("Codex brain stopped during thread/start");
       if (identity.rerouted) throw new Error("App Server rerouted the requested model");
       this.emit({ kind: "session", sessionId: identity.threadId, model: identity.resolvedModel,
         apiKeySource: null, mcpServers: [], capabilities: ["read-only",
@@ -183,7 +189,7 @@ export class CodexAppServerBrain implements MasterBrain {
       await resultContext?.notSent();
       throw new MasterInputNotSentError("送信前に統括が停止しました。今回の入力は未送信です。");
     }
-    try { await lease?.dispatching(); await resultContext?.dispatching(); }
+    try { await lease?.dispatching(); await resultContext?.dispatching(); await this.options.admission?.assertStorageCompatible?.(); }
     catch (error) {
       try { await lease?.cancelBeforeDispatch(); }
       catch { await this.holdUnknown(lease, "Master dispatch record failed before provider call; inspect scheduler evidence"); }

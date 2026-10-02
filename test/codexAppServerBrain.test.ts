@@ -6,12 +6,13 @@ import { MasterSession, type MasterSessionHandlers,
   type MasterUsageSnapshot } from "../src/server/master/session.ts";
 import type { MasterChatEnvelope } from "../src/shared/protocol.ts";
 import type { RegisteredTaskTools } from "../src/server/orchestration/taskDispatchTools.ts";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileScheduler } from "../src/server/orchestration/scheduler.ts";
-import { scheduledMasterTurns, MasterInputNotSentError, type MasterTurnAdmission } from
+import { guardMasterAdmission, scheduledMasterTurns, MasterInputNotSentError, type MasterTurnAdmission } from
   "../src/server/orchestration/masterTurnAdmission.ts";
+import { MasterConversationAuthority, MasterConversationHeldError } from "../src/server/orchestration/masterConversations.ts";
 import { TaskResultStore } from "../src/server/orchestration/taskResults.ts";
 import { createHash } from "node:crypto";
 import { startConfirmedSetupMaster } from "../src/server/orchestration/projectSetupStartup.ts";
@@ -439,6 +440,68 @@ async function scheduledBrainFixture(run: (data: { scheduler: FileScheduler; roo
     admission: scheduledMasterTurns({ root, masterId: "master", scheduler }) }); }
   finally { await rm(dir, { recursive: true, force: true }); }
 }
+
+test("an index appearing after model discovery prevents thread/start and stops the synthetic process",async()=>{
+ await scheduledBrainFixture(async ({scheduler,root,options})=>{
+  const conversations=root+"-conversations",database=conversations+".inventory.sqlite3",log=root+"-provider.jsonl";
+  const authority=new MasterConversationAuthority({root:conversations,turnRoot:root,masterId:"master",scheduler});
+  const source=fixture.replace('if (message.id === undefined) continue;',String.raw`
+if(message.method==='model/list')require('node:fs').writeFileSync(process.argv[3],'late index');
+if(message.method==='thread/start')require('node:fs').appendFileSync(process.argv[2],JSON.stringify(message)+'\n');
+if (message.id === undefined) continue;`);
+  const brain=new CodexAppServerBrain({executable:process.execPath,args:["-e",source,"ok",log,database],effort:"medium",turnTimeoutMs:5000,
+   admission:{reserve:async()=>{throw Error("must not reserve");},assertIdle:cwd=>authority.assertStartupSafe(cwd),assertStorageCompatible:()=>authority.assertStorageCompatible()}});
+  try{
+   await assert.rejects(brain.start(options),MasterConversationHeldError);assert.equal(brain.sessionId(),null);
+   await assert.rejects(readFile(log),{code:"ENOENT"});assert.equal(await readFile(database,"utf8"),"late index");
+   await assert.rejects(readdir(conversations),{code:"ENOENT"});
+  }finally{await brain.stop();}
+ });
+});
+
+test("late index detection after thread/start refuses readiness and stops without a model turn",async()=>{
+ await scheduledBrainFixture(async ({scheduler,root,options})=>{
+  const conversations=root+"-conversations",database=conversations+".inventory.sqlite3",log=root+"-provider.jsonl";
+  const authority=new MasterConversationAuthority({root:conversations,turnRoot:root,masterId:"master",scheduler});
+  const source=fixture.replace('if (message.id === undefined) continue;',String.raw`
+if(message.method==='thread/start'){
+ require('node:fs').writeFileSync(process.argv[3],'late index');
+ require('node:fs').appendFileSync(process.argv[2],JSON.stringify(message)+'\n');
+}
+if (message.id === undefined) continue;`);
+  const brain=new CodexAppServerBrain({executable:process.execPath,args:["-e",source,"ok",log,database],effort:"medium",turnTimeoutMs:5000,
+   admission:{reserve:async()=>{throw Error("must not reserve");},assertIdle:cwd=>authority.assertStartupSafe(cwd),assertStorageCompatible:()=>authority.assertStorageCompatible()}});
+  const events:MasterEvent[]=[],draining=(async()=>{for await(const event of brain.events())events.push(event);})();
+  try{
+   await assert.rejects(brain.start(options),MasterConversationHeldError);await draining;
+   const requests=(await readFile(log,"utf8")).trim().split("\n").map(line=>JSON.parse(line));
+   assert.deepEqual(requests.map(request=>request.method),["thread/start"]);assert.equal(events.some(event=>event.kind==="session"),false);
+   await assert.rejects(brain.send({text:"must not send"}));assert.equal(await readFile(database,"utf8"),"late index");
+   await assert.rejects(readdir(conversations),{code:"ENOENT"});
+  }finally{await brain.stop();await draining;}
+ });
+});
+
+test("an index appearing after dispatch persistence prevents turn/start and keeps the admitted claim",async()=>{
+ await scheduledBrainFixture(async ({admission,scheduler,root,options})=>{
+  const conversations=root+"-conversations",database=conversations+".inventory.sqlite3",log=root+"-provider.jsonl";
+  const authority=new MasterConversationAuthority({root:conversations,turnRoot:root,masterId:"master",scheduler});
+  let workId="";
+  const guarded=guardMasterAdmission({assertIdle:cwd=>authority.assertStartupSafe(cwd),reserve:async request=>{
+   const lease=await admission.reserve(request);workId=lease.workId;
+   return {...lease,dispatching:async()=>{await lease.dispatching();await writeFile(database,"late index");}};
+  }},()=>authority.assertStorageCompatible());
+  const brain=new CodexAppServerBrain({executable:process.execPath,args:["-e",fixture,"ok",log],effort:"medium",turnTimeoutMs:5000,admission:guarded});
+  try{
+   await brain.start(options);await assert.rejects(brain.send({text:"known unsent input"}),MasterInputNotSentError);
+   await assert.rejects(readFile(log),{code:"ENOENT"});assert.equal(await readFile(database,"utf8"),"late index");
+   assert.deepEqual((await readdir(join(root,workId))).sort(),["dispatch.json","request.json"]);
+   assert.equal((await scheduler.read()).state?.entries[0].status,"running");
+   const before=await readFile(scheduler.path);await assert.rejects(brain.send({text:"do not resend"}),MasterInputNotSentError);
+   assert.deepEqual(await readFile(scheduler.path),before);await assert.rejects(readFile(log),{code:"ENOENT"});
+  }finally{await brain.stop();}
+ });
+});
 
 test("Master capacity miss is known unsent and leaves the provider/session ready for a later send", async () => {
   await scheduledBrainFixture(async ({ admission, options, scheduler }) => {
