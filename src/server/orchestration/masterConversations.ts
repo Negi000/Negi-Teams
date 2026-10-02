@@ -315,6 +315,21 @@ export class MasterConversationAuthority {
   }
 
   /** Read-only preview. No native guard, key, decision, owner or provider is created. */
+  async assertRecoveryEvidence(cwd: string, ownerBytes: string, expectedProofSha256: string, ownerPresent: boolean): Promise<void> {
+    // Fixed native verifier only: the parent already owns the root guard. Taking
+    // a second process guard here would deadlock. This method writes nothing.
+    check(Buffer.byteLength(ownerBytes) <= 2000 && /^[0-9a-f]{64}$/.test(expectedProofSha256), "recovery verifier input invalid");
+    const state = await this.recoveryState(cwd);check(state, "recovery authority absent");
+    const owner = validatedMasterOwner(JSON.parse(ownerBytes), this.options.masterId, state.key);
+    const before = await this.ownerRecoveryEvidence(state, owner);
+    const actual = await artifact(join(state.master, "owner.lock"), 2000);
+    check(ownerPresent ? actual?.bytes === ownerBytes : actual === null, "recovery verifier exact owner changed");
+    const after = await this.ownerRecoveryEvidence(state, owner);
+    check(before.proofSha256 === expectedProofSha256 && after.proofSha256 === expectedProofSha256 &&
+      (await artifact(join(state.master, "owner.lock"), 2000))?.bytes === actual?.bytes, "current recovery proof changed");
+  }
+
+  /** Read-only preview. No native guard, key, decision, owner or provider is created. */
   async ownerRecovery(cwd:string):Promise<MasterOwnerRecoveryPreview|null> {
     try{
       const state=await this.recoveryState(cwd);if(!state)return null;

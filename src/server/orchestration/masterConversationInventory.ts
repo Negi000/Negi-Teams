@@ -18,6 +18,10 @@ export interface MasterInventoryArtifact extends MasterInventoryAudit {
 export interface MasterInventoryLatestStage extends MasterInventoryAudit {
   latest: Pick<MasterInventoryArtifact, "relativePath" | "bytes" | "artifactSha256"> | null;
 }
+export interface MasterInventoryRecoveryIntent extends MasterInventoryAudit {
+  receipt: Pick<MasterInventoryArtifact, "relativePath" | "bytes" | "artifactSha256"> | null;
+}
+export interface MasterInventoryOwnerRelease extends MasterInventoryAudit { decisionId: string; requestId: string; ownerReleased: true; operationComplete: false }
 export interface MasterInventoryProcessIdentity { platform: "windows" | "linux"; pid: number; startToken: string }
 export interface MasterInventoryMigrationPreview {
   proofSha256: string; masterCount: number; stageCount: number; receiptCount: number;
@@ -58,7 +62,7 @@ async function script() {
 async function invoke(request: Record<string, unknown>): Promise<Record<string, unknown>> {
   const frozen = structuredClone(request);
   return frozen.action === "processIdentity" ? invokeHeld(frozen) : withMasterStorageGuard(String(frozen.root), () => invokeHeld(frozen),
-    { createIfMissing: !["audit", "lookup", "latestStage", "previewMigration", "previewDatabaseRecovery", "recoverDatabase"].includes(String(frozen.action)) });
+    { createIfMissing: !["audit", "lookup", "latestStage", "appendRecoveryIntent", "recoveryIntent", "releaseRecovery", "previewMigration", "previewDatabaseRecovery", "recoverDatabase"].includes(String(frozen.action)) });
 }
 
 async function invokeHeld(request: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -75,7 +79,7 @@ async function invokeHeld(request: Record<string, unknown>): Promise<Record<stri
     // already have created its one permitted DB. Wait for its actual exit. The
     // Database preview also owns disposable full-history clones: an elapsed-time
     // kill would bypass their cleanup. Wait for actual exit and release the guard.
-    const timeout = ["migrate", "recoverDatabase", "previewDatabaseRecovery"].includes(String(request.action)) ? null :
+    const timeout = ["migrate", "recoverDatabase", "previewDatabaseRecovery", "releaseRecovery"].includes(String(request.action)) ? null :
       request.action === "previewMigration" ? 15 * 60_000 : 30_000;
     const timer = timeout === null ? null : setTimeout(() => { failure = Error("Master inventory: helper timeout; operation outcome needs inspection"); child.kill(); }, timeout);
     child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8");
@@ -103,9 +107,12 @@ export class MasterConversationInventory {
   readonly databasePath: string;
   private readonly root: string;
   private readonly masterId: string;
-  constructor(options: { root: string; masterId: string }) {
+  private readonly recoveryContext: Readonly<{ turnRoot: string; schedulerPath: string }> | null;
+  constructor(options: { root: string; masterId: string; recoveryContext?: { turnRoot: string; schedulerPath: string } }) {
     check(isAbsolute(options.root) && /^[a-zA-Z0-9_-]{1,100}$/.test(options.masterId), "server registration invalid");
     this.root = resolve(options.root); this.masterId = options.masterId; this.databasePath = this.root + ".inventory.sqlite3";
+    check(!options.recoveryContext || isAbsolute(options.recoveryContext.turnRoot) && isAbsolute(options.recoveryContext.schedulerPath), "recovery server registration invalid");
+    this.recoveryContext = options.recoveryContext ? Object.freeze({ turnRoot: resolve(options.recoveryContext.turnRoot), schedulerPath: resolve(options.recoveryContext.schedulerPath) }) : null;
   }
   private request(action: string, extra: Record<string, unknown> = {}) {
     return { action, root: this.root, masterId: this.masterId, ...extra };
@@ -200,6 +207,51 @@ export class MasterConversationInventory {
     const checkpoint = head(row.head);
     check(checkpoint.seq === frozen.expectedHead.seq + 1 && row.relativePath === frozen.relativePath && row.artifactSha256 === hash(frozen.bytes), "append result differs from intent");
     return { head: checkpoint, relativePath: frozen.relativePath, artifactSha256: row.artifactSha256 as string };
+  }
+
+  /** Trusted server only: commit exact signed receipt bytes before native publication. */
+  async appendRecoveryIntent(input: { expectedHead: MasterInventoryHead; ownerSha256: string; bytes: string }): Promise<MasterInventoryIntent> {
+    check(this.recoveryContext, "recovery server registration required");
+    const frozen = { expectedHead: { seq: input.expectedHead.seq, sha256: input.expectedHead.sha256 }, ownerSha256: input.ownerSha256, bytes: input.bytes };
+    head(frozen.expectedHead);
+    check(sha.test(frozen.ownerSha256) && typeof frozen.bytes === "string" && Buffer.byteLength(frozen.bytes) <= 8000, "recovery intent input invalid");
+    const ownerId = JSON.parse(frozen.bytes)?.payload?.owner?.owner;
+    check(typeof ownerId === "string" && uuid.test(ownerId), "recovery owner ID invalid");
+    const relativePath = "recoveries/" + ownerId + ".json";
+    const row = await invoke(this.request("appendRecoveryIntent", { ...frozen, recoveryContext: this.recoveryContext }));
+    fields(row, ["schema", "action", "masterId", "head", "relativePath", "artifactSha256"]);
+    const checkpoint = head(row.head);
+    check(checkpoint.seq === frozen.expectedHead.seq + 1 && row.relativePath === relativePath && row.artifactSha256 === hash(frozen.bytes), "recovery intent result differs");
+    return { head: checkpoint, relativePath, artifactSha256: row.artifactSha256 as string };
+  }
+  /** Read the same authenticated decision after an uncertain ACK; never invent new bytes. */
+  async recoveryIntent(decisionId: string): Promise<MasterInventoryRecoveryIntent> {
+    check(uuid.test(decisionId), "recovery decision ID invalid");
+    const row = await invoke(this.request("recoveryIntent", { decisionId }));
+    fields(row, ["schema", "action", "masterId", "head", "state", "artifactCount", "missing", "decisionId", "receipt"]);
+    const audit = this.auditResult(row);
+    check(row.decisionId === decisionId, "recovery decision differs");
+    if (row.receipt === null) return { ...audit, receipt: null };
+    check(row.receipt && typeof row.receipt === "object" && !Array.isArray(row.receipt), "recovery intent missing");
+    const receipt = row.receipt as Record<string, unknown>;
+    fields(receipt, ["relativePath", "bytes", "artifactSha256"]);
+    check(typeof receipt.relativePath === "string" && path.test(receipt.relativePath) && receipt.relativePath.startsWith("recoveries/") &&
+      typeof receipt.bytes === "string" && Buffer.byteLength(receipt.bytes) <= 8000 && typeof receipt.artifactSha256 === "string" &&
+      sha.test(receipt.artifactSha256) && receipt.artifactSha256 === hash(receipt.bytes) &&
+      JSON.parse(receipt.bytes)?.payload?.decisionId === decisionId, "recovery intent invalid");
+    return { ...audit, receipt: receipt as unknown as NonNullable<MasterInventoryRecoveryIntent["receipt"]> };
+  }
+  /** Fixed Windows native publication/exact-owner release for a previously committed intent. */
+  async releaseRecoveryIntent(input: { decisionId: string; expectedProofSha256: string }): Promise<MasterInventoryOwnerRelease> {
+    check(this.recoveryContext, "recovery server registration required");
+    const frozen = { decisionId: input.decisionId, expectedProofSha256: input.expectedProofSha256 };
+    check(uuid.test(frozen.decisionId) && sha.test(frozen.expectedProofSha256), "recovery decision/proof required");
+    const row = await invoke(this.request("releaseRecovery", { ...frozen, recoveryContext: this.recoveryContext }));
+    fields(row, ["schema", "action", "masterId", "head", "state", "artifactCount", "missing", "decisionId", "requestId", "ownerReleased", "operationComplete"]);
+    const audit = this.auditResult(row);
+    check(audit.state === "clean" && row.decisionId === frozen.decisionId && typeof row.requestId === "string" &&
+      uuid.test(row.requestId) && row.ownerReleased === true && row.operationComplete === false, "indexed owner release not confirmed");
+    return { ...audit, decisionId: frozen.decisionId, requestId: row.requestId, ownerReleased: true, operationComplete: false };
   }
   async lookup(relativePath: string): Promise<MasterInventoryArtifact> {
     check(path.test(relativePath), "artifact lookup path invalid");

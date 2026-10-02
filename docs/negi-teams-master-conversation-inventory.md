@@ -1,6 +1,6 @@
 # Master会話の独立索引と明示移行候補
 
-NT-067/073の追加部品。`MasterConversationInventory`と固定Python helperに、既存stageと復旧receiptの明示移行、および署名済みDBのstandalone hot journalをSQLite自身でrollbackする明示復旧を追加した。2026-10-03には、明示的なserver登録で会話authorityのstage保存と状態照会を索引へ接続した。通常読取や起動で自動移行・復旧しない。既存処理は独立DBが残る場合に未接続writerを保留する。起動検査、通常入力、provider RPC、新規復旧receiptの公開/解除、認証済み確認UIの全面接続は次の工程である。全73要件・Phase0–8のゴールは継続中。
+NT-067/073の追加部品。`MasterConversationInventory`と固定Python helperに、既存stageと復旧receiptの明示移行、および署名済みDBのstandalone hot journalをSQLite自身でrollbackする明示復旧を追加した。2026-10-03には、明示的なserver登録で会話authorityのstage保存と状態照会を索引へ接続し、署名済み復旧receipt intentとWindows native公開・正確なdead owner解除の部品を追加した。通常読取や起動で自動移行・復旧しない。既存処理は独立DBが残る場合に未接続writerを保留する。起動検査、通常入力、provider RPC、通常authorityの復旧、認証済み確認UIの全面接続は次の工程である。全73要件・Phase0–8のゴールは継続中。
 
 ## 保存するもの
 
@@ -215,3 +215,19 @@ DBの約1.5GB予算とjournalの予算を分ける。[journal形式](https://sql
 新規11件の単独試験は11成功・失敗/取消/skip0（120,924.8735ms、actual exit0）。5段階のDB先行順序、同一完了要求のcallback再実行0、ACK消失、末尾/operation削除、原文改変、受入baselineへの追記、dispatch前後の失敗、missing root/key/DB、owner全文差替え、実Node childのdispatch intent後exit27を確認した。実child終了後のstatusは要求とownerを保持し、native復旧の`canRelease`はfalseだった。合成identityと試験専用childを使い、実provider/model/Jevは0である。最終関連7 filesは**182件中181成功・OS条件1スキップ・失敗/取消0（172,789.2133ms、actual exit0）**。単独集合と合算しない。Python AST4、型検査、build成功。実行したchildは終了を待った。
 
 独立read-onlyレビューは今回の4実装/test filesに重大な具体的指摘なし。small fixtureの5段階保存と同一ID再照会の初回focused測定は14,886.1116msだったが、複数の全監査とhelper起動を含む試験時間であり、実RPC/UI latencyや大規模履歴の受入性能ではない。通常入力へこの完全走査を接続しない。参加writerのroot guard内に限る保証であり、旧binary/version fence、外部同権限processのABA、native receipt intent/解除/owner baseline、turn/scheduler、初回thread/戻りidentity/旧runtime静止、認証済み確認UI、保持/版移行/性能、実停電/UNC/Linux/実機の条件は継続する。Codex「新しい会話」は未有効化、全73要件・Phase0–8とゴールはACTIVE。
+
+## 2026-10-03: 復旧receipt intentと正確なowner解除
+
+trusted server内部の明示`recoveryContext: {turnRoot, schedulerPath}`登録に限り、`appendRecoveryIntent`・`recoveryIntent`・`releaseRecoveryIntent`を追加した。現在対象は索引に固定された`thread-start`要求だけで、inspection/admissionは保留する。登録を最初のawait前に固定し、receipt原文・正確なowner全文SHA・signed head・登録contextのSHAを新しい署名event/3へ結び付ける。DB schema/versionは変更せず、stage event/1・既存移行event/2と受入baselineを保持する。live receiptの容量集計も署名headerを認証し、他Masterの未署名pathからstage使用数を減らせない。
+
+最初のrecoveries directory/fileより先に、receipt原文と署名headを同一FULL transactionへcommitする。現在の署名owner、native process作成tokenの終了、索引の要求/cwd、対象Masterのturn/schedulerの終端状態とowner baselineを固定Node verifierで再検査する。原文HMACだけで現在のproofを承認しない。固定verifierはsource TSまたはbuild済みJSを読み、書込み・provider呼出しを行わない。missing root/guard/key/DBを自動作成しない。
+
+Windows native公開は、保存済みの同じUUID decisionと同じ原文だけを使用する。pending fileはその原文の正確なprefixのみ許可し、nativeで開いたhandleのbytesをtruncate前に再照合する。file flush、上書きなしのwrite-through move、公開後の選択Master索引の全監査と現在proof再検査を通してから、読み取った正確なdead owner handleだけを解除する。解除後もfresh proofと最終DB/FS監査、owner不在を確認する。`ownerReleased: true`でも`operationComplete: false`であり、providerの不明結果を完了へ変えない。
+
+共通root guardに加え、`FileScheduler`全writerと同じ固定`.lock`をnative CREATE_NEW/share0/DELETE_ON_CLOSEで取得する。既存の正規parentだけをpinし、他writerのlockを待たず保持したまま保留する。最終proofからDB commit、native解除後のproof・最終監査までhandleを保持し、scheduler更新の競合窓を閉じた。handleのcloseに対応する削除条件は[Microsoft CreateFileWの仕様](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew)に従う。参加しない旧binary・同権限writerによるturn/rootの変更やABAを防ぐ保証は別のgateである。
+
+intent commit・部分書込み・receipt公開・owner解除後の返答消失は、`recoveryIntent`で同じdecisionの既知原文を照会する。別decisionやproof、未知pending、prefix不一致、receipt改変は保留する。owner不在の既知完了receiptは保存済みACKだけを返し、その後のscheduler状態へ復旧を再実行しない。owner不在でreceiptが欠ける場合は復元しない。native releaseには経過時間だけのhelper killを設けず、実際の終了を待つ。未終了helperの進捗/取消・手動照合UIは残る。
+
+最終関連8 test filesは**200件中199成功・OS条件1スキップ・失敗/取消0（664,082.5678ms、actual exit0）**。新規18ケースにはintent/部分書込み/公開/解除後の実process exitと同一decision、移行baseline、原文/prefix/HMAC/live identity、未署名path容量、35秒終了待ち、現在proofの鮮度、verifier return直後のappend/release競合、foreign lock/context/未対応kindを含む。初期15/15（304,214.2679ms）はscheduler競合修正前、focused5成功/13 name-filter skip（97,986.4787ms）は修正後の別集合で、最終suiteと合算しない。独立read-only再レビューで参加scheduler競合の閉鎖を確認し、追加の具体的blockerはなかった。Python AST5・型検査・build・mjs構文・差分検査成功。compiled fallbackはmodule読込と不存在authorityのread-only保留/actual exit1を確認し、compiled側の実復旧全経路試験ではない。開始した試験childは終了を待った。実provider/model/Jev/新GUI/実機/人の受入/CI成功を確認した結果ではない。最大履歴/実停電/UNC/Linuxは未検証。
+
+通常`MasterConversationAuthority.ownerRecovery/releaseOwner`とlegacy native CLIは独立DBがある場合の保留を維持する。今回の登録/APIをproduction caller・HTTP・認証済み人間確認UIへ接続していない。UUID/proofと内部署名は人間の認証済み承認そのものではない。通常owner baselineの正規化、turn/schedulerの索引baseline、参加version/旧binary fence、初回thread・戻りidentity・旧runtime静止、repair/保持/版移行/大規模性能、実停電/UNC/Linux/実機safe-area/keyboard等の先行条件を継続する。実provider/model/Jev/新GUI/人の受入/CI成功を示す変更ではない。Material 3 Expressive assetsは維持し、全73要件・Phase0–8とゴールはACTIVE。

@@ -265,8 +265,12 @@ def receipt_names(names, pending, final):
 
 
 def publish_receipt_windows(kernel, root, owner_raw, text):
+    return _publish_receipt_windows(kernel, root, owner_raw, text, lambda: master_inventory_absent(root))
+
+
+def _publish_receipt_windows(kernel, root, owner_raw, text, check, require_prefix=False):
     raw, final_name, pending_name = receipt_data(root, owner_raw, text)
-    master_inventory_absent(root)
+    check()
     receipts = root / "recoveries"
     try:receipts.mkdir(mode=0o700)
     except FileExistsError:pass
@@ -282,11 +286,13 @@ def publish_receipt_windows(kernel, root, owner_raw, text):
             return
         if ctypes.get_last_error() != 2:raise ctypes.WinError(ctypes.get_last_error())
         # Do not truncate until the opened entry is proven ordinary and unshared.
-        master_inventory_absent(root)
+        check()
         handle = kernel.CreateFileW(windows_extended(pending), 0xc0000000, 0, None, 4, 0x00200000, None)
         if handle == ctypes.c_void_p(-1).value:raise ctypes.WinError(ctypes.get_last_error())
         try:
             win_info(kernel, handle, limit=8000)
+            if require_prefix and not raw.startswith(win_bytes(kernel, handle, 8000)):
+                raise ValueError("Opened pending receipt differs from indexed prefix")
             if not kernel.SetFilePointerEx(handle, 0, None, 0) or not kernel.SetEndOfFile(handle):raise ctypes.WinError(ctypes.get_last_error())
             buffer = ctypes.create_string_buffer(raw);count = wintypes.DWORD()
             if not kernel.WriteFile(handle, buffer, len(raw), ctypes.byref(count), None) or count.value != len(raw):raise ctypes.WinError(ctypes.get_last_error())
@@ -294,7 +300,7 @@ def publish_receipt_windows(kernel, root, owner_raw, text):
             if win_bytes(kernel, handle, 8000) != raw:raise ValueError("Staged receipt changed")
         finally:kernel.CloseHandle(handle)
         # No REPLACE_EXISTING/COPY_ALLOWED fallback. Same-volume create-only move.
-        master_inventory_absent(root)
+        check()
         if not kernel.MoveFileExW(windows_extended(pending), windows_extended(final), 0x8):raise ctypes.WinError(ctypes.get_last_error())
         handle = win_open_reader(kernel, final)
         if handle == ctypes.c_void_p(-1).value:raise ctypes.WinError(ctypes.get_last_error())

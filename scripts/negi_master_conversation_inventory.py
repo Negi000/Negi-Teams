@@ -1,12 +1,13 @@
 """Candidate inventory for Master conversation stages, independent of editable journals.
 
-No provider calls, owner removal, receipt publication or automatic repair.
+No provider calls or automatic repair. Explicit indexed recovery publishes only
+the committed signed receipt before removing its exact native dead owner.
 Legacy adoption is explicit, create-only, and records the accepted snapshot/decision.
 The database detects missing/rolled-back journal files while the independent database
 and signing authority survive. It is not an external monotonic anchor or a sandbox.
 One bounded stdin JSON request; keys and artifact bytes never appear in argv/env.
 """
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 import hashlib
 import hmac
 import json
@@ -328,7 +329,7 @@ def process_identity():
 def storage_action(function):
     @wraps(function)
     def guarded(self, *args, **kwargs):
-        with storage_guard(self.root, create=function.__name__ not in ("audit", "lookup", "latest_stage", "preview_migration", "preview", "recover")):return function(self, *args, **kwargs)
+        with storage_guard(self.root, create=function.__name__ not in ("audit", "lookup", "latest_stage", "append_receipt", "recovery_intent", "release_recovery", "preview_migration", "preview", "recover")):return function(self, *args, **kwargs)
     return guarded
 
 
@@ -631,9 +632,9 @@ class Inventory:
         self.adoption = self.validated_adoption(conn, meta) if version == 2 else None
         masters = conn.execute("SELECT master_id,body,seq,last_sha,signature FROM masters ORDER BY master_id").fetchall()
         require(0 < len(masters) <= MAX_MASTERS and all(MASTER.fullmatch(row[0]) for row in masters), "master registry")
-        # Receipts are immutable imports only. Use the authenticated adoption
-        # counts, never another Master's unsigned redundant path/type columns.
-        receipt_counts = self.receipt_counts()
+        # Imported counts come from the signed adoption. New receipt counts
+        # authenticate positive event headers rather than trusting SQL paths.
+        receipt_counts = self.receipt_counts(conn)
         total = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0];receipts = sum(receipt_counts.values())
         require(total <= MAX_TOTAL_EVENTS and receipts <= MAX_TOTAL_RECEIPTS and total - receipts <= MAX_TOTAL_STAGE_EVENTS,
                 "global event capacity; migrate explicitly")
@@ -664,9 +665,26 @@ class Inventory:
         require(registering or selected is not None, "master not registered")
         return selected
 
-    def receipt_counts(self):
-        # Only called after validated_adoption has authenticated these summaries.
-        return {row["masterId"]: row["receiptCount"] for row in self.adoption[1]["masters"]} if self.adoption else {}
+    def receipt_counts(self, conn):
+        counts = {row["masterId"]: row["receiptCount"] for row in self.adoption[1]["masters"]} if self.adoption else {}
+        bodies = dict(conn.execute("SELECT master_id,body FROM masters"))
+        # The byte filter is an optimization, not authorization: a false negative
+        # counts the row as a stage and makes capacity stricter. A positive may
+        # subtract a stage only after the fixed signed type/coordinates match.
+        for name, seq, path, raw, entry_sha, sig in conn.execute("SELECT master_id,seq,path,body,entry_sha,signature FROM events WHERE instr(body,?)>0", (b'"type":"receipt"',)):
+            require(type(raw) is bytes and len(raw) <= 2000, "receipt event header bound")
+            event = json.loads(raw, object_pairs_hook=unique)
+            if event.get("schema") == "negi-master-inventory-event/2":continue
+            require(encoded(event) == raw and set(event) == {"schema", "masterId", "masterSha256", "seq", "previousSha256", "type", "relativePath", "requestId", "stage", "artifactSha256", "ownerSha256", "contextSha256"}
+                    and event["schema"] == "negi-master-inventory-event/3" and event["type"] == "receipt"
+                    and event["masterId"] == name and event["masterSha256"] == sha(bodies[name]) and event["seq"] == seq
+                    and event["relativePath"] == path and re.fullmatch(r"recoveries/" + UUID.pattern + r"\.json", path)
+                    and valid_uuid(event["requestId"]) and event["stage"] is None
+                    and all(valid_sha(event[field]) for field in ("previousSha256", "artifactSha256", "ownerSha256", "contextSha256"))
+                    and valid_sha(sig) and hmac.compare_digest(sig, signature(self.key, event["schema"], raw))
+                    and entry_sha == sha(raw + b"\0" + sig.encode("ascii")), "authenticated receipt capacity header")
+            counts[name] = counts.get(name, 0) + 1
+        return counts
 
     @storage_action
     def register(self):
@@ -741,18 +759,21 @@ class Inventory:
     def events(self, conn, checkpoint):
         body, head_seq, head_sha = checkpoint
         last, count, paths, operations = "0" * 64, 0, {}, {}
-        adopted, receipts, seen_live = [], set(), False
+        adopted, receipts, seen_live, adopted_receipts = [], set(), False, 0
+        self.receipt_artifacts = {}
         # Stream bounded artifacts rather than fetching up to 1.2GB into memory.
         for seq, path, raw, artifact, entry_sha, sig in conn.execute("SELECT seq,path,body,artifact,entry_sha,signature FROM events WHERE master_id=? ORDER BY seq", (self.master_id,)):
             count += 1
             require(count <= MAX_EVENTS and seq == count and type(raw) is bytes and len(raw) <= 2000 and valid_sha(entry_sha) and valid_sha(sig), "event sequence/shape")
             event = json.loads(raw, object_pairs_hook=unique)
             imported = type(event) is dict and event.get("schema") == "negi-master-inventory-event/2"
+            recovery = type(event) is dict and event.get("schema") == "negi-master-inventory-event/3"
             source_field = "migrationSha256" if imported else "ownerSha256"
-            require(type(event) is dict and encoded(event) == raw and set(event) == {"schema", "masterId", "masterSha256", "seq", "previousSha256", "type", "relativePath", "requestId", "stage", "artifactSha256", source_field}
-                    and event["schema"] == ("negi-master-inventory-event/2" if imported else "negi-master-inventory-event/1") and event["masterId"] == self.master_id
+            require(type(event) is dict and encoded(event) == raw and set(event) == {"schema", "masterId", "masterSha256", "seq", "previousSha256", "type", "relativePath", "requestId", "stage", "artifactSha256", source_field} | ({"contextSha256"} if recovery else set())
+                    and event["schema"] in ("negi-master-inventory-event/1", "negi-master-inventory-event/2", "negi-master-inventory-event/3") and event["masterId"] == self.master_id
                     and event["masterSha256"] == sha(body) and event["seq"] == seq and event["previousSha256"] == last
-                    and event["type"] in (("stage", "receipt") if imported else ("stage",)) and event["relativePath"] == path and valid_uuid(event["requestId"])
+                    and event["type"] in (("stage", "receipt") if imported else ("receipt",) if recovery else ("stage",)) and event["relativePath"] == path and valid_uuid(event["requestId"])
+                    and (not recovery or valid_sha(event["contextSha256"]))
                     and valid_sha(event[source_field]), "event identity/predecessor")
             require(hmac.compare_digest(sig, signature(self.key, event["schema"], raw))
                     and entry_sha == sha(raw + b"\0" + sig.encode("ascii")), "event signature/hash")
@@ -765,6 +786,9 @@ class Inventory:
                 require(path.startswith("recoveries/") and path.count("/") == 1, "receipt path")
                 payload = self.receipt(artifact, path.split("/")[1])
                 require(payload["decisionId"] not in receipts and event["stage"] is None and event["requestId"] == payload["owner"]["operation"]["requestId"], "receipt decision/event mismatch")
+                require(imported or event["ownerSha256"] == sha(encoded(payload["owner"]) + b"\n"), "receipt exact owner hash")
+                adopted_receipts += int(imported)
+                self.receipt_artifacts[path] = (artifact, payload, imported, event.get("contextSha256"))
                 receipts.add(payload["decisionId"]);require(len(receipts) <= MAX_RECEIPTS, "receipt capacity; migrate explicitly")
                 paths[path] = {"sha256": sha(artifact), "size": len(artifact)};last = entry_sha
                 continue
@@ -785,7 +809,7 @@ class Inventory:
             baseline = next((row for row in self.adoption[1]["masters"] if row["masterId"] == self.master_id), None)
             require((baseline is not None or not adopted), "adoption has no registered master baseline")
             if baseline:
-                require(adopted == sorted(adopted, key=lambda row: row["path"]) and len(receipts) == baseline["receiptCount"]
+                require(adopted == sorted(adopted, key=lambda row: row["path"]) and adopted_receipts == baseline["receiptCount"]
                         and len(adopted) == baseline["stageCount"] + baseline["receiptCount"]
                         and sha(encoded(adopted)) == baseline["artifactSha256"], "adopted artifacts differ from accepted baseline")
         require(count == head_seq and last == head_sha, "event tail differs from signed checkpoint")
@@ -814,6 +838,17 @@ class Inventory:
         actual = {}
         for filename in files:
             relative = "recoveries/" + filename
+            if filename.startswith(".pending-"):
+                match = re.fullmatch(r"\.pending-(" + UUID.pattern + r")-(" + UUID.pattern + r")\.json", filename)
+                require(match is not None, "unknown pending receipt")
+                final = "recoveries/" + match[1] + ".json"
+                indexed = self.receipt_artifacts.get(final)
+                require(indexed and not indexed[2] and indexed[1]["decisionId"] == match[2]
+                        and match[1] + ".json" not in files, "pending receipt lacks its exact intent")
+                raw = read_file(root / filename, 8000)
+                require(len(raw) <= len(indexed[0]) and indexed[0].startswith(raw), "pending receipt differs from fixed signed bytes")
+                actual[relative] = [{"sha256": sha(raw), "size": len(raw)}, fingerprint(normal(root / filename))]
+                continue
             require(relative in paths, "unindexed recovery receipt; preserve it")
             raw = self.retained.read(root / filename, 8000) if self.retained is not None and self.retained.enabled else read_file(root / filename, 8000)
             found = {"sha256": sha(raw), "size": len(raw)}
@@ -956,7 +991,7 @@ class Inventory:
             require(self.validated(conn, meta, integrity=False) == checkpoint
                     and read_file(self.master / "owner.lock", 2000) == owner_raw
                     and self.owner(request["ownerSha256"])[1] == owner, "owner/checkpoint changed before commit")
-            receipt_counts = self.receipt_counts()
+            receipt_counts = self.receipt_counts(conn)
             total = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0];receipts = sum(receipt_counts.values())
             stages = seq - receipt_counts.get(self.master_id, 0)
             require(total < MAX_TOTAL_EVENTS and total - receipts < MAX_TOTAL_STAGE_EVENTS and stages < MAX_STAGE_EVENTS,
@@ -969,6 +1004,127 @@ class Inventory:
             return {"schema": "negi-master-inventory-result/1", "action": "append", "masterId": self.master_id,
                     "head": {"seq": seq + 1, "sha256": entry_sha}, "relativePath": relative_path, "artifactSha256": sha(artifact)}
 
+
+
+    def recovery_context(self, value):
+        require(type(value) is dict and set(value) == {"turnRoot", "schedulerPath"}
+                and all(type(path) is str and os.path.isabs(path) and len(path.encode("utf-8")) <= 16000 for path in value.values()), "registered recovery context invalid")
+        return {"turnRoot": value["turnRoot"], "schedulerPath": value["schedulerPath"]}
+
+    def recovery_cwd(self, owner, operations):
+        require(owner["kind"] == "thread-start", "indexed inspection/admission recovery is not connected")
+        target = operations.get(owner["operation"]["requestId"])
+        require(target and sha(encoded(target[0]["request"]) + b"\n") == owner["operation"]["hash"], "indexed recovery target differs")
+        return target[0]["request"]["cwd"]
+
+    def verify_recovery(self, context, owner_raw, proof, cwd, present):
+        from negi_master_inventory_owner_recovery import verify_authority
+        verify_authority(self.root, self.master_id, context, owner_raw.decode("utf-8"), proof, cwd, present)
+    @storage_action
+    def append_receipt(self, request):
+        require(set(request) == {"action", "root", "masterId", "expectedHead", "ownerSha256", "bytes", "recoveryContext"}, "recovery intent input")
+        context = self.recovery_context(request["recoveryContext"])
+        expected = request["expectedHead"]
+        require(type(expected) is dict and set(expected) == {"seq", "sha256"} and type(expected["seq"]) is int
+                and 0 <= expected["seq"] < MAX_EVENTS and valid_sha(expected["sha256"])
+                and valid_sha(request["ownerSha256"]) and type(request["bytes"]) is str, "recovery intent head/owner")
+        artifact = request["bytes"].encode("utf-8")
+        envelope = canonical(artifact, 8000)
+        owner = envelope.get("payload", {}).get("owner", {})
+        require(type(owner) is dict and valid_uuid(owner.get("owner")), "recovery intent owner")
+        relative = "recoveries/" + owner["owner"] + ".json"
+        owner_raw = encoded(owner) + b"\n"
+        require(sha(owner_raw) == request["ownerSha256"], "recovery intent exact owner hash")
+        from negi_master_inventory_owner_recovery import dead_owner, scheduler_guard
+        with self.connection() as (conn, meta):
+            checkpoint, paths, operations, missing = self.audited(conn, meta)
+            payload = self.receipt(artifact, owner["owner"] + ".json")
+            cwd = self.recovery_cwd(payload["owner"], operations)
+            require(not missing, "previous intent is not materialized")
+            body, seq, last = checkpoint
+            require(expected == {"seq": seq, "sha256": last}, "recovery intent stale head")
+            require(relative not in paths and all(row[1]["decisionId"] != payload["decisionId"] for row in self.receipt_artifacts.values()), "recovery owner/decision already indexed")
+            require(absent(self.master / "owner-recovery.lock") and read_file(self.master / "owner.lock", 2000) == owner_raw, "recovery exact owner changed")
+            dead_owner(self.master, owner_raw)
+            self.verify_recovery(context, owner_raw, payload["proofSha256"], cwd, True)
+        require(not self.scan(paths)[2], "storage changed before recovery intent")
+        # Enter scheduler exclusion before the write transaction. Its native
+        # handle remains open after connection.__exit__ commits the signed intent.
+        with scheduler_guard(context["schedulerPath"]), self.connection(True) as (conn, meta):
+            require(self.validated(conn, meta, integrity=False) == checkpoint
+                    and read_file(self.master / "owner.lock", 2000) == owner_raw, "recovery owner/head changed")
+            dead_owner(self.master, owner_raw)
+            self.verify_recovery(context, owner_raw, payload["proofSha256"], cwd, True)
+            counts = self.receipt_counts(conn)
+            total = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+            require(total < MAX_TOTAL_EVENTS and seq < MAX_EVENTS and counts.get(self.master_id, 0) < MAX_RECEIPTS
+                    and sum(counts.values()) < MAX_TOTAL_RECEIPTS, "recovery receipt capacity; preserve owner")
+            event = {"schema": "negi-master-inventory-event/3", "masterId": self.master_id, "masterSha256": sha(body),
+                     "seq": seq + 1, "previousSha256": last, "type": "receipt", "relativePath": relative,
+                     "requestId": owner["operation"]["requestId"], "stage": None, "artifactSha256": sha(artifact), "ownerSha256": request["ownerSha256"], "contextSha256": sha(encoded(context))}
+            raw = encoded(event);sig = signature(self.key, event["schema"], raw);entry_sha = sha(raw + b"\0" + sig.encode("ascii"))
+            conn.execute("INSERT INTO events VALUES (?,?,?,?,?,?,?)", (self.master_id, seq + 1, relative, raw, artifact, entry_sha, sig))
+            conn.execute("UPDATE masters SET seq=?,last_sha=?,signature=? WHERE master_id=?", (seq + 1, entry_sha, self.signed_head(body, seq + 1, entry_sha), self.master_id))
+            require(read_file(self.master / "owner.lock", 2000) == owner_raw, "owner changed before recovery intent commit")
+            return {"schema": "negi-master-inventory-result/1", "action": "appendRecoveryIntent", "masterId": self.master_id,
+                    "head": {"seq": seq + 1, "sha256": entry_sha}, "relativePath": relative, "artifactSha256": sha(artifact)}
+
+    def selected_recovery(self, decision_id, live_only=False):
+        return next(((path, raw, payload, context_sha) for path, (raw, payload, imported, context_sha) in self.receipt_artifacts.items()
+                     if (not live_only or not imported) and payload["decisionId"] == decision_id), None)
+
+    @storage_action
+    def recovery_intent(self, request):
+        require(set(request) == {"action", "root", "masterId", "decisionId"} and valid_uuid(request["decisionId"]), "recovery intent lookup input")
+        with self.connection() as (conn, meta):
+            checkpoint, paths, _, missing = self.audited(conn, meta)
+            selected = self.selected_recovery(request["decisionId"])
+            receipt = {"relativePath": selected[0], "bytes": selected[1].decode("utf-8"), "artifactSha256": sha(selected[1])} if selected else None
+            result = self.result(checkpoint, paths, missing)
+            result.update(action="recoveryIntent", decisionId=request["decisionId"], receipt=receipt)
+            return result
+
+    @storage_action
+    def release_recovery(self, request):
+        require(set(request) == {"action", "root", "masterId", "decisionId", "expectedProofSha256", "recoveryContext"}
+                and valid_uuid(request["decisionId"]) and valid_sha(request["expectedProofSha256"]), "indexed recovery release input")
+        context = self.recovery_context(request["recoveryContext"])
+        with self.connection() as (conn, meta):
+            checkpoint, paths, operations, missing = self.audited(conn, meta)
+            selected = self.selected_recovery(request["decisionId"], live_only=True)
+            require(selected and selected[2]["proofSha256"] == request["expectedProofSha256"], "indexed recovery decision/proof absent")
+            relative, raw, payload, context_sha = selected
+            require(context_sha == sha(encoded(context)), "registered recovery context changed")
+            cwd = self.recovery_cwd(payload["owner"], operations)
+            require(missing in ([], [relative]), "other indexed artifacts missing; preserve owner")
+        owner_raw = encoded(payload["owner"]) + b"\n"
+        owner_path = self.master / "owner.lock"
+        require(absent(self.master / "owner-recovery.lock"), "legacy recovery guard present")
+        def check(phase):
+            with self.connection() as (conn, meta):
+                current, current_paths, _, gaps = self.audited(conn, meta)
+                require(current == checkpoint and self.selected_recovery(request["decisionId"]) == selected
+                        and (not gaps if phase == "published" else gaps in ([], [relative])), "indexed recovery evidence changed")
+                require(read_file(owner_path, 2000) == owner_raw, "indexed recovery owner replaced")
+            self.verify_recovery(context, owner_raw, payload["proofSha256"], cwd, True)
+        from negi_master_inventory_owner_recovery import release_windows, scheduler_guard
+        historical = absent(owner_path)
+        # A historical ACK reads its saved receipt; a current release excludes
+        # scheduler writers until post-delete proof and final audit have finished.
+        with nullcontext() if historical else scheduler_guard(context["schedulerPath"]):
+            if historical:
+                require(not missing and read_file(self.master / relative, 8000) == raw, "absent owner has no exact published receipt")
+            else:
+                release_windows(self.master, owner_raw, raw.decode("utf-8"), check)
+                self.verify_recovery(context, owner_raw, payload["proofSha256"], cwd, False)
+            require(absent(owner_path), "new owner appeared after indexed recovery")
+            with self.connection() as (conn, meta):
+                current, paths, _, missing = self.audited(conn, meta)
+                require(current == checkpoint and not missing and self.selected_recovery(request["decisionId"]) == selected, "indexed recovery not materialized")
+                require(absent(owner_path), "new owner appeared during final recovery audit")
+                result = self.result(current, paths, missing)
+                result.update(action="releaseRecovery", decisionId=request["decisionId"], requestId=payload["owner"]["operation"]["requestId"], ownerReleased=True, operationComplete=False)
+                return result
     @storage_action
     def lookup(self, request):
         require(set(request) == {"action", "root", "masterId", "relativePath"} and type(request["relativePath"]) is str, "lookup input fields")
@@ -1011,13 +1167,16 @@ def main():
         require(set(request) == {"action", "root", "masterId"}, "input fields")
         result = {"schema": "negi-master-inventory-result/1", "action": action, "masterId": inventory.master_id, "processIdentity": process_identity()}
     else:
-        with storage_guard(inventory.root, ticket, create=action not in ("audit", "lookup", "latestStage", "previewMigration", "previewDatabaseRecovery", "recoverDatabase")):
+        with storage_guard(inventory.root, ticket, create=action not in ("audit", "lookup", "latestStage", "appendRecoveryIntent", "recoveryIntent", "releaseRecovery", "previewMigration", "previewDatabaseRecovery", "recoverDatabase")):
             if action in ("initialize", "register", "audit"):
                 require(set(request) == {"action", "root", "masterId"}, "input fields")
                 result = getattr(inventory, action)()
             elif action == "append":result = inventory.append(request)
             elif action == "lookup":result = inventory.lookup(request)
             elif action == "latestStage":result = inventory.latest_stage(request)
+            elif action == "appendRecoveryIntent":result = inventory.append_receipt(request)
+            elif action == "recoveryIntent":result = inventory.recovery_intent(request)
+            elif action == "releaseRecovery":result = inventory.release_recovery(request)
             elif action == "previewMigration":
                 require(set(request) == {"action", "root", "masterId"}, "migration preview fields")
                 result = inventory.preview_migration()

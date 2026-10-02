@@ -350,3 +350,17 @@ small fixtureの5段階保存と同ID再照会を含む初回focused試験時間
 Material 3 Expressiveの作業一覧・Task・レビュー・初回設定・知識・チーム・会話・端末は実装済みで、今回のbuildもassets `index-CvLJ6iRB.css`/`index-C-cjKz75.js`と一致する。今回は新GUI・実provider/model/Jev・実機・人の受入・CI成功の確認ではない。直前のPC/375/320px・両テーマの画面検証と、未確認の実機safe-area/keyboardの区別を維持する。
 
 新規receipt intent/native解除/owner baseline、turn/scheduler baseline、初回thread/戻りidentity/旧runtime静止、認証済み確認UI、DB/欠落stageの修復・保持・版移行・性能、未対応journal/部分記録/OS crash cleanup、実停電/UNC/Linux等の先行条件を継続する。Codex「新しい会話」は未有効化。NT-067/073の追加進捗で、全73要件・Phase0–8と全体ゴールはACTIVE。
+
+## 2026-10-03追加: 復旧receipt intentと正確なowner解除
+
+[方式・検証・残条件](negi-teams-master-conversation-inventory.md#2026-10-03-復旧receipt-intentと正確なowner解除)。trusted serverの固定turnRoot/scheduler登録を要求する候補APIを追加した。索引にあるthread-startだけを対象に、署名済みreceipt原文・正確なowner SHA・context SHA・signed headをDBへ先にcommitする。Windows nativeで同じdecision/prefixの原文を公開し、現在proofとnative process作成tokenを再検査して正確なdead owner handleだけを解除する。owner解除をprovider操作の完了として扱わず、不明な要求を保持する。
+
+独立レビューで、署名済みproofだけの比較と、verifier return後のscheduler更新競合を見つけて修正した。固定read-only Node verifierで現在のturn/scheduler/owner baselineを再計算する。さらにFileSchedulerと同じcreate-only lockを最終proof〜intent commit、native公開/owner解除〜解除後proof/最終監査まで保持する。他writerのlockは変更せず保留する。参加writer間の保証で、root guardを使わない旧binary・同権限writerのABAは残る。
+
+intent/部分file/公開後/解除後の実exitでは同じdecisionと原文だけを照会・再開する。改変/別decision/欠落receiptとowner不在は保留し、providerを再実行しない。完了済みreceiptのACKは後のscheduler状態を変更しない。native release helperは30秒でkillせず実終了を待つ。
+
+最終関連8 test filesは**200件中199成功・OS条件1スキップ・失敗/取消0（664,082.5678ms、actual exit0）**。新規18ケースにはintent/部分書込み/公開/解除後の実process exitと同一decision、移行baseline、原文/prefix/HMAC/live identity、未署名path容量、35秒終了待ち、現在proofの鮮度、verifier return直後のappend/release競合、foreign lock/context/未対応kindを含む。初期15/15（304,214.2679ms）はscheduler競合修正前、focused5成功/13 name-filter skip（97,986.4787ms）は修正後の別集合で、最終suiteと合算しない。独立read-only再レビューで参加scheduler競合の閉鎖を確認し、追加の具体的blockerはなかった。Python AST5・型検査・build・mjs構文・差分検査成功。compiled fallbackはmodule読込と不存在authorityのread-only保留/actual exit1を確認し、compiled側の実復旧全経路試験ではない。開始した試験childは終了を待った。実provider/model/Jev/新GUI/実機/人の受入/CI成功を確認した結果ではない。最大履歴/実停電/UNC/Linuxは未検証。
+
+Material 3 Expressiveの作業一覧・Task・レビュー・初回設定・知識・チーム・会話・端末は実装済みで、今回のbuildもassets `index-CvLJ6iRB.css`/`index-C-cjKz75.js`と一致する。新GUI/実機/人の受入は今回確認していない。実機safe-area/keyboardと全導線の受入は残る。
+
+通常authorityのownerRecovery/releaseOwner・legacy CLIのDB presence保留は維持し、候補APIはproduction caller/HTTP/認証済み人間確認UIへ未接続。owner baseline正規化、turn/scheduler索引baseline、参加version fence、初回thread/戻りidentity/旧runtime静止、DB/欠落stage repair・保持・版移行・性能、未対応journal/部分記録/OS crash cleanup/実停電/UNC/Linux等の先行条件を継続する。Codex「新しい会話」は未有効化。NT-067/073の追加進捗であり、全73要件・Phase0–8と全体ゴールはACTIVE。
