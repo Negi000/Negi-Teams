@@ -17,6 +17,8 @@ import stat
 import sys
 from datetime import datetime
 from functools import lru_cache
+from concurrent.futures import ThreadPoolExecutor
+from types import MappingProxyType
 
 VERSION = 1
 APPLICATION_ID = 0x4E544331
@@ -24,6 +26,7 @@ MAX_EVENTS = 50000  # Five stages for each of the existing 10,000 candidate oper
 MAX_TOTAL_EVENTS = 50000  # Whole DB budget, separately enforced across registered Masters.
 MAX_MASTERS = 10000
 MAX_ARTIFACT = 24000
+READ_WORKERS = 8  # Bound native IO handles; two complete passes still compare all bytes.
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
 SHA = re.compile(r"[0-9a-f]{64}")
 MASTER = re.compile(r"[a-zA-Z0-9_-]{1,100}")
@@ -420,9 +423,26 @@ class Inventory:
         require(count == head_seq and last == head_sha, "event tail differs from signed checkpoint")
         return paths, operations
 
+    def scan_operation(self, name, paths):
+        path = self.master / name
+        before = identity(normal(path, True))
+        files = names(path)
+        require(len(files) <= 5, "operation file capacity")
+        actual = {}
+        for filename in files:
+            relative = name + "/" + filename
+            require(relative in paths, "unindexed stage file")
+            raw = read_file(path / filename, MAX_ARTIFACT)
+            found = {"sha256": sha(raw), "size": len(raw)}
+            require(found == paths[relative], "indexed stage changed or partial")
+            actual[relative] = [found, fingerprint(normal(path / filename))]
+        require(before == identity(normal(path, True)) and files == names(path), "operation changed during scan")
+        return [name, before, files], actual
+
     def scan(self, paths):
-        expected_dirs = sorted({path.split("/")[0] for path in paths})
-        inventory, actual = [], {}
+        expected_paths = MappingProxyType({path: MappingProxyType(value) for path, value in paths.items()})
+        expected_dirs = {path.split("/")[0] for path in expected_paths}
+        inventory, actual, operations = [], {}, []
         master_identity = identity(normal(self.master, True))
         master_names = names(self.master, MAX_MASTERS + 3)
         for name in master_names:
@@ -439,16 +459,21 @@ class Inventory:
                 inventory.append([name, identity(normal(path, True)), []])
                 continue
             require(name in expected_dirs and valid_uuid(name), "unindexed operation directory")
-            info = normal(path, True)
-            files = names(path)
-            inventory.append([name, identity(info), files])
-            for filename in files:
-                relative = name + "/" + filename
-                require(relative in paths, "unindexed stage file")
-                raw = read_file(path / filename, MAX_ARTIFACT)
-                found = {"sha256": sha(raw), "size": len(raw)}
-                require(found == paths[relative], "indexed stage changed or partial")
-                actual[relative] = [found, fingerprint(normal(path / filename))]
+            operations.append(name)
+        if operations:
+            if os.name == "nt":native_kernel()  # Initialize immutable ctypes signatures on the main thread.
+            # A failed worker cancels queued work and joins all running readers
+            # before canonical parent handles/SQLite scopes can be closed.
+            with ThreadPoolExecutor(max_workers=READ_WORKERS, thread_name_prefix="negi-inventory-read") as pool:
+                futures = [pool.submit(self.scan_operation, name, expected_paths) for name in operations]
+                try:
+                    for future in futures:  # Preserve deterministic name order regardless of completion order.
+                        entry, files = future.result()
+                        inventory.append(entry); actual.update(files)
+                except BaseException:
+                    for future in futures:future.cancel()
+                    raise
+        inventory.sort(key=lambda entry: entry[0])
         missing = sorted(set(paths) - set(actual))
         require(master_identity == identity(normal(self.master, True)) and master_names == names(self.master, MAX_MASTERS + 3), "master inventory changed during scan")
         return inventory, actual, missing

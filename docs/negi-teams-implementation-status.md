@@ -251,3 +251,15 @@ NT-067/073の追加進捗。全73要件・Phase0–8と、先行記録の全残�
 独立監査のPID存在だけの判定、容量のauxiliary越境、可変入力、長いwrite transaction、FK孤立行、別Masterの行とheadの不一致を修正した。限定した最終レビューでは、1,000件初回のtimeoutが未解消の有効化阻害として残った。独立DBが残る間の欠落検出であり、DB＋authorityの同時snapshot rollback/同じOS userの全変更を防ぐ外部anchorではない。明示hot-journal回復、欠落stageの認証済みrepair、既存journal/owner移行、native receipt/解除とbaseline、複数Master並行appendの測定、保持/版移行（候補DB全体50,000 stage/約1.5GB上限）、macOS token、Linux/UNC/停電/外部ABAが残る。Codex新規会話と全先行残条件を保持する。
 
 実provider/model/Jev0、新GUI/実機/人の品質受入/CI成功の主張なし。client assetsは既存Material 3 Expressiveの`index-CvLJ6iRB.css`/`index-C-cjKz75.js`を維持した。NT-067/073の追加進捗であり、全73要件・Phase0–8と全体ゴールはACTIVE。
+
+## 2026-10-02追加: 会話索引の全本文読取を最大8件並行にする
+
+[方式・測定範囲](negi-teams-master-conversation-inventory.md#2026-10-02-全本文読取の並行化と追記の測定)。workerはoperation内の全file bytes/hash/identityとdirectoryの前後を確認し、変更不可の期待値を参照する。main threadが決定順で結合し、全worker終了後に第2走査を行う。失敗時も実行中workerを待ってからguardを閉じる。署名鎖・SQLite・owner・write CASの検査、本文二走査、30秒期限を維持した。8件はhelperごとの上限で、複数Master全体の共有上限ではない。
+
+最終36/36成功（43,682.988ms、失敗/skip0）。実8 workerの重複と二走査の終了順、worker失敗時のguard保持、読取中の部分変更と同一bytesのdirectory置換を追加し、既存の署名/欠落/競合/crash/hot journal検査も成功した。200 operation/1,000 stageのprofileは全体7.260→2.367秒。ただしOS cacheは未消去で、thread別の重なったprofile集計をwall timeとして合算していない。
+
+公開audit benchmarkの実500/2,500 stageは**5,527 / 3,146 / 2,923ms**、実1,000/5,000 stageは**9,591 / 4,697 / 5,247ms**。全6試行`clean`、timeout0、exit0。DB sizeは11,919,360 / 23,826,432 bytes。直前の32b16e3の測定は履歴として保持し、その時点の1,000件初回30,020ms timeoutは今回の測定で解消した。初回をcold diskとは呼ばない。
+
+別fixtureの`--writes`測定で、1,000履歴へのpublic append APIの5段階は**13,859 / 10,262 / 9,337 / 7,898 / 7,178ms**。ACK後のstage file保存を含む合計48,572msであり、通常利用の応答性に向けた追加改善が必要。共有DBの二つの1,000履歴Masterへの同時helper呼出はrequested **10,331 / 10,501ms**、未送信cancelled **7,759 / 7,695ms**。全4追記成功・両Master最終監査`clean`・exit0。SQLiteの同時write競合を保証する測定ではない。合成owner/provider identity・一括署名DB作成を使い、実RPC、scheduler/turn、通常入力、UI、電源断を測っていない。測定専用fixtureは失敗時も削除するため、失敗証拠の保持/復旧は測定対象外。
+
+限定した独立レビューに具体的な追加問題なし。候補は既存authority/起動/通常入力/provider/UIに未接続。追記の反復全走査改善、turn/scheduler索引、明示hot-journal復旧、欠落stage repair、既存journal/owner/2移行、native receipt/解除とbaseline、保持/版移行、macOS/Linux/UNC/停電/外部ABAと先行の全残条件を維持する。Codex「新しい会話」は引き続き拒否し、Material 3 Expressiveの画面構成は維持する。NT-067/073の進捗で、全73要件・Phase0–8と全体ゴールはACTIVE。

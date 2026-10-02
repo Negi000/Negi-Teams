@@ -71,6 +71,125 @@ async function pythonInput(args: string[], value: unknown): Promise<string> {
     child.stdin.end(JSON.stringify(value));
   });
 }
+async function populated(f: Fixture, count: number) {
+  await f.inventory.initialize();
+  await pythonInput([resolve("test/helpers/masterConversationInventoryFixture.py")], { root: f.root, masterId: "master", count });
+}
+
+test("parallel readers overlap within eight workers and each pass joins before the next", async () => fixture(async f => {
+  await populated(f, 16);
+  const code = String.raw`
+import sys,json,threading
+sys.path.insert(0,sys.argv[1])
+from negi_master_conversation_inventory import Inventory,READ_WORKERS
+r=json.load(sys.stdin); i=Inventory(r['root'],'master'); original=i.scan_operation; scan=i.scan
+lock=threading.Lock(); barrier=threading.Barrier(READ_WORKERS); state={'active':0,'peak':0,'completed':0,'pass':0}
+def operation(name,paths):
+    with lock:state['active']+=1; state['peak']=max(state['peak'],state['active'])
+    try:
+        barrier.wait(5)
+        return original(name,paths)
+    finally:
+        with lock:state['active']-=1; state['completed']+=1
+def full(paths):
+    assert state['active']==0 and state['completed']==state['pass']*16
+    state['pass']+=1
+    return scan(paths)
+i.scan_operation=operation; i.scan=full; result=i.audit()
+assert state['active']==0 and state['completed']==32 and state['pass']==2
+assert not any(t.name.startswith('negi-inventory-read') for t in threading.enumerate())
+print(json.dumps({'state':result['state'],'count':result['artifactCount'],'peak':state['peak'],'passes':state['pass']}))`;
+  const result = JSON.parse(await pythonInput(["-c", code, dirname(script)], { root: f.root }));
+  assert.deepEqual(result, { state: "clean", count: 80, peak: 8, passes: 2 });
+}));
+
+test("reader failure waits for an already-running peer before unwinding the authority guard", async () => fixture(async f => {
+  await populated(f, 2);
+  const code = String.raw`
+import sys,json,threading,time
+from contextlib import contextmanager
+sys.path.insert(0,sys.argv[1])
+from negi_master_conversation_inventory import Inventory,names
+r=json.load(sys.stdin); i=Inventory(r['root'],'master'); original=i.scan_operation; guard=i.guarded
+ordered=names(i.master); blocked=threading.Event(); failure=threading.Event(); release=threading.Event(); peer_done=threading.Event()
+state={'guardClosed':False,'returned':False}; observations=[]
+@contextmanager
+def held(*args,**kwargs):
+    try:
+        with guard(*args,**kwargs) as meta:yield meta
+    finally:state['guardClosed']=True
+def operation(name,paths):
+    if name==ordered[0]:
+        assert blocked.wait(5); failure.set(); raise ValueError('injected-worker-failure')
+    blocked.set(); assert release.wait(5)
+    try:return original(name,paths)
+    finally:peer_done.set()
+def controller():
+    try:
+        assert failure.wait(5); time.sleep(0.15)
+        observations.append([state['guardClosed'],state['returned'],peer_done.is_set()])
+    finally:release.set()
+i.guarded=held; i.scan_operation=operation
+t=threading.Thread(target=controller); t.start()
+try:i.audit(); raise AssertionError('failure was accepted')
+except ValueError as error:assert 'injected-worker-failure' in str(error)
+finally:state['returned']=True
+t.join(5)
+assert observations==[[False,False,False]] and peer_done.is_set() and state['guardClosed'] and not t.is_alive()
+assert not any(t.name.startswith('negi-inventory-read') for t in threading.enumerate())
+print(json.dumps({'held':True,'peerJoined':True,'guardClosedAfterJoin':True}))`;
+  const result = JSON.parse(await pythonInput(["-c", code, dirname(script)], { root: f.root }));
+  assert.deepEqual(result, { held: true, peerJoined: true, guardClosedAfterJoin: true });
+  assert.equal((await f.inventory.audit()).state, "clean");
+}));
+
+test("file changed by a parallel reader remains held and is never overwritten", async () => fixture(async f => {
+  await populated(f, 8);
+  const code = String.raw`
+import sys,json,threading
+sys.path.insert(0,sys.argv[1])
+import negi_master_conversation_inventory as m
+r=json.load(sys.stdin); i=m.Inventory(r['root'],'master'); original=m.read_file
+lock=threading.Lock(); changed=[]
+def read(path,limit):
+    raw=original(path,limit)
+    if path.name=='00-requested.json':
+        with lock:
+            if not changed:path.write_bytes(b'partial'); changed.append(path)
+    return raw
+m.read_file=read
+try:i.audit(); raise AssertionError('changed stage accepted')
+except ValueError:pass
+assert len(changed)==1 and changed[0].read_bytes()==b'partial'
+assert not any(t.name.startswith('negi-inventory-read') for t in threading.enumerate())
+print(json.dumps({'held':True,'preserved':True}))`;
+  assert.deepEqual(JSON.parse(await pythonInput(["-c", code, dirname(script)], { root: f.root })), { held: true, preserved: true });
+  await assert.rejects(f.inventory.audit(), /changed or partial/);
+}));
+
+test("operation directory copied with identical bytes between passes is still held", async () => fixture(async f => {
+  await populated(f, 8);
+  const code = String.raw`
+import sys,json,threading,shutil
+sys.path.insert(0,sys.argv[1])
+from negi_master_conversation_inventory import Inventory
+r=json.load(sys.stdin); i=Inventory(r['root'],'master'); original=i.scan_operation
+lock=threading.Lock(); changed=[]
+def operation(name,paths):
+    result=original(name,paths)
+    with lock:
+        if not changed:
+            old=i.master/name; saved=i.root.parent/'saved-operation'
+            old.rename(saved); shutil.copytree(saved,old,copy_function=shutil.copy2); changed.append(name)
+    return result
+i.scan_operation=operation
+try:i.audit(); raise AssertionError('replacement accepted')
+except ValueError as error:assert 'changed during audit' in str(error)
+assert len(changed)==1
+assert not any(t.name.startswith('negi-inventory-read') for t in threading.enumerate())
+print(json.dumps({'held':True,'replaced':True}))`;
+  assert.deepEqual(JSON.parse(await pythonInput(["-c", code, dirname(script)], { root: f.root })), { held: true, replaced: true });
+}));
 
 test("read-only missing inventory creates nothing; explicit bootstrap is create-only", async () => fixture(async f => {
   const before = await readdir(f.dir); await assert.rejects(f.inventory.audit());

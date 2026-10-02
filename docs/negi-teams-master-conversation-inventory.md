@@ -54,3 +54,24 @@ DBとauthorityを同時に過去snapshotへ戻す攻撃、同じOS userによる
 検証の最終件数・測定値は実装状況文書の今回追記へ記録する。合成provider identityを使った一時filesystem/Node/Python試験であり、実provider RPC、モデルturn、Jev、実機、人の品質受入やCI成功を主張しない。
 
 `node --import tsx scripts/benchmark-master-conversation-inventory.mjs`は500/1,000 completed operation（各5 stage）の実一時treeと署名DBを作り、最初の読取と繰返し読取を各3回測る。fixture builderはtest専用の一括transactionであり、live append APIの性能を測定するものではない。OS cacheは消去せず、cold diskの測定とは呼ばない。scheduler/turn監査、通常入力、RPC、UI待ち時間も測定に含まない。
+
+### 2026-10-02: 全本文読取の並行化と追記の測定
+
+operationごとのfile読取をhelper内で最大8件並行にした。各operation内のfileは順に読み、directory identityとfile一覧を前後で確認する。workerへ渡す期待値は変更不可のsnapshotで、結果はmain threadが名前順に結合する。第1走査の全workerが終了してから第2走査を始める。失敗時も開始済みworkerの終了を待ち、authority/DBのhandleを閉じる。鍵・署名鎖・SQLite・owner・最後のwrite CASはmain threadで扱う。本文やHMACの検査を省かず、永続cacheも導入していない。8件はhelperごとの上限で、二つのhelperなら合計16件になり得る。
+
+Windows/Node v20.17.0の同じ規模の合成履歴で、200 operation/1,000 stageのprofile全体は7.260秒から2.367秒になった。OS cacheは消去していない。500/1,000 operationの公開benchmarkは次の全試行で`clean`、時間切れ0、exit0だった。
+
+| operation / stage | 最初の監査 | 繰返し1 | 繰返し2 | DB bytes |
+| --- | ---: | ---: | ---: | ---: |
+| 500 / 2,500 | 5,527ms | 3,146ms | 2,923ms | 11,919,360 |
+| 1,000 / 5,000 | 9,591ms | 4,697ms | 5,247ms | 23,826,432 |
+
+前の実装の1,000件初回timeoutという阻害は、この測定では解消した。大量履歴での通常利用全体の性能を満たしたという判定ではない。
+
+`node --import tsx scripts/benchmark-master-conversation-inventory.mjs --writes`は別の1,000 operation fixtureを使い、public append APIの成功ACK後だけ、stageをcreate-onlyで保存してfsyncする。5段階のintent追記はrequestedから順に**13,859 / 10,262 / 9,337 / 7,898 / 7,178ms**、最終監査は`clean`だった。5段階の追記とfile保存の合計は48,572msで、会話切替の応答性に向けた追加改善が必要である。これは合成stageの保存時間であり、実RPCや画面での会話切替時間ではない。
+
+続けて同じDBの二つのMasterにそれぞれ1,000 operationの履歴を用意し、requested、未送信cancelledを二つのhelperへ同時に要求した。intent追記はrequestedが**10,331 / 10,501ms**、cancelledが**7,759 / 7,695ms**。4件とも保存成功、両Masterの最終監査`clean`、exit0だった。helperの同時呼出を確認した測定で、SQLiteのwrite transactionが同時刻に競合した保証はない。失敗/時間切れ時はmutationを再試行せず、確認できたACKだけをfileへ保存する。終了時には成功・失敗にかかわらずこの測定専用の一時fixtureを削除するため、失敗fixtureの保持や復旧の証拠には使わない。
+
+最終の関連36件は成功・失敗0・skip0（43,682.988ms）。上限8件の実重複、二走査の完全終了、worker失敗でも他worker終了までguardを保持、読取中の部分変更、同じbytesのdirectory置換を検証した。これまでの署名・欠落・競合・crash・hot journal試験も含む。独立レビューではこの差分に具体的な正しさ/データ整合性の問題は見つからなかった。
+
+既存authority/起動/通常入力/provider/UIへの接続は引き続き未実施。全履歴を繰り返し読む追記の改善、turn/scheduler監査、journal復旧、owner/2移行、receipt、保持/版移行と前記platform/外部変更の条件を残す。既存Material 3 Expressive画面のCodex「新しい会話」はまだ有効化しない。
