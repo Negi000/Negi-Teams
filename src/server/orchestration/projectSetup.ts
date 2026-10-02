@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { promisify, isDeepStrictEqual } from "node:util";
 import { HumanReviewProofStore, isReviewRequestId } from "./humanReviewProof.ts";
 import { parseVaultRunConfig, type VaultRunConfig } from "./vaultRunConfig.ts";
+import { LocalVaultInitialization } from "./vaultInitialization.ts";
 
 const exec = promisify(execFile), hash = (v:unknown)=>createHash("sha256").update(JSON.stringify(v)).digest("hex");
 const inside=(a:string,b:string)=>{const r=relative(a.toLowerCase(),b.toLowerCase());return !r||(!r.startsWith("..")&&!isAbsolute(r))};
@@ -27,14 +28,16 @@ async function existing(raw:unknown,kind:"file"|"directory"):Promise<string> {
   const f=await lstat(raw);if(f.isSymbolicLink()||(kind==="file"?!f.isFile():!f.isDirectory()))throw Error("Setup path type invalid");return realpath(raw);
 }
 export class LocalProjectSetup {
-  private constructor(readonly root:string,private readonly proofs:HumanReviewProofStore){}
+  private constructor(readonly root:string,private readonly proofs:HumanReviewProofStore,
+    readonly protectedRoots:string[],readonly vaults:LocalVaultInitialization){}
   static async open(raw:string,protectedRoots:string[]=[]):Promise<LocalProjectSetup> {
     if(!isAbsolute(raw))throw Error("NEGI_SETUP_ROOT must be absolute");
     const path=resolve(raw);let root:string;
     try{root=await existing(path,"directory")}
     catch(e){if((e as NodeJS.ErrnoException).code!=="ENOENT")throw e;root=join(await realpath(dirname(path)),basename(path))}
-    for(const p of protectedRoots){const source=await realpath(p);if(inside(source,root)||inside(root,source))throw Error("Setup storage overlaps source root")}
-    await mkdir(root,{recursive:true});return new LocalProjectSetup(root,await HumanReviewProofStore.open(join(root,"profile-approvals")));
+    const canonicalRoots=[];for(const p of protectedRoots){const source=await realpath(p);if(inside(source,root)||inside(root,source))throw Error("Setup storage overlaps source root");canonicalRoots.push(source)}
+    await mkdir(root,{recursive:true});return new LocalProjectSetup(root,await HumanReviewProofStore.open(join(root,"profile-approvals")),canonicalRoots,
+      await LocalVaultInitialization.open(root,canonicalRoots));
   }
   async current():Promise<ProjectSetupPreview|null> {
     let publication:Publication;try{publication=await boundedJson(join(this.root,"setup.json")) as Publication}

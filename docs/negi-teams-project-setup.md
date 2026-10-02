@@ -4,13 +4,37 @@
 
 ## 起動の準備
 
-- コミット済みで未コミット変更のないGitリポジトリ、別のVault、有効な必須Specを用意する。既存ファイルを保持する。新規Vaultの初期化はこの画面には含まれない。
+- コミット済みで未コミット変更のないGitリポジトリを用意する。仕様には別の既存Vaultと有効な必須Specを使うか、この画面で新しいVaultを作成する。既存ファイルを保持する。
 - Codexの実行ファイルと検証プログラムは、ホスト上の絶対パスで指定する。Codexには既存のChatGPTログインが必要。
 - `EBI_AUTH_TOKEN` と `NEGI_SETUP_ROOT` を設定して通常サーバーを起動する。保存先はアプリの作業ディレクトリ、対象リポジトリ、Vaultと重ならない絶対パス。親ディレクトリはあらかじめ存在する必要がある。
 - 既存の `NEGI_TASK_CONFIG`、レビュー・契約作成・統合・知識の設定がある場合、初回設定の保存は保留され、既存構成を使う。既存構成の移行は別の作業。
 - 保存後の構成は一つのCodex統括を起動する。既存の固定担当設定と併存させず、競合時は起動を保留する。
 
 作業一覧の「プロジェクト設定」または `/setup` を開き、アクセストークンでログインする。モデルIDと推論強度は利用者が選ぶ。画面はモデルの既定値を代入しない。
+
+## 新しいVaultを作成する（2026-10-02）
+
+初回設定、またはプロジェクトの「追加」で、表示名・VaultのプロジェクトID・Git・Vaultの絶対パスを入力し、「新しいVaultを作成する」を開く。存在する親フォルダーの下に、まだ存在しない保存先を指定する。仕様の本文には目的、守る条件、変更しない範囲を記述する。
+
+「作成する内容を確認」で、保存先とProject・必須Specの本文を読む。文書の全文とmetadata、標準フォルダー、Git基準、承認するhashは詳細から確認できる。入力変更はプレビューと採用チェックを無効にする。「表示した本文を…必須仕様として採用する」にチェックし、「Vaultを作成」を選ぶ。
+
+確認内容を署名してから、標準11フォルダーと `10_Projects/project.md` / `spec.md` を作る。Specはactive・required、Projectへの参照を持つ。最初の本文とmetadataはプレビューどおりで、Taskノートは作らない。保存先はGit・サーバー保存領域・全設定履歴のGit/Vault・他の署名済みVault作成先と重ねない。署名履歴は64要求まで保持し、自動削除しない。
+
+作成後は同じフォームへ場所とIDを戻す。担当モデル・変更を許可するパス・必須検証を入力し、以下の通常の「内容を確認」→設定保存→再起動へ進む。Vault作成と実行設定の承認は別の操作である。仕様の未検証状態を実装完了や人の成果受入には変えない。
+
+### 作成の保存と途中からの完了
+
+プレビューは読み取りだけで、設定履歴を前後で照合する。作成と完了は設定・開始要求の共通writerを保持し、全履歴の保存先を保護する。署名した本文と場所、親とGitのdirectory identity、Git基準を再確認する。別要求や結果不明のTask/providerのwriterをVaultの再開から解除しない。
+
+同じ親の `.negi-vault-stage-<UUID>` に排他的に作成する。最初のowner markerが完全で、すべての既存entry・型・bytesが署名内容に一致するときだけ、明示の「このVault作成を完了」で不足している予定ファイルを追加できる。予定外や変更済みのentryは保持して保留する。ready markerは全inventory・実Vault parser・必須参照の検査後に最後に保存し、ready以後の欠落を補完しない。
+
+公開前に、署名hashとstage directory identityをtrusted保存領域のpublication intentへ保存する。Windowsは[MoveFileW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefilew)、Linuxは[renameat2のRENAME_NOREPLACE](https://man7.org/linux/man-pages/man2/rename.2.html)で、既存の保存先へ置き換えずにdirectoryを公開する。Nodeのrename、copy、mergeへのfallbackはない。Linux対応は実装とAPI仕様の照合で、今回の実filesystem試験はWindowsである。
+
+公開からcatalog保存までの中断は、元のintent・移動前後で同じdirectory identity・stage不在・完全なready/inventoryがそろうときだけ完了できる。他者が同じ本文をコピーした既存Vault、異なるidentity、stageと保存先の同時存在は取り込まない。catalogの公開はcreate-only。完了後のcatalogは作成履歴なので、後の正当なSpec改訂やTask追加は保持する。
+
+GETと再読み込みは修復しない。途中の要求を一覧に表示し、本文とhashを確認してから「このVault作成を完了」を選ぶ。繰り返した「Vaultを作成」は未完了要求を自動で再開しない。解除できるwriterは、同じUUID/hashのVault操作、完全なowner/PID/date、終了済みPID、guard内の再照合を満たすものだけ。生存中・別domain/要求・所有不明・部分記録は保持する。Vaultの補助記録に不整合があっても、既存設定は表示し、Vault操作だけを保留する。
+
+owner marker作成前の中断、markerの部分保存、復旧guard自体の残留、未署名記録、外部writerや停電・全強制終了の汎用復旧は未対応で、記録を保持して照合待ちにする。Windowsのdirectory fsync、hardlink未対応filesystem、Linux以外の非Windows環境にも制限がある。既存/dirtyな場所の初回採用、場所・契約版の移行、保存履歴の安全な削除は別の残る作業である。
 
 ## 確認と保存
 

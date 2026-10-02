@@ -140,3 +140,21 @@ WMI/service等の外部brokerはJob所属外の処理を起動できる。ネイ
 ビルド済みUIと実Git/Vault/HTTP/Task・Review service/Brain/scheduler、合成providerで、委任→初回通知→ローカル修正版→受入→取消→明示送信→再読み込みを確認した。別の合成障害で受入保存と通知更新失敗を区別し、lock解放後に通知を修復した。1440/320/375px、明暗両テーマ、下書き保持、48px操作、通知履歴、最新1件の伝達を確認した。スマホの状態chipを本文の下へ置き、本文が細く縦に折り返す配置を修正した。実モデルのturn・Jev・実機確認ではない。
 
 NT-004/008/009/016/018/073の進捗である。任意の外部変更・強制終了・部分保存の汎用復旧、作成元会話リンク、実モデル一巡と人の品質受入、実機safe-area/仮想キーボードは残る。新規Vault/dirty初回採用・場所と契約版の移行、実Taskのbroker対応終了/成果救済、旧MCP/PTY/workerの全契約と共通枠、Jev全gate/日本語校正/残高上限、Knowledgeの複数事例/矛盾/寿命/派生失効/削除、Policyの利益実証/承認/activeとrollback、変化中履歴の完全性など、先行記録の残る条件を維持する。全73要件・Phase0–8のゴールはACTIVE。
+
+## 2026-10-02追加: 新規Vaultと必須仕様のMaterial 3導線
+
+`/setup`の初回・プロジェクト追加へ、新しい保存先→最初の必須仕様→本文/全文/版の確認→明示採用→Vault作成→通常の実行設定を接続した。標準11フォルダーとProject/required Specを確認したとおりに作り、Taskを作らずに通常の契約作成へ進める。本文を先に読み、metadataを全文詳細へ置く。スマホの承認ボタンと下部ナビの重なりも確認した。
+
+署名を先に保存し、owner marker→一致する不足entryの明示補完→実parser/参照検査→最後のready marker→stage identity付きtrusted publication intent→create-only directory公開→catalog公開の順にした。既存empty/occupied target、同じ本文をコピーした外部target、異なるdirectory identityは取り込まない。公開直後の途中記録は同じidentity・intent・完全なinventoryとreadyで照合する。完了catalogは履歴なので、後の正当なSpec/Task変更は保持する。
+
+作成は設定・開始要求の共通writerと全履歴のrootを保持する。writerはVaultのdomain/UUID/hashに固定し、明示完了は同一要求の終了済み所有者だけを解除する。別domainのTask/provider、別要求、生存中/部分/不明なwriterは保持する。プレビューはdurable writerを作らず、履歴を前後で確認する。GETは補助記録の不整合をVault操作へ限定し、既存設定を表示する。
+
+関連22件と単独の統合3件は成功、型検査とビルドも成功。ビルド済みセットアップUI、実Git/Vault/HTTP、合成の停止状態で、確認・入力変更による失効・採用・新規作成・2参照の通常設定保存・store再読込・署名済み途中要求と同一要求のdead writerからの明示完了を確認した。Chromium1440/320/375px、ライト/ダーク、48px操作、キーボード、全文詳細、横幅、下部ナビより上の承認ボタンを確認した。実モデルturn・Jev・実Codex新規起動・実機・人の成果受入の証拠ではない。
+
+初回全件試験にはWindows spawn EINVALの統合2件失敗と最終集計の欠落があり、その記録を保持した。単独再実行では統合3件成功。全件再試験の結果は下の追記で確定する。独立監査の既存target採用・共通writer解除・未完了save再開・owner/ready区別・UI接続/エラー隔離を修正した。
+
+NT-003/009/016/018/073の進捗である。owner marker保存前の中断/部分marker・復旧guardの残留・停電/外部writer/全process強制終了の汎用照合は保全holdであり未完成。dirtyな場所の初回採用、場所/契約版移行、実Taskのbroker対応終了と成果救済、旧MCP/PTY/workerの全契約/共通枠、作成元会話リンク、Jev全gate/校正/残高上限、Knowledgeの複数事例/矛盾/寿命/派生失効/削除、Policyの利益/承認/active/rollback、変化中履歴の完全性、実機safe-area/keyboardと全利用者導線を維持する。全73要件とPhase0–8のゴールはACTIVE。
+
+最終の標準回帰は778件中775成功・3skip・失敗/未完了0（406299.3677ms、exit0）。最後の本文表示と既存palette tokenへの修正後に型検査・ビルドも成功した。全件試験中の最後の変更はCSS tokenのみで、ブラウザ操作の最後の記録後の色token修正を含む。先の失敗・未集計記録は保持し、複数実行を合算しない。CI成功の主張ではない。
+
+最後のpalette token修正後にも、ビルド済み画面で新規仕様のプレビューを再確認した。明暗両テーマの本文foreground/backgroundが既存tokenの実色に解決し、全文とスマホ幅を保持していた。作成操作は実行せず、最終のPC全体とスマホ本文の画面記録を保存した。独立した最終監査では追加のリリース阻害事項はなく、文書化した保全holdの残条件を継続する。

@@ -26,6 +26,7 @@ export class ConfigurationPendingError extends Error {
   constructor(){super("設定を保存済みです。プロジェクト設定で版を確認し、サーバーを再起動してください。新しい作業は開始していません。");this.name="ConfigurationPendingError";}
 }
 export type ConfigurationAdmission=<T>(operation:()=>Promise<T>)=>Promise<T>;
+interface VaultWriter { requestId:string;hash:string;complete?:boolean }
 export class LocalProjectConfiguration {
   private constructor(readonly setup:LocalProjectSetup,private readonly proofs:HumanReviewProofStore,private readonly root:string){}
   static async open(setup:LocalProjectSetup){
@@ -36,6 +37,18 @@ export class LocalProjectConfiguration {
   private path(version:number){return join(this.root,String(version).padStart(5,"0")+".json");}
   private pendingPath(version:number){return join(this.root,String(version).padStart(5,"0")+".pending.json");}
   async history():Promise<ProjectConfiguration[]>{return this.readHistory();}
+  /** Trusted file creation shares the writer and every historical source root. */
+  async withStableHistory<T>(operation:(history:ProjectConfiguration[])=>Promise<T>,writer?:VaultWriter):Promise<T>{
+    if(writer&&(!isReviewRequestId(writer.requestId)||! /^[0-9a-f]{64}$/.test(writer.hash)))throw Error("Vault writer identity invalid");
+    if(writer?.complete){
+      // Explicit completion requires a signed Vault request and intact settings
+      // history before releasing a known dead shared writer. Partial/live/unknown
+      // ownership is retained by releaseDeadWriter; reads never repair it.
+      await this.setup.vaults.authorizeCompletion(writer.requestId,writer.hash);
+      await this.history();await this.releaseDeadWriter(writer);
+    }
+    return this.locked(async()=>operation(await this.history()),writer);
+  }
   private async readHistory(pendingRequestId?:string):Promise<ProjectConfiguration[]>{
     const first=await this.setup.current(),names=(await readdir(this.root)).sort();
     if(!first){if(names.length||(await readdir(this.proofs.root)).length>1)throw Error("Configuration anchor missing");return []}
@@ -115,10 +128,11 @@ export class LocalProjectConfiguration {
     if(!affected.length)throw Error("Configuration has no changes");
     return {configuration:revision(current.version+1,current.hash,projects),change,affected:affected.sort()};
   }
-  private async locked<T>(operation:()=>Promise<T>):Promise<T>{
+  private async locked<T>(operation:()=>Promise<T>,vault?:VaultWriter):Promise<T>{
     const path=join(this.setup.root,"configuration-writer.lock"),lock=await open(path,"wx",0o600);
     try{
-      await lock.writeFile(JSON.stringify({schema:"negi-configuration-writer/1",pid:process.pid,owner:randomUUID(),createdAt:new Date().toISOString()})+"\n");await lock.sync();
+      await lock.writeFile(JSON.stringify({schema:"negi-configuration-writer/1",pid:process.pid,owner:randomUUID(),createdAt:new Date().toISOString(),
+        ...(vault?{operation:{domain:"vault-initialization",requestId:vault.requestId.toLowerCase(),hash:vault.hash}}:{})})+"\n");await lock.sync();
       return await operation();
     }finally{await lock.close();await unlink(path)}
   }
@@ -178,15 +192,16 @@ export class LocalProjectConfiguration {
       await unlink(this.pendingPath(c.version));await this.syncDirectory();return (await this.current())!;
     });
   }
-  private async releaseDeadWriter(){
+  private async releaseDeadWriter(vault?:VaultWriter){
     const path=join(this.setup.root,"configuration-writer.lock");
     try{await lstat(path)}catch(e){if((e as NodeJS.ErrnoException).code==="ENOENT")return;throw e}
     const guardPath=join(this.setup.root,"configuration-recovery.lock"),guard=await open(guardPath,"wx",0o600);
     try{
-      let value:{schema:string;pid:number;owner:string;createdAt:string};
+      let value:{schema:string;pid:number;owner:string;createdAt:string;operation?:unknown};
       try{value=await json(path)}catch(e){if((e as NodeJS.ErrnoException).code==="ENOENT")return;throw e}
       if(value.schema!=="negi-configuration-writer/1"||!Number.isSafeInteger(value.pid)||value.pid<=0||!isReviewRequestId(value.owner)||
-        !Number.isFinite(Date.parse(value.createdAt))||Object.keys(value).length!==4)throw Error("Writer ownership is unknown; preserve it");
+        !Number.isFinite(Date.parse(value.createdAt))||Object.keys(value).length!==(vault?5:4)||
+        vault&&!isDeepStrictEqual(value.operation,{domain:"vault-initialization",requestId:vault.requestId.toLowerCase(),hash:vault.hash}))throw Error("Writer ownership is unknown or belongs to another operation; preserve it");
       try{process.kill(value.pid,0);throw Error("Configuration writer is still live");}
       catch(e){if((e as NodeJS.ErrnoException).code!=="ESRCH")throw e;}
       if(!isDeepStrictEqual(await json(path),value))throw Error("Configuration writer changed during reconciliation");
