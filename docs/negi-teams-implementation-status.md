@@ -237,3 +237,17 @@ NT-067/073の追加進捗。全73要件・Phase0–8と、先行記録の全残�
 最終実装の関連73/73成功（48162.6215ms）、最後のOS別回帰を含む復旧31件は30成功/非Windows実OS1スキップ/失敗0（26681.658ms）。集合は重複し合算しない。最終型検査・ビルド成功。独立した限定再レビューでは修正した4経路にP1/P2指摘なし。一時filesystem・Node/Python process exit・合成provider identityであり、実モデルturn/provider RPC/Jev0、GUI/実機/人の成果品質/CI成功の証拠ではない。満杯検知のinventory名は合成であり、大規模実filesystem性能の検証ではない。client assetsは直前のMaterial 3 UIと同じ。
 
 以前の43/43・15/15・22/22・68/68の実行は後の修正を含まない記録として保持する。最終レビューの確認ID衝突、部分record、cwd束縛と、再レビューのLinux差替え・後の進捗後の照会・容量・長いcwdを修正または明示的に保留した。試験成功を全復旧や全要件の完成へ換算しない。NT-067/073の進捗であり、全73要件・Phase0–8と先行の全残条件を維持し、ゴールはACTIVE。
+
+## 2026-10-02追加: Master会話stageの独立索引候補
+
+[保存・照合の境界と残条件](negi-teams-master-conversation-inventory.md)。固定した独立SQLiteへ署名meta、Master directory identity、entry hash鎖、原文bytes、署名headを保存する候補部品を追加した。intentとheadを同じtransactionで保存してからstage fileへ進む。選択Masterのstage末尾/operation folder削除をpendingとして検出し、固定bytesを読める。部分/異なるfileを修正せず、未完成intent後のappendを拒否する。初期化は空の既存authorityだけのcreate-onlyで、旧記録の自動採用・削除を行わない。
+
+新部品のowner/3は呼出親processのPIDとnative作成tokenに署名し、PID再利用と別processの古いownerを拒否する。呼出入力とserver登録を非同期処理前に固定する。schema/integrity/FK、全Masterのsigned head/行数/連番範囲/tail、選択Masterの全HMAC/遷移/本文と実treeを照合する。全Masterの本文を監査したという結果ではない。既存authority/native解除はowner/2のままなので、移行・native receipt索引・baseline正規化をまとめて接続する必要がある。候補部品はproduction起動/通常入力/provider/UIへ未接続である。
+
+最終32/32成功（38149.6728ms、exit0）、型検査とビルド成功。Windowsの一時filesystemとNode/Pythonで、全folder/末尾欠落、部分stage、HMAC/head/schema/FK/別Masterの余分な行、空登録、hardlink、実process exit前後、PID/token相違、並行同じhead、入力/登録objectの変更、UTF8本文のstdin転送、複数Masterの合計容量境界を確認した。最後のglobal未登録行checkを加えた後の限定5件も成功（6379.5147ms、27件は選択対象外skip、exit0）。Python構文検査とビルド後の固定helper path/親process token読取も成功。集合は重複し合算しない。初期16件のWindows ctime API差による失敗、全体構造検査追加後の古いerror文言assertion1件は修正後の結果と分けて保存した。
+
+最終audit測定は実500 completed operation/2,500 stageで**19,466 / 3,759 / 5,264ms**、実1,000/5,000 stageで**最初は30,020msでtimeout、繰返し10,737 / 5,544msでclean**。Node v20.17.0/Windows、DB sizeは11,927,552 / 23,838,720 bytes。OS cacheを消去しない最初/繰返しのsubprocess全stage監査で、test専用の一括DB作成を使用した。live append、scheduler/turn全履歴、通常入力/RPC/UIの性能ではない。初期benchmarkの500/1,000 timeoutと、独立監査の別測定も保持する。**1,000件初回と通常利用向けの性能ゲートは未達**であり、UIへの接続は進めない。
+
+独立監査のPID存在だけの判定、容量のauxiliary越境、可変入力、長いwrite transaction、FK孤立行、別Masterの行とheadの不一致を修正した。限定した最終レビューでは、1,000件初回のtimeoutが未解消の有効化阻害として残った。独立DBが残る間の欠落検出であり、DB＋authorityの同時snapshot rollback/同じOS userの全変更を防ぐ外部anchorではない。明示hot-journal回復、欠落stageの認証済みrepair、既存journal/owner移行、native receipt/解除とbaseline、複数Master並行appendの測定、保持/版移行（候補DB全体50,000 stage/約1.5GB上限）、macOS token、Linux/UNC/停電/外部ABAが残る。Codex新規会話と全先行残条件を保持する。
+
+実provider/model/Jev0、新GUI/実機/人の品質受入/CI成功の主張なし。client assetsは既存Material 3 Expressiveの`index-CvLJ6iRB.css`/`index-C-cjKz75.js`を維持した。NT-067/073の追加進捗であり、全73要件・Phase0–8と全体ゴールはACTIVE。
