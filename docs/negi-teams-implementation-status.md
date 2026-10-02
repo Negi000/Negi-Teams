@@ -334,3 +334,19 @@ DB/journalの容量を分け、streamingと空き容量検査を使う。全体�
 Material 3 Expressiveの作業一覧・Task・レビュー・初回設定・知識・チーム・会話・端末は実装済み。今回のbuildもassets `index-CvLJ6iRB.css`/`index-C-cjKz75.js`で一致した。合成Cookie/WSだけのUIでChromium1440×900/375×812/320×812、作業一覧→チーム、明暗テーマ切替、横幅一致、48px以上の操作と入力欄bottom712px < 下部ナビtop740pxを再確認した。対象console error/warning0、provider/model/Jev0、所有するbrowser/serverを終了した。Browser plugin not availableのため既存Playwright CLIを利用し、画像は公開差分の外へ保存した。実機safe-area/仮想キーボードと人の使いやすさの受入は残る。
 
 明示復旧はtrusted-server候補で、人間確認UI/HTTP・通常の索引authority/providerには未接続。WAL/SHM/cold/super-journal/部分bootstrapの復旧、staged recordの手動照合、OS crash後の私的clone掃除、旧binary/version fence、新規receipt/native解除/baseline、turn/scheduler/初回thread、保持/版移行等の先行条件を継続する。Codex「新しい会話」は未有効化。NT-067/073の進捗で、全73要件・Phase0–8と全体ゴールはACTIVE。
+
+## 2026-10-03追加: 会話stage保存と状態照会の索引接続
+
+[方式・境界・検証](negi-teams-master-conversation-inventory.md#2026-10-03-会話stage保存と状態照会の索引接続)。既存`MasterConversationAuthority.start/status`へserver内部の明示登録`stageStorage: "indexed"`を追加した。既定のlegacy登録とproduction callerは維持し、通常turn予約・provider起動・native owner解除の互換gateは保留を維持する。missing root/guard/key/DBをbootstrapしない。
+
+共通root guard内で新規owner/3をfsyncし書込みhandleを閉じ、正確なowner全文hashとsigned headへ束縛したstage intentをDBへcommitする。そのACK後だけ最初のoperation directoryと同じ署名原文fileをcreate-onlyでfsyncする。各段階とowner除去前に再監査する。ACK消失/欠落/部分保存はownerと要求を保持し、次のdispatch/append・取消後付け・再実行を保留する。
+
+`latestStage`は認証済み索引の全stageから要求末尾を返す。`status`はroot guard内で署名鎖・遷移・HMAC・原文hash・FS二重走査を通した結果を前後比較する。末尾/operation消失や未materializeでも要求と既知identityを`needs_reconciliation`で保持する。改変/authority消失は保留し、読取から修復・provider起動・owner解除をしない。
+
+最終関連7 test files **182件中181成功・OS条件1スキップ・失敗/取消0（172,789.2133ms、actual exit0）**。新規単独11/11（120,924.8735ms）と初回focused1件は重複し、合算しない。5段階のDB先行順序、同ID再実行0、lost ACK、末尾/operation削除、改変、移行baselineへの追記、dispatch前後失敗、missing root/key/DB、owner差替え、実Node childのdispatch intent後exit27・読取再接続・解除保留を確認した。独立read-onlyレビューは今回の4実装/test filesに重大な具体的指摘なし。最終Python AST4・型検査・build成功。開始した試験childの終了を待った。
+
+small fixtureの5段階保存と同ID再照会を含む初回focused試験時間は14,886.1116msで、複数の全監査/helper起動を含む。実RPC/UI latencyや大規模履歴の受入性能ではない。通常入力へ完全走査は接続しない。参加writer間のroot guardに限る保証で、外部同権限ABAや旧binary/version fenceは残る。
+
+Material 3 Expressiveの作業一覧・Task・レビュー・初回設定・知識・チーム・会話・端末は実装済みで、今回のbuildもassets `index-CvLJ6iRB.css`/`index-C-cjKz75.js`と一致する。今回は新GUI・実provider/model/Jev・実機・人の受入・CI成功の確認ではない。直前のPC/375/320px・両テーマの画面検証と、未確認の実機safe-area/keyboardの区別を維持する。
+
+新規receipt intent/native解除/owner baseline、turn/scheduler baseline、初回thread/戻りidentity/旧runtime静止、認証済み確認UI、DB/欠落stageの修復・保持・版移行・性能、未対応journal/部分記録/OS crash cleanup、実停電/UNC/Linux等の先行条件を継続する。Codex「新しい会話」は未有効化。NT-067/073の追加進捗で、全73要件・Phase0–8と全体ゴールはACTIVE。

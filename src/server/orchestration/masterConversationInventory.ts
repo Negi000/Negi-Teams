@@ -15,6 +15,9 @@ export interface MasterInventoryIntent { head: MasterInventoryHead; relativePath
 export interface MasterInventoryArtifact extends MasterInventoryAudit {
   relativePath: string; bytes: string; artifactSha256: string;
 }
+export interface MasterInventoryLatestStage extends MasterInventoryAudit {
+  latest: Pick<MasterInventoryArtifact, "relativePath" | "bytes" | "artifactSha256"> | null;
+}
 export interface MasterInventoryProcessIdentity { platform: "windows" | "linux"; pid: number; startToken: string }
 export interface MasterInventoryMigrationPreview {
   proofSha256: string; masterCount: number; stageCount: number; receiptCount: number;
@@ -55,7 +58,7 @@ async function script() {
 async function invoke(request: Record<string, unknown>): Promise<Record<string, unknown>> {
   const frozen = structuredClone(request);
   return frozen.action === "processIdentity" ? invokeHeld(frozen) : withMasterStorageGuard(String(frozen.root), () => invokeHeld(frozen),
-    { createIfMissing: !["audit", "lookup", "previewMigration", "previewDatabaseRecovery", "recoverDatabase"].includes(String(frozen.action)) });
+    { createIfMissing: !["audit", "lookup", "latestStage", "previewMigration", "previewDatabaseRecovery", "recoverDatabase"].includes(String(frozen.action)) });
 }
 
 async function invokeHeld(request: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -206,5 +209,21 @@ export class MasterConversationInventory {
     check(row.relativePath === relativePath && typeof row.bytes === "string" && Buffer.byteLength(row.bytes) <= 24_000 &&
       typeof row.artifactSha256 === "string" && sha.test(row.artifactSha256) && row.artifactSha256 === hash(row.bytes), "indexed artifact invalid");
     return { ...audit, relativePath, bytes: row.bytes as string, artifactSha256: row.artifactSha256 };
+  }
+  /** Authenticated last stage from the index, including a not-materialized intent. */
+  async latestStage(requestId: string): Promise<MasterInventoryLatestStage> {
+    check(uuid.test(requestId), "conversation request ID invalid");
+    const row = await invoke(this.request("latestStage", { requestId }));
+    fields(row, ["schema", "action", "masterId", "head", "state", "artifactCount", "missing", "requestId", "latest"]);
+    const audit = this.auditResult(row);
+    check(row.requestId === requestId, "conversation request differs");
+    if (row.latest === null) return { ...audit, latest: null };
+    check(row.latest && typeof row.latest === "object" && !Array.isArray(row.latest), "latest stage invalid");
+    const value = row.latest as Record<string, unknown>;
+    fields(value, ["relativePath", "bytes", "artifactSha256"]);
+    check(typeof value.relativePath === "string" && stagePath(value.relativePath) && value.relativePath.startsWith(requestId + "/") &&
+      typeof value.bytes === "string" && Buffer.byteLength(value.bytes) <= 24_000 && typeof value.artifactSha256 === "string" &&
+      sha.test(value.artifactSha256) && value.artifactSha256 === hash(value.bytes), "latest indexed stage invalid");
+    return { ...audit, latest: value as unknown as NonNullable<MasterInventoryLatestStage["latest"]> };
   }
 }

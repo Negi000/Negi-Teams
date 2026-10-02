@@ -328,7 +328,7 @@ def process_identity():
 def storage_action(function):
     @wraps(function)
     def guarded(self, *args, **kwargs):
-        with storage_guard(self.root, create=function.__name__ not in ("audit", "lookup", "preview_migration", "preview", "recover")):return function(self, *args, **kwargs)
+        with storage_guard(self.root, create=function.__name__ not in ("audit", "lookup", "latest_stage", "preview_migration", "preview", "recover")):return function(self, *args, **kwargs)
     return guarded
 
 
@@ -980,6 +980,24 @@ class Inventory:
             result.update(action="lookup", relativePath=request["relativePath"], bytes=row[0].decode("utf-8"), artifactSha256=sha(row[0]))
             return result
 
+    @storage_action
+    def latest_stage(self, request):
+        require(set(request) == {"action", "root", "masterId", "requestId"} and valid_uuid(request["requestId"]), "latest stage input")
+        with self.connection() as (conn, meta):
+            checkpoint, paths, operations, missing = self.audited(conn, meta)
+            operation = operations.get(request["requestId"])
+            latest = None
+            if operation:
+                payload, expected_sha, count = operation
+                path = f"{request['requestId']}/0{count - 1}-{payload['stage']}.json"
+                require(path in paths, "latest stage not indexed")
+                raw = conn.execute("SELECT artifact FROM events WHERE master_id=? AND path=?", (self.master_id, path)).fetchone()[0]
+                require(sha(raw) == expected_sha == paths[path]["sha256"], "latest stage bytes changed")
+                latest = {"relativePath": path, "bytes": raw.decode("utf-8"), "artifactSha256": expected_sha}
+            result = self.result(checkpoint, paths, missing)
+            result.update(action="latestStage", requestId=request["requestId"], latest=latest)
+            return result
+
 
 def main():
     raw = sys.stdin.buffer.read(100001)
@@ -993,12 +1011,13 @@ def main():
         require(set(request) == {"action", "root", "masterId"}, "input fields")
         result = {"schema": "negi-master-inventory-result/1", "action": action, "masterId": inventory.master_id, "processIdentity": process_identity()}
     else:
-        with storage_guard(inventory.root, ticket, create=action not in ("audit", "lookup", "previewMigration", "previewDatabaseRecovery", "recoverDatabase")):
+        with storage_guard(inventory.root, ticket, create=action not in ("audit", "lookup", "latestStage", "previewMigration", "previewDatabaseRecovery", "recoverDatabase")):
             if action in ("initialize", "register", "audit"):
                 require(set(request) == {"action", "root", "masterId"}, "input fields")
                 result = getattr(inventory, action)()
             elif action == "append":result = inventory.append(request)
             elif action == "lookup":result = inventory.lookup(request)
+            elif action == "latestStage":result = inventory.latest_stage(request)
             elif action == "previewMigration":
                 require(set(request) == {"action", "root", "masterId"}, "migration preview fields")
                 result = inventory.preview_migration()

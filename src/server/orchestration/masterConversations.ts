@@ -12,6 +12,7 @@ import { masterOwnerAuxiliary, masterOwnerEvidence, signedMasterOwner, validated
 import { observeWriter, recoverWriter, type WriterOperation } from "./writerRecovery.ts";
 import { guardMasterAdmission, scheduledMasterTurns, type MasterTurnRequest, type MasterTurnLease } from "./masterTurnAdmission.ts";
 import { MasterStorageHeldError, masterStorageTicket, withMasterStorageGuard } from "./masterStorageGuard.ts";
+import { MasterConversationInventory } from "./masterConversationInventory.ts";
 
 type Stage = "requested" | "old_idle" | "start_dispatched" | "bound" | "completed" | "cancelled" | "needs_reconciliation";
 export interface MasterConversationRequest {
@@ -73,9 +74,13 @@ function nextStage(previous: Stage | null, next: Stage) {
 
 export class MasterConversationAuthority {
   private readonly root: string;
-  constructor(private readonly options: { root: string; turnRoot: string; masterId: string; scheduler: FileScheduler; onReleased?: () => Promise<void> }) {
+  private readonly stageInventory: MasterConversationInventory | null;
+  constructor(private readonly options: { root: string; turnRoot: string; masterId: string; scheduler: FileScheduler; onReleased?: () => Promise<void>;
+    stageStorage?: "indexed" }) {
     check(isAbsolute(options.root) && isAbsolute(options.turnRoot) && /^[a-zA-Z0-9_-]{1,100}$/.test(options.masterId), "server registration invalid");
+    check(options.stageStorage === undefined || options.stageStorage === "indexed", "stage storage registration invalid");
     this.root = resolve(options.root);
+    this.stageInventory = options.stageStorage === "indexed" ? new MasterConversationInventory({ root: this.root, masterId: options.masterId }) : null;
   }
 
   private async legacyInventoryAbsent(): Promise<boolean> {
@@ -95,14 +100,29 @@ export class MasterConversationAuthority {
     throw new MasterConversationHeldError("会話の保存記録を照合してください。新しい操作は保留されています。");
   }
 
+  private async requireStageStorage(): Promise<void> {
+    if (!this.stageInventory) return this.requireLegacyInventoryAbsent();
+    try { check((await this.stageInventory.audit()).state === "clean", "stage intent has not been materialized"); }
+    catch { throw new MasterConversationHeldError("会話の保存記録を照合してください。未完了の保存を保持しています。"); }
+  }
+
   /** Read-only compatibility gate for process/thread/turn dispatch and leases. */
   async assertStorageCompatible(): Promise<void> { await this.requireLegacyInventoryAbsent(); }
   async withStorage<T>(run: () => Promise<T>): Promise<T> {
-    try { return await withMasterStorageGuard(this.root, run); }
+    try { return await withMasterStorageGuard(this.root, run, { createIfMissing: this.stageInventory === null }); }
     catch (error) { if (error instanceof MasterStorageHeldError) throw new MasterConversationHeldError(); throw error; }
   }
 
   private async prepare(cwd: string) {
+    if (this.stageInventory) {
+      // Explicit server registration only. Never bootstrap/migrate a missing DB,
+      // recreate a root/key, or change a legacy authority from a read operation.
+      await this.requireStageStorage();
+      const state = await this.recoveryState(cwd);
+      check(state, "indexed stage authority unavailable");
+      await this.requireStageStorage();
+      return state;
+    }
     // Check before any mkdir or key creation, including when the entire old
     // authority disappeared but its independent sibling DB survived.
     await this.requireLegacyInventoryAbsent();
@@ -151,26 +171,30 @@ export class MasterConversationAuthority {
     const bytes = signedMasterOwner({ schema:"negi-master-conversation-owner/3", owner:randomUUID(), pid:process.pid,
       createdAt:new Date().toISOString(), masterId:this.options.masterId, kind, cwdSha256:hash(state.canonicalCwd), operation, evidenceSha256,
       processIdentity: { platform: "windows", pid: ticket.pid, startToken: ticket.startToken } },state.key);
-    await this.requireLegacyInventoryAbsent();
+    await this.requireStageStorage();
     let file;
     try { file = await open(path, "wx", 0o600); }
     catch { throw new MasterConversationHeldError("会話の変更または実行受付が進行中か、所有者の照合が必要です。自動では再試行しません。"); }
     const pinned = await file.stat();
+    let fileClosed = false;
     try {
       await file.writeFile(bytes, "utf8"); await file.sync();
-      await this.requireLegacyInventoryAbsent();
+      // The fixed helper uses a protected owner reader that denies WRITE sharing.
+      // Close our writable handle after fsync, before any indexed helper read.
+      if (this.stageInventory) { await file.close(); fileClosed = true; }
+      await this.requireStageStorage();
       check(evidenceSha256 === await masterOwnerEvidence(evidenceOptions,kind,operation.requestId), "evidence changed before owner admission");
-      await this.requireLegacyInventoryAbsent();
+      await this.requireStageStorage();
       return await run(state);
     } finally {
       try {
         // An index appearing during this operation makes its owner evidence
         // part of the required migration/reconciliation. Preserve it.
-        await this.requireLegacyInventoryAbsent();
+        await this.requireStageStorage();
         const current = await lstat(path), record = await artifact(path, 8000);
         check(current.dev === pinned.dev && current.ino === pinned.ino && record?.bytes === bytes, "owner lock replaced; keep hold");
         await unlink(path); // Remove only this exact live owner; never steal an old lock.
-      } finally { await file.close(); }
+      } finally { if (!fileClosed) await file.close(); }
     }
   }
 
@@ -433,6 +457,7 @@ export class MasterConversationAuthority {
   /** Read the same request after reconnect/crash. No mkdir, key creation, replay or lock stealing. */
   async status(requestId: string): Promise<MasterConversationStatus | null> {
     check(uuid.test(requestId), "request ID invalid");
+    if (this.stageInventory) return this.indexedStatus(requestId);
     try {
       let rootIdentity: string;
       try { rootIdentity = await directory(this.root); }
@@ -453,6 +478,28 @@ export class MasterConversationAuthority {
     } catch { throw new MasterConversationHeldError(); }
   }
 
+  private async indexedStatus(requestId: string): Promise<MasterConversationStatus | null> {
+    try {
+      return await this.withStorage(async () => {
+        const indexed = await this.stageInventory!.latestStage(requestId);
+        if (!indexed.latest) return null;
+        const envelope = JSON.parse(indexed.latest.bytes), last = envelope.payload as RecordPayload;
+        check(last && validRequest(last.request) && last.request.requestId === requestId && last.request.masterId === this.options.masterId,
+          "indexed conversation registration invalid");
+        const state = await this.recoveryState(last.request.cwd);
+        check(state && Object.keys(envelope).length === 2 && typeof envelope.signature === "string" && /^[0-9a-f]{64}$/.test(envelope.signature) &&
+          timingSafeEqual(createHmac("sha256", state.key).update(JSON.stringify(last)).digest(), Buffer.from(envelope.signature, "hex")), "indexed stage signature invalid");
+        const owner = await artifact(join(state.master, "owner.lock"), 8000);
+        if (owner) validatedMasterOwner(owner.value, this.options.masterId, state.key);
+        const after = await this.stageInventory!.latestStage(requestId);
+        check(isDeepStrictEqual(indexed, after), "indexed status changed during observation");
+        return structuredClone({ request: last.request, stage: indexed.state === "pending" ? "needs_reconciliation" : last.stage,
+          identity: last.identity, reason: indexed.state === "pending" ? "会話の保存が途中です。記録を保持して照合してください。" : last.reason,
+          exclusionHeld: owner !== null || indexed.state === "pending" });
+      });
+    } catch { throw new MasterConversationHeldError(); }
+  }
+
   /** A trusted callback must persist dispatch intent immediately before thread/start. */
   async start(raw: MasterConversationRequest, run: (markDispatched: () => Promise<void>) => Promise<CodexThreadIdentity>): Promise<MasterConversationResult> {
     const request = structuredClone(raw);
@@ -468,27 +515,41 @@ export class MasterConversationAuthority {
         return structuredClone({ request, stage: ["completed", "cancelled"].includes(last.stage) ? last.stage : "needs_reconciliation", identity: last.identity, reason: last.reason });
       }
       try { await this.idle(state); } catch { throw new MasterConversationHeldError(); }
-      await this.requireLegacyInventoryAbsent();
-      const path = join(state.master, request.requestId); await mkdir(path);
+      await this.requireStageStorage();
+      const path = join(state.master, request.requestId);
+      if (!this.stageInventory) await mkdir(path);
       const operation: Operation = { path, records: [], bytes: [] };
       const append = async (stage: Stage, identity: CodexThreadIdentity | null = null, reason: string | null = null) => {
         check(nextStage(operation.records.at(-1)?.stage ?? null, stage), "invalid transition");
         check((await artifact(join(this.root, "signing-key.json"), 1000))?.bytes === state.keyBytes, "signing key changed");
-        await this.requireLegacyInventoryAbsent();
+        await this.requireStageStorage();
         const payload: RecordPayload = { schemaVersion: "negi-master-conversation/1", request, stage,
           previousSha256: operation.bytes.length ? hash(operation.bytes.at(-1)!) : null, identity, reason, at: new Date().toISOString() };
         const signature = createHmac("sha256", state.key).update(JSON.stringify(payload)).digest("hex");
         const bytes = JSON.stringify({ payload, signature }) + "\n";
-        await writeNew(join(path, `0${operation.records.length}-${stage}.json`), bytes);
+        const filename = `0${operation.records.length}-${stage}.json`;
+        if (this.stageInventory) {
+          const before = await this.stageInventory.audit();
+          check(before.state === "clean", "previous indexed stage is incomplete");
+          const owner = await artifact(join(state.master, "owner.lock"), 2000);
+          check(owner, "exact indexed stage owner missing");
+          // Persist the signed intent/head together before the first mkdir or
+          // create-only stage file. An uncertain ACK must not materialize/replay.
+          await this.stageInventory.appendStageIntent({ expectedHead: before.head, ownerSha256: hash(owner.bytes),
+            relativePath: request.requestId + "/" + filename, bytes });
+          if (!operation.records.length) await mkdir(path);
+        }
+        await writeNew(join(path, filename), bytes);
         operation.records.push(payload); operation.bytes.push(bytes);
+        await this.requireStageStorage();
       };
       await append("requested"); await append("old_idle");
       let dispatched = false, marking = false;
       try {
-        await this.requireLegacyInventoryAbsent();
+        await this.requireStageStorage();
         const identity = structuredClone(await run(async () => {
           check(!dispatched && !marking, "dispatch intent already requested"); marking = true;
-          await this.requireLegacyInventoryAbsent();
+          await this.requireStageStorage();
           await append("start_dispatched"); dispatched = true;
         }));
         check(dispatched, "provider callback omitted dispatch intent");

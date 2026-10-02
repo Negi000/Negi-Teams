@@ -1,6 +1,6 @@
 # 会話切替と統括のライフサイクル
 
-2026-10-02。Material 3の会話切替を、実際の起動・終了状態に合わせる。Codexの新規会話を有効にした記録ではない。
+2026-10-03更新。Material 3の会話切替を、実際の起動・終了状態に合わせる。Codexの新規会話を有効にした記録ではない。
 
 ## 実装した範囲
 
@@ -39,6 +39,8 @@ Material 3の会話切替へ接続する前の基盤を追加した。現在の�
 | Codex「新しい会話」 | API・UIは引き続き拒否する。新規threadの実作成、初回threadの永続記録、再接続照会、表示境界の通知は未実装 |
 
 新しいMaster記録は、requestの担当IDや本文・日時などのbytesが変わると、別Masterとして読み飛ばさず保留する。旧記録は所有者を証明するbindingを持たないため、Astra/readでMasterのUUID形式を使った未解決記録を全Masterで保留する。通常のSol Taskは同じID形式を使えてもMasterとは分類しない。旧Astra/readの通常workが同じIDを使った場合の曖昧性は移行条件として残る。起動監査の前後でauthorityのディレクトリ・inventory・key・段階とscheduler/turn証拠を再確認し、検査中の変更も保留する。監査待ちのstop後にprocessをlaunchしない。
+
+2026-10-03の追加: server内部で`stageStorage: "indexed"`を明示登録した候補authorityは、`start`の各stageと`status`を独立索引へ接続した。段階intentをDBへcommitしてから原文fileを作り、ACK消失・欠落・改変は再実行せず照合待ちに保持する。production callerはこの登録をまだ使用せず、通常入力・provider起動・native owner解除の互換gateは保留を維持する。既定のlegacy登録を索引登録へ自動変更しない。詳細と検証は[索引接続の記録](negi-teams-master-conversation-inventory.md#2026-10-03-会話stage保存と状態照会の索引接続)を参照する。
 
 ### 候補writerを有効にする前の必須条件
 

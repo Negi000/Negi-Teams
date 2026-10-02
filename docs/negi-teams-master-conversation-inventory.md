@@ -1,6 +1,6 @@
 # Master会話の独立索引と明示移行候補
 
-NT-067/073の追加部品。`MasterConversationInventory`と固定Python helperに、既存stageと復旧receiptの明示移行、および署名済みDBのstandalone hot journalをSQLite自身でrollbackする明示復旧を追加した。通常読取や起動で自動移行・復旧しない。既存処理は独立DBが残る場合に未接続writerを保留する。索引intentを使う会話authority、起動検査、通常入力、provider RPC、新規復旧receiptの公開/解除、認証済み確認UIの全面接続は次の工程である。全73要件・Phase0–8のゴールは継続中。
+NT-067/073の追加部品。`MasterConversationInventory`と固定Python helperに、既存stageと復旧receiptの明示移行、および署名済みDBのstandalone hot journalをSQLite自身でrollbackする明示復旧を追加した。2026-10-03には、明示的なserver登録で会話authorityのstage保存と状態照会を索引へ接続した。通常読取や起動で自動移行・復旧しない。既存処理は独立DBが残る場合に未接続writerを保留する。起動検査、通常入力、provider RPC、新規復旧receiptの公開/解除、認証済み確認UIの全面接続は次の工程である。全73要件・Phase0–8のゴールは継続中。
 
 ## 保存するもの
 
@@ -199,3 +199,19 @@ DBの約1.5GB予算とjournalの予算を分ける。[journal形式](https://sql
 最終関連6 test filesは**171件中170成功・1スキップ・失敗/取消0（155,907.6142ms、actual exit0）**。OS条件の1スキップを含む。実SQLite 3.45.3のhot journal、2 Master/10署名stageのrollback、実process exitのintent/rollback/done前後、構成した途中page状態、別Master改変/欠落、stale proof/競合/入力固定、unknown/partial record、危険なpath、staged namespace公開途中のexit、アクセス拒否/invalid statを確認した。2/66 Masterでもcloneごとに全体検証2回、縮小したDB予算より大きい正常journal、実35秒遅延の書込み終了待ち、遅延previewのdeadline未設定/cleanupも確認した。最大容量/件数・実停電・native pager途中の強制停止を検証した意味ではない。
 
 独立read-onlyレビューで指摘された名前空間公開、journal予算、preview強制停止、Master別の反復全DB検証、曖昧な不在判定を修正した。途中11/11やfocused runsは別logで保持し、最終171件へ合算しない。Python AST、client/server型検査、buildが成功。新APIはtrusted-server候補であり、認証済み人間確認UI/HTTP、通常authority/provider起動、新規receipt intent/解除とowner baseline、turn/scheduler/初回thread、repair/保持/版移行は継続中。全73要件・Phase0–8とゴールはACTIVE。
+
+## 2026-10-03: 会話stage保存と状態照会の索引接続
+
+既存`MasterConversationAuthority.start/status`に、server内部の明示登録`stageStorage: "indexed"`を追加した。登録は固定root/Masterの既存索引だけを使い、missing root/guard/key/DBを作り直さない。既定はlegacyであり、productionのTaskService/Brain/UIはまだindexed登録を使用しない。通常turn予約・provider起動・native owner解除は既存の互換gateで引き続き保留する。
+
+1. Windows共通root guard内で既存署名DBとauthorityを照合し、要求・cwd・直接Node親の作成tokenへ束縛したowner/3をcreate-onlyでfsyncする。
+2. ownerの書込みhandleを閉じる。root guardは維持し、固定Python helperのWRITE共有を拒否するowner読取と両立させる。
+3. 各stageの原文を一度署名し、現在の署名headと正確なowner全文SHA-256を持つintentをDBへcommitする。最初のoperation directoryも、このACKを受け取った後にだけ作成する。
+4. 同じ原文をcreate-onlyでfileへfsyncし、再監査が`clean`であることを確認してから次へ進む。RPCを行う信頼されたcallbackは、直前の`markDispatched`の成功を待つ契約を維持する。
+5. 最後にも保存整合とowner identity/bytesを照合し、このlive ownerだけを除去する。不確かなACK・部分file・欠落はownerを保持し、新しいdispatch/append/取消の後付けを拒否する。
+
+`latestStage(requestId)`は全認証済みstageから要求を再構成し、末尾の固定path・原文・hashを返す。通常監査と同じ署名head/鎖/HMAC/遷移/原文検査とfilesystem二重走査を行う読み取り専用APIである。`status`はroot guard内でその結果を前後二度比較し、同じ鍵のHMACとownerを照合する。indexed intentが未materialize、末尾fileが消失、operation全体が消失した場合も要求と既知identityを失わず、`needs_reconciliation`と保持状態を返す。改変やauthority消失は保留し、未登録のUUIDだけを不存在と扱う。読取からfile復元・モデル再実行・owner解除は行わない。
+
+新規11件の単独試験は11成功・失敗/取消/skip0（120,924.8735ms、actual exit0）。5段階のDB先行順序、同一完了要求のcallback再実行0、ACK消失、末尾/operation削除、原文改変、受入baselineへの追記、dispatch前後の失敗、missing root/key/DB、owner全文差替え、実Node childのdispatch intent後exit27を確認した。実child終了後のstatusは要求とownerを保持し、native復旧の`canRelease`はfalseだった。合成identityと試験専用childを使い、実provider/model/Jevは0である。最終関連7 filesは**182件中181成功・OS条件1スキップ・失敗/取消0（172,789.2133ms、actual exit0）**。単独集合と合算しない。Python AST4、型検査、build成功。実行したchildは終了を待った。
+
+独立read-onlyレビューは今回の4実装/test filesに重大な具体的指摘なし。small fixtureの5段階保存と同一ID再照会の初回focused測定は14,886.1116msだったが、複数の全監査とhelper起動を含む試験時間であり、実RPC/UI latencyや大規模履歴の受入性能ではない。通常入力へこの完全走査を接続しない。参加writerのroot guard内に限る保証であり、旧binary/version fence、外部同権限processのABA、native receipt intent/解除/owner baseline、turn/scheduler、初回thread/戻りidentity/旧runtime静止、認証済み確認UI、保持/版移行/性能、実停電/UNC/Linux/実機の条件は継続する。Codex「新しい会話」は未有効化、全73要件・Phase0–8とゴールはACTIVE。
