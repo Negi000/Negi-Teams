@@ -3,6 +3,7 @@ import { taskNeedsAttention, taskStatusLabels, type TaskOverview, type ReviewOve
 import type { AgentRecord, MasterChatState } from "../shared/protocol.ts";
 import { stateLabel } from "./chatModel.ts";
 import { taskResultDeliveryLabel, taskResultUpdateLabel, type TaskResultSummary } from "../shared/taskResults.ts";
+import { taskOriginHref } from "../shared/conversations.ts";
 
 export class Workbench {
   private capabilities: { tasks: boolean; reviews: boolean; taskAuthoring?: boolean;projectSetup?:boolean } | null = null;
@@ -130,9 +131,16 @@ export class Workbench {
     this.text("wb-result-error", this.resultError ?? "");
     const resultList = this.node("wb-results"); resultList.replaceChildren();
     for (const result of this.results?.filter(n=>!n.supersededBy).slice(0, 8) ?? []) {
-      resultList.append(this.row(result.title, [result.project,taskResultUpdateLabel(result),taskResultDeliveryLabel(result)].join(" · "),
+      const group = document.createElement("div"); group.className = "md-result-group";
+      group.append(this.row(result.title, [result.project,taskResultUpdateLabel(result),taskResultDeliveryLabel(result)].join(" · "),
         `/tasks?run=${encodeURIComponent(result.runId)}`, "task", taskStatusLabels[result.status] ?? result.status,
         ["unknown", "dispatching", "prepared", "failed"].includes(result.delivery.state)));
+      if (result.origin.kind === "master") {
+        const source = document.createElement("a"); source.className = "md-button md-text";
+        source.href = taskOriginHref(result.runId); source.textContent = "委任元の会話";
+        source.setAttribute("aria-label", result.title + "の委任元の会話"); group.append(source);
+      }
+      resultList.append(group);
     }
     if (!resultList.children.length) this.empty(resultList, this.resultError ? "結果通知を確認できません" : this.capabilities && !this.capabilities.tasks ? "Taskが未設定です" : this.results ? "新しい結果通知はありません" : "結果通知を確認しています", "完了・停止・照合が必要なTaskの結果をここに表示します。");
     const attention = this.node("wb-attention"); attention.replaceChildren();

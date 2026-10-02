@@ -69,6 +69,8 @@ export const material3Styles = String.raw`
 .negi-ui .muted, .negi-ui small { color:var(--md-on-surface-variant); font-size:13px }
 .negi-ui pre, .negi-ui code { font:13px/1.7 ui-monospace,"Cascadia Code",monospace; overflow-wrap:anywhere }
 .negi-ui pre { margin:0; white-space:pre-wrap; min-width:0 }
+.negi-ui .md-conversation-text { overflow-wrap:anywhere; margin-top:16px; line-height:1.7 }
+.negi-ui .md-result-group > .md-button { margin-left:56px }
 .negi-ui summary { cursor:pointer; min-height:48px; padding:12px 4px; font-weight:650 }
 .negi-ui .md-icon { width:24px; height:24px; flex:none; fill:currentColor }
 .negi-ui .md-brand { display:flex; gap:12px; align-items:center; color:var(--md-on-surface); text-decoration:none }
@@ -215,6 +217,7 @@ export const material3Styles = String.raw`
   .negi-ui .md-key-values { grid-template-columns:1fr; gap:4px }
   .negi-ui .md-key-values dd { margin-bottom:12px }
   .negi-ui .md-actions { gap:10px }
+  .negi-ui .md-result-group > .md-button { margin-left:16px }
   .negi-ui .md-actions>* { flex:1 1 auto }
   .negi-ui .md-step { font-size:11px; padding:10px 3px }
   .negi-ui .md-step-number { font-size:18px }

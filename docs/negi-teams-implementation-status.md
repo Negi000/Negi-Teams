@@ -2,7 +2,7 @@
 
 2026-10-02（JST）。基準は `NEGI_TEAMS_MASTER_PLAN.ja.md` のPhase 0〜8と `REQUIREMENTS_TRACEABILITY.ja.md`。この表は実装・合成テスト・実モデル観測・人間受入を分ける。Git管理外の実行証拠も参照しており、実装差分の公開を全Phaseの完了宣言とは扱わない。
 
-最新の追加は[最初のプロジェクト設定](./negi-teams-project-setup.md)。Taskが0件の状態から設定を確認・署名保存し、通常サーバーの再起動と実ChatGPT認証で新規Task・統括チャットへ進めた。[実コードでの分解・統合・後続実行](./negi-teams-code-integration-qa.md)の証拠も保持する。以下の経緯と末尾の追加節は時系列の証拠であり、過去の失敗・残条件を後の成功へ合算しない。
+最新の追加は[元の会話の画面](./negi-teams-conversation-ui.md)。作成元と開始元を分け、Task・契約案・結果通知から特定turnの記録へ戻る。先行する[最初のプロジェクト設定](./negi-teams-project-setup.md)では、Taskが0件の状態から設定を確認・署名保存し、通常サーバーの再起動と実ChatGPT認証で新規Task・統括チャットへ進めた。[実コードでの分解・統合・後続実行](./negi-teams-code-integration-qa.md)の証拠も保持する。以下の経緯と末尾の追加節は時系列の証拠であり、過去の失敗・残条件を後の成功へ合算しない。
 
 追加の[統括から登録Taskへの接続](./negi-teams-master-task-tools.md)では、通常Codex Masterに固定Taskの一覧・完全な契約の読取・同一schedulerへの委任を接続した。起動元は人間受入と別に保存する。実Astraの読取確認と関連TS45件は成功した。Material 3の320px/375px表示と48px角の停止ボタンも確認した。全件の並列試験では知識連携の待ち時間超過、次の試験では旧PTY配送の時間依存による失敗を観測し、直列試験でもPTY待ちとGitの時間切れが出た。全件の成功を今回の確認結果としては主張しない。旧MCP/PTYと常駐統括の全面移行は引き続き未完了。
 
@@ -194,3 +194,10 @@ NT-003/009/016/018/064/073の進捗である。汎用の取消/手動照合GUI�
 最終の関連77件全成功、型検査・ビルド成功。Chromium1440×900/320×812/375×812、明暗両テーマ、幅一致/48px/下部ナビ非重複/contrast/reduced motion/キャンセル/切断/使用量と入力保持/承認と質問/画像modal/重なったdialogのEscを合成HTTP/WSで確認した。対象console error/warning/page error0、モデルturn/Jev0。初期QAの非表示通知待ちと、画像Tab循環の失敗を修正後の成功と別記録で保持した。画像と公開外fixtureの機械確認であり、実機や実モデル新規会話、人のUI/成果品質の受入ではない。今回の77件と以前の全件試験は合算しない。
 
 NT-067/073の追加進捗。新しいCodex会話・作成元会話リンク、汎用照合/取消/再開、旧経路の全契約/共通枠、実成果/競合/品質、Jev全gate/校正/上限、Knowledge/Policy/履歴/初回移行/実機など先行記録の残存条件を維持する。全73要件・Phase0–8を変更せず、全体ゴールはACTIVE。
+## 2026-10-02追加: Material 3の元の会話・作成元と委任元
+
+[元の会話の画面](negi-teams-conversation-ui.md)をTask詳細・契約案・統括の結果通知・作業一覧に接続した。開始要求のoriginと契約案のoriginを区別し、承認済みTaskの作成元は署名済みconfig/originを登録条件と照合する。固定保存先のMaster request/dispatch/provider/outcomeと同じscheduler entryを読み、特定turnの元の入力と既知の応答だけを表示する。ログイン後の指定会話/契約案への復帰、欠測・未知・破損時の表示保留、遅延応答の破棄、無効な履歴URLでの旧リンク消去を接続した。読み取りでは送信・Task開始・実行枠解放・成果受入を行わない。
+
+関連75/75（266019.5895ms）の後、日時修正を含む最終source/auth/Master admission試験49/49（15034.1519ms）、最終型検査・ビルド成功。両集合は重複する。ビルド済みUIを一時Git/Vault/Taskの合成runtimeへ接続し、Chromium1440/375/320px・両テーマ・48px・keyboard・reduced motion・入口往復・失敗と回復・古い非同期応答の破棄を確認した。準備時の合成Sol callback2回を除き、表示中の追加callback/送信0、実providerプロセス/model API/Jev0、読取中scheduler hash不変。最終予期しないconsole error/warning/page error0、明示503は別記録2件。初期テストとGUIのQA手順失敗は前記文書に区別して保持した。
+
+限定した読取経路の独立監査にblockerは残らなかった。全会話の復元、大規模履歴の索引/版移行（現行検索は10,000件上限）、外部書換え/ABA、実機safe-area/仮想キーボードと人の受入は未完了。Codex新規会話は既存の拒否を維持し、単一lifecycle・永続reset ID・active/unknown claim・process tree終了・thread/start不確定保持を一緒に実装する必要がある。先行記録のdirty初回採用/契約版移行、実Task broker終了とrescue・検証・review・Astra続行、汎用部分作成/unknown/手動orphanの照合・取消・再開、旧MCP/PTYの共通authorityと枠、実コード競合/人の品質受入、Jev7 gate/日本語校正/外部cap、知識の矛盾/寿命/派生失効/削除、Policyの利益計測/承認/rollback、履歴最新性、Linux/UNC/停電/混合版など全残条件を維持する。全73要件とPhase0〜8のゴールはACTIVE。

@@ -104,3 +104,9 @@ PCは場所・仕様と担当条件を二列に置き、スマホは縦の単一
 最終ソースの関連テスト77/77成功（505.8384ms）、型検査・ビルド成功。ビルド済みUIを合成Cookie認証付きHTTP/WS fixtureでChromium1440×900/375×812/320×812、ライト/ダークの両方へ接続した。本文と操作、横幅一致、48px、入力欄bottom724px < 下部ナビtop740px、reduced motion、キャンセル未送信、明示確定1回、結果未確認時の使用量/入力保持、Codex切替/切断で確認失効、拒否と質問回答、画像キー/focus、drawer内dialogのEsc順序、サーバ`cleared`後だけの表示リセットを確認した。承認本文contrast8.00以上、拒否5.31以上、許可hover6.52以上。最終対象console error/warning・page errorは0、providerプロセス/model turn/Jevは0。実モデルの新規会話、実機safe-area/仮想キーボード、人の使いやすさの受入を実施したという意味ではない。
 
 Browser plugin not availableのため既存Playwright CLIを利用。最初のfixtureのWindows ESM path指定、CLIの非ref click、非表示通知への待機はQA側の誤りとして別記録を保持した。初回の画像Tab循環試験は失敗し、focus循環を追加した後、チーム一覧の最終CSSも含めて全操作を再確認した。既存の全件回帰を今回の変更の全件成功に換算せず、スクリーンショット・fixture・ログは公開差分へ含めない。
+
+## 2026-10-02: 元の会話へ戻る
+
+[会話の記録画面](../negi-teams-conversation-ui.md)をTask・契約案・統括の結果通知・作業一覧へ接続した。tertiary surfaceに作成元/開始元と記録状態を置き、PCは送信と応答を並べ、スマホは縦に読む。元のturnとhashは詳細で展開し、現在の統括と元の記録を同じ会話として扱わない。browser開始、記録なし、応答待ち、照合が必要な状態を表示する。
+
+Chromium1440/375/320pxの両テーマ、48px、reduced motion、ログイン後の指定会話への復帰、各入口の往復、キーボード、長いtoken、旧応答の破棄、通信失敗の回復を確認した。最終の予期しないconsole/page errorは0。関連75/75と最終source/auth/Master試験49/49、型検査・ビルド成功。試験集合は重複する。provider/model送信を行った証拠ではなく、一時Git/Vaultと合成runtimeでの確認である。全会話復元・10,000件超の履歴索引・Codexの新しい会話・実機と人の受入は残る。

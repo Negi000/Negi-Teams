@@ -12,6 +12,7 @@
 
 import type { IncomingMessage } from "node:http";
 import { material3Styles, negiBrand } from "../shared/material3.ts";
+import { conversationTarget } from "../shared/conversations.ts";
 import { timingSafeEqual } from "node:crypto";
 
 /** 認証設定。token=null は「EBI_AUTH_TOKEN 未設定」を表す。 */
@@ -176,9 +177,32 @@ export function delay(ms: number): Promise<void> {
  * Vite のマルチページビルドに依存させず、本番 Node 配信・dev いずれでも同じものを返す。
  * トークンを入力→POST /login→サーバが Cookie をセット→ "/" へ遷移、の一枚。
  */
+export function loginReturnTo(returnTo: string): string {
+  if (["/reviews", "/tasks", "/knowledge", "/setup", "/task-plans", "/integrations"].includes(returnTo) ||
+      /^\/tasks\?run=[a-zA-Z0-9._-]{1,128}$/.test(returnTo)) return returnTo;
+  if (!returnTo.startsWith("/") || returnTo.startsWith("//") || returnTo.length > 4096) return "/";
+  try {
+    const url = new URL(returnTo, "http://negi.local");
+    if (url.hash || url.origin !== "http://negi.local") return "/";
+    if (url.pathname === "/conversations") {
+      const t = conversationTarget(url);
+      return "/conversations" + (t.draft ? "?draft=" + t.draft : "?run=" + t.run + "&source=" + t.source);
+    }
+    if (url.pathname === "/task-plans") {
+      const draft = url.searchParams.get("draft"), baseline = url.searchParams.get("baseline"), profile = url.searchParams.get("profile");
+      if ([...url.searchParams.keys()].some(key => !["draft", "baseline", "profile"].includes(key)) ||
+          ["draft", "baseline", "profile"].some(key => url.searchParams.getAll(key).length > 1) ||
+          (draft !== null && !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(draft)) ||
+          (baseline !== null && !/^base-[0-9a-f]{24}$/.test(baseline)) ||
+          (profile !== null && !/^[a-zA-Z0-9_-]{1,100}$/.test(profile)) || Boolean(baseline) !== Boolean(profile)) return "/";
+      return url.pathname + url.search;
+    }
+  } catch { /* invalid local destination */ }
+  return "/";
+}
+
 export function loginPageHtml(returnTo = "/"): string {
-  const destination = ["/reviews", "/tasks", "/knowledge", "/setup", "/task-plans", "/integrations"].includes(returnTo) ||
-    /^\/tasks\?run=[a-zA-Z0-9._-]{1,128}$/.test(returnTo) ? returnTo : "/";
+  const destination = loginReturnTo(returnTo);
   return `<!doctype html>
 <html lang="ja"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>ログイン · Negi-Teams</title><link rel="icon" type="image/svg+xml" href="/negi-icon.svg"><style>${material3Styles}
 html,body{min-height:100%;}.negi-ui{min-height:100svh;display:grid;place-items:center;padding:24px max(16px,env(safe-area-inset-right)) max(24px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left));}.login-panel{width:100%;max-width:440px}.login-brand{margin-bottom:40px}.login-panel h1{font-size:32px;margin-bottom:12px}.login-panel .md-surface{padding:32px}.login-panel label{margin-top:24px}.login-panel input{font-size:16px}.login-panel button{width:100%;margin-top:20px}.login-panel #e{min-height:24px;margin-top:14px}

@@ -7,6 +7,7 @@ import type {
 } from "../shared/protocol.ts";
 import { taskResultDeliveryLabels, taskResultUpdateLabel } from "../shared/taskResults.ts";
 import { taskStatusLabels } from "../shared/workspace.ts";
+import { taskOriginHref } from "../shared/conversations.ts";
 import {
   ChatTranscript,
   collectImages,
@@ -1148,6 +1149,10 @@ function buildItem(
       const actions = div("md-actions"), task = document.createElement("a");
       task.className = "md-button md-tonal"; task.href = "/tasks?run=" + encodeURIComponent(result.runId); task.textContent = "Taskを確認";
       actions.append(task);
+      if (result.origin.kind === "master") {
+        const source = document.createElement("a"); source.className = "md-button md-tonal";
+        source.href = taskOriginHref(result.runId); source.textContent = "委任元の会話"; actions.append(source);
+      }
       if (result.reviewId) {
         const review = document.createElement("a"); review.className = "md-button md-primary";
         review.href = "/reviews?case=" + encodeURIComponent(result.reviewId); review.textContent = "成果をレビュー"; actions.append(review);

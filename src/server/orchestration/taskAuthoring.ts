@@ -303,6 +303,25 @@ export class LocalTaskAuthoringService {
       return {...core,hash:sha(JSON.stringify(core))};
     });
   }
+  async conversationOrigin(draftId: string) {
+    const draft = (await this.drafts()).find(item => item.id === draftId);
+    if (!draft) throw new Error("Task draft origin not found");
+    return this.conversationOriginView(draft);
+  }
+  private conversationOriginView(draft: Draft) {
+    const { masterId, threadId, turnId, callId } = draft.origin;
+    return { draftId: draft.id, runId: `task-${draft.id}`, title: draft.fields.title,
+      origin: { kind: "master" as const, masterId, threadId, turnId, callId } };
+  }
+  async runConversationOrigin(runId: string) {
+    const draft = (await this.drafts()).find(item => `task-${item.id}` === runId);
+    if (!draft) return null;
+    const receipt = await this.approval(draft);
+    if (!receipt || receipt.data.origin !== JSON.stringify(draft.origin) ||
+        !isDeepStrictEqual(JSON.parse(receipt.data.config), this.tasks.authoringTemplate(runId).config))
+      throw new Error("Authored Task origin differs from the approved configuration");
+    return this.conversationOriginView(draft);
+  }
   private async drafts(): Promise<Draft[]> {
     const result: Draft[] = [], entries = await readdir(join(this.root,"drafts"));
     if (entries.length > 100) throw new Error("Task draft catalog limit reached");

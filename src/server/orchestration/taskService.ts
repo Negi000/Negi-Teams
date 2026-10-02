@@ -20,6 +20,8 @@ import { readTaskRevision, replayRevisionReview, revisionMatchesTask, taskManife
   taskRevisionHash, writeTaskRevisionPointer, type PinnedTaskRevision, type TaskRevisionJournal } from "./taskRevision.ts";
 import { TaskResultStore, TaskResultSourceChangedError, type TaskResultContext } from "./taskResults.ts";
 import type { TaskResultNotice, TaskResultSummary } from "../../shared/taskResults.ts";
+import type { MasterOrigin } from "../../shared/conversations.ts";
+import { readMasterTurnOrigin } from "./masterTurnRecords.ts";
 import { TaskExecutionOwner } from "./taskExecutionOwner.ts";
 import { LocalTaskReconciliation, type InspectTaskProvider, type TaskReconciliationView } from "./taskReconciliation.ts";
 
@@ -177,6 +179,13 @@ export class LocalTaskService {
     return new LocalTaskService(root, runs, scheduler, runtime, operationProofs, results,reconciliation);
   }
   list(): Array<{ id: string; title: string }> { return this.runs.map((run) => ({ id: run.config.runId, title: run.title })); }
+  async requestOrigin(id: string): Promise<TaskRequestOrigin | null> {
+    const request = await this.request(this.registered(id));
+    return request?.requestedBy ? checkedOrigin(request.requestedBy) : null;
+  }
+  originEvidence(origin: MasterOrigin) {
+    return readMasterTurnOrigin(join(this.root, "master-turns"), this.scheduler, origin);
+  }
   subscribeResults(listener: (results: TaskResultSummary[]) => void): void { this.resultListener = listener; }
   async resultNotifications(): Promise<TaskResultSummary[]> {
     await this.recoverResultNotifications();

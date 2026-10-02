@@ -68,6 +68,7 @@ import { LocalTaskService } from "./orchestration/taskService.ts";
 import { createTaskHttp } from "./orchestration/taskHttp.ts";
 import { LocalTaskAuthoringService } from "./orchestration/taskAuthoring.ts";
 import { createTaskAuthoringHttp } from "./orchestration/taskAuthoringHttp.ts";
+import { createConversationHttp } from "./orchestration/conversationHttp.ts";
 import { LocalIntegrationExecutionService } from "./orchestration/integrationExecution.ts";
 import { createIntegrationHttp } from "./orchestration/integrationHttp.ts";
 import { LocalProjectSetup } from "./orchestration/projectSetup.ts";
@@ -156,6 +157,7 @@ if(process.env.NEGI_TASK_AUTHORING_CONFIG){
   taskAuthoringService=await LocalTaskAuthoringService.open(JSON.parse(bytes.toString("utf8")),taskService);
 }else if(setupStartup&&taskService)taskAuthoringService=await LocalTaskAuthoringService.open(setupStartup.authoring,taskService);
 const taskAuthoringApi=createTaskAuthoringHttp(taskAuthoringService,authConfig);
+const conversationApi=createConversationHttp(taskService,taskAuthoringService,authConfig);
 const projectSetupApi=createProjectSetupHttp(projectSetup,authConfig,()=>({legacyConfigured:legacyProjectConfiguration,
   active:!!setupStartup&&setupModelsVerified&&!!taskAuthoringService&&!!masterSession&&masterSession.state!=="stopped"&&masterSession.state!=="starting",activationError:setupActivationError,bootHash:bootConfiguration?.hash}),projectConfiguration);
 const integrationConfigPath = process.env.NEGI_INTEGRATION_CONFIG;
@@ -885,6 +887,7 @@ const httpServer = createServer(async (req, res) => {
   if (await reviewApi(req, res, url)) return;
   if (await knowledgeApi(req, res, url)) return;
   if (await taskAuthoringApi(req, res, url)) return;
+  if (await conversationApi(req, res, url)) return;
   if (await integrationApi(req, res, url)) return;
   if (await taskApi(req, res, url)) return;
 

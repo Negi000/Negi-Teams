@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { parseCookie, tokenMatches, type AuthConfig } from "../auth.ts";
+import { loginReturnTo, parseCookie, tokenMatches, type AuthConfig } from "../auth.ts";
 import type { LocalTaskAuthoringService } from "./taskAuthoring.ts";
 import { taskPlanPageHtml } from "./taskPlanPage.ts";
 import { ConfigurationPendingError } from "./projectConfiguration.ts";
@@ -13,7 +13,7 @@ export function createTaskAuthoringHttp(service:LocalTaskAuthoringService|null,a
     if(!service||!auth.token){json(res,503,{error:"新しいTaskを作成するプロジェクトが設定されていません。"});return true}
     const cookie=parseCookie(req.headers.cookie,"ebi_auth");
     if(!cookie||!tokenMatches(cookie,auth.token)){
-      if(url.pathname==="/task-plans"&&req.method==="GET"){res.writeHead(302,{Location:"/login?returnTo=/task-plans","Cache-Control":"no-store"});res.end()}
+      if(url.pathname==="/task-plans"&&req.method==="GET"){res.writeHead(302,{Location:"/login?returnTo="+encodeURIComponent(loginReturnTo(url.pathname+url.search)),"Cache-Control":"no-store"});res.end()}
       else json(res,401,{error:"ログインしてから契約案を確認してください。"});return true;
     }
     if(url.pathname==="/task-plans"&&req.method==="GET"){
