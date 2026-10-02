@@ -225,3 +225,15 @@ NT-067/073の追加進捗。Codexの同じ常駐process内の空thread作成な�
 最終関連62/62成功（28769.3316ms）、別の会話表示12/12成功（14966.0021ms）、最終型検査・ビルド成功。実Node子processをintent保存後にexit23とし、段階とownerが残って自動再実行されないことを確認した。実Task登録経路とTaskService配線の回帰は一時Git/Vault・合成runtimeを使い、モデルturn/Jev0。画面改修や新しいGUI実証はなく、直前のMaterial 3 assetsと同じ。初期のpump待機とtimestamp fixtureの失敗を修正後の結果と区別して保存した。集合を合算せず、CIや実モデル切替・実機・人の受入成功を主張しない。
 
 NT-067/073の追加進捗。全73要件・Phase0–8と、先行記録の全残条件を変更せず、全体ゴールはACTIVE。
+
+## 2026-10-02追加: 会話候補ownerの停止後の明示復旧
+
+[限定した解除と有効化条件](negi-teams-conversation-lifecycle.md#2026-10-02追加-停止した候補ownerの明示照合と限定解除)。署名付きownerへ要求・処理種別・正規cwd hash・期待する証拠を結合し、読み取り専用previewと別UUID確認による正確なowner解除を候補APIへ追加した。入力受付は任意callbackを廃し、要求IDから先に固定したwork IDを内部の既存受付へ渡す。Windows nativeは終了済みの正確なhandleだけを削除し、その前に完全な署名付き復旧recordを上書きなしで保存する。部分staging・保存直後・解除直後の停止は同じ確認でのみ復旧できる。別ownerへの確認再利用、live/再利用PID、変更/部分/旧版/危険なfile、容量越境を拒否する。長いcwdは固定hashで束縛し、過去の確認照会はその後の正当な進捗で失効しない。
+
+入力受付で対象request/claimがある場合は終端でも解除対象外とし、別の照合を要求する。会話dispatch後のownerだけを解除しても、結果不明のjournalは残り、新規処理を開始できない。解除は取消・settle・実行枠解放・provider起動をしない。候補は本番RPC・UI・通常入力・認証済み利用者の承認経路へ未接続。Codex「新しい会話」は引き続き拒否し、今回の画面改修はない。
+
+独立レビューのLinuxのcheck/unlink間差替えを受け、Masterのnative解除は非Windowsで保留にした。Linuxの安全な協調writer/解除protocolは未実装で、既存他3種writerのLinux差替え条件も残る。署名付きinventory/別anchor・削除/末尾rollback検知、target付き入力の照合、初回基盤/初回thread、実同一process rotation、runtime静止・戻り値・共有排他、完了表示・再接続、保持/移行/500・1,000件性能、外部ABA/停電/UNC/混在版など先行条件を維持する。
+
+最終実装の関連73/73成功（48162.6215ms）、最後のOS別回帰を含む復旧31件は30成功/非Windows実OS1スキップ/失敗0（26681.658ms）。集合は重複し合算しない。最終型検査・ビルド成功。独立した限定再レビューでは修正した4経路にP1/P2指摘なし。一時filesystem・Node/Python process exit・合成provider identityであり、実モデルturn/provider RPC/Jev0、GUI/実機/人の成果品質/CI成功の証拠ではない。満杯検知のinventory名は合成であり、大規模実filesystem性能の検証ではない。client assetsは直前のMaterial 3 UIと同じ。
+
+以前の43/43・15/15・22/22・68/68の実行は後の修正を含まない記録として保持する。最終レビューの確認ID衝突、部分record、cwd束縛と、再レビューのLinux差替え・後の進捗後の照会・容量・長いcwdを修正または明示的に保留した。試験成功を全復旧や全要件の完成へ換算しない。NT-067/073の進捗であり、全73要件・Phase0–8と先行の全残条件を維持し、ゴールはACTIVE。

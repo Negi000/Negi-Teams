@@ -43,7 +43,7 @@ Material 3の会話切替へ接続する前の基盤を追加した。現在の�
 ### 候補writerを有効にする前の必須条件
 
 - 署名付きinventory/checkpointと増分検査、保持・移行の規則。段階単体の署名ではoperationディレクトリ全体の削除を検知できない。現行の完全走査は10,000件上限を持つ。独立監査では短い終端記録500件でも約8.5秒を要したため、通常入力へ使わない。起動監査も履歴件数に比例する。500/1,000件の性能検証は未完了。
-- ownerへ処理種別・要求・期待する証拠を束縛し、PID再利用・正確なファイル・journal・schedulerを照合する明示的な復旧。現行候補ownerはnonce/PIDのみで、crash後の安全な解除を提供しない。死んだPIDだけで解除・自動再試行しない。実子processの停止試験ではdispatch intentとownerを保持したまま起動を保留した。読み取り専用の本番起動検査自体はこのownerを作らない。
+- ownerへ処理種別・要求・期待する証拠を束縛し、PID再利用・正確なファイル・journal・schedulerを照合する明示的な復旧。この節の追加時点では候補ownerはnonce/PIDのみだった。後続の限定した復旧は次節に記す。死んだPIDだけで解除・自動再試行しない。読み取り専用の本番起動検査自体はこのownerを作らない。
 - 実App Serverの初回threadと切替を同じ永続authorityへ接続し、cwdを含む戻り値、現在のthread・設定、登録ツール・approval・server request・waiterの静止を照合する。通常入力と切替の排他を同時に有効化する。
 - 永続的な完了後だけ要求IDと新旧threadを含む表示境界を通知し、再接続で同じIDを照会する。shutdown/crash/transport喪失時のcontainment、部分marker・混在版・外部書換え/ABA・停電・Linux/UNC実filesystemの条件も残る。
 
@@ -58,6 +58,44 @@ Material 3の会話切替へ接続する前の基盤を追加した。現在の�
 独立監査の担当ID書換え、通常Taskのprefix/UUID衝突は回帰を追加して修正した。毎入力の全履歴走査とcrash owner復旧の指摘を受け、候補writerの本番入力/起動への接続を撤去した。これらの候補writerの課題を解決済みには扱わない。
 
 最後の限定再監査では追加のP1/P2指摘はなかった。監査側の30件再実行は親の62件と重複するため合算しない。別の全件実行は最終編集と重なり、最終ソースの全件完了主張へ使わない。
+
+## 2026-10-02追加: 停止した候補ownerの明示照合と限定解除
+
+Material 3の会話切替を公開する前の候補authorityへ、`ownerRecovery(cwd)`と`releaseOwner(cwd, decisionId, proofSha256)`を追加した。通常入力・本番RPC・UIには接続していない。表示用の起動検査は引き続き読み取り専用である。
+
+署名付きownerにMaster ID、処理種別、UUID要求、処理hash、正規cwdのhash、取得時点の会話・turn・scheduler証拠hashを束縛する。入力受付は任意callbackを受け取らず、要求IDから先に固定したwork IDで内部の既存受付だけを呼ぶ。previewは記録もnative guardも作らず、nativeで終了が確認できた正確なowner全文SHA-256、署名、期待する証拠を前後で照合する。live PID・再利用されたlive PID・終了不明・部分/旧版/変更されたowner・hardlinkは解除しない。
+
+| 停止地点 | 今回の扱い |
+| --- | --- |
+| 読取監査中、他のMaster証拠がすべて既知の終端 | 正確なownerだけを明示解除できる |
+| 入力受付前、対象turnディレクトリもscheduler entryも存在しない | 正規cwdと要求に束縛したownerだけを解除できる |
+| 入力受付の対象request/claimが一つでも存在する | cancelled/終端になっていても保留。対象全文hash・段階・schedulerと初回の基盤作成を含む別の照合が必要 |
+| 会話作成の署名済み要求と段階が残る | ownerだけを解除できる。dispatch後の結果不明はそのまま残り、新しい会話や入力を開始できない |
+| 会話作成の対象ディレクトリがない/部分/変更 | 保留。削除されたdispatchを不存在と見なして解除しない |
+
+解除は元の要求とは別のUUID確認IDを使う。確認IDの再利用を別ownerへ適用する前に拒否し、同じownerに別確認を重ねない。最大8KBの完全な署名付き復旧recordをメモリで検証してからnativeへ渡す。既存のOS排他内で固定`recoveries`へstagingを書き、完了recordを上書きなしで保存した後だけ、開いた正確なdead ownerを解除する。staging名はowner nonceと確認IDを含み、部分stagingを通常起動から除外しない。同じowner・同じ確認IDだけが再開でき、未完成bytesを完了recordとして採用しない。保存後・解除後に同じ確認IDを再読取してもモデル処理を実行しない。
+
+復旧recordには全文cwdを埋め込まず、署名済みownerと同じ正規cwdのSHA-256を保存する。長い有効なcwdでもrecordが上限を越えて復旧不能にならない。同じ保存済み確認IDは、その後に正当な別の処理が進んでも、過去の正確なrecordとowner不存在を照合して結果を返す。現在の実行枠を変更しない。記録上限10,000件では新しいrecordの枠をnative排他内でも予約し、上限を越える保存・owner解除を拒否する。既存の正確なfinal/pendingの再照合は上限内で継続できる。
+
+Windowsでは通常fileのhandleとlink数/サイズを確認してからstagingを書き、`FlushFileBuffers`後に`MoveFileExW`のWRITE_THROUGHを使い、REPLACE_EXISTINGやcopy fallbackは使わない（[FlushFileBuffers](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers)、[MoveFileExW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw)）。Linuxのpathname unlinkは、直前のinode/bytes照合後にも差替えられるため、Masterのnative解除をguard/record作成より前に拒否する。非Windowsのpreviewも解除可能を返さない。Linuxの協調writer・安全なquarantine/解除protocolは残る条件である。既存の他3種writerのLinux経路は今回変更しておらず、そのcheck/unlink間の差替え条件も未解決である。実Linux/UNC filesystemと停電の検証はなく、API呼出しやprocess exit試験から電源断耐性を主張しない。
+
+解除後に新しいownerが現れた場合は成功を返さず、そのownerを保持する。旧会話段階、実行枠、送信・終端証拠を取消・settle・修正せず、providerを起動しない。
+
+### 残る有効化条件
+
+この限定解除は全復旧の完成ではない。対象turnを作成した後のreconciliation、target全文hashとschedulerの固定、初回のturn root/設定作成が変えるbaseline、会話要求を作る前のthread owner crash、署名付きinventoryと別に耐久化したanchor、保持・移行・500/1,000件性能検証が残る。個々の復旧recordは署名と上書き防止を持つが、record削除や末尾rollbackを検知するinventoryはまだない。外部writer/ABA、部分marker、混在版、Linux/UNC/停電も未検証である。
+
+同じ常駐App Serverへの実初回thread/rotation、戻り値のcwd/model/provider/settings、登録ツール・approval・server request・waiterの静止、通常入力と切替の共有排他、完了後だけの表示境界、再接続で同じ要求IDの照会を一緒に接続する必要がある。UIへ接続する際は、認証済み利用者の明示意思とpreview証拠を確認する必要がある。候補APIへ渡したUUIDは実利用者の承認証明ではない。Codex「新しい会話」は引き続き拒否する。直前のMaterial 3 UIは保持し、今回新しい画面実証は行っていない。
+
+### 復旧の検証記録
+
+独立レビューで、別ownerへの確認ID再利用による重複record、最終名への部分書込、保存前のサイズ/自己検証、入力受付ownerとcwdの未束縛を指摘され、修正した。再レビューのLinux差替えはMaster解除の拒否へ変更し、後の進捗による同じ確認の照会失敗、記録上限の越境、長いcwdの復旧不能を修正した。対象turnがある場合の証拠不足は、今回は明示的に解除対象外として保留する。署名付きanchorと全復旧は解決済みに扱わない。
+
+一時filesystemとNode/Python子process、合成provider identityを使った試験である。実provider RPC・モデルturn・Jevは0。UI、実機、人の使いやすさ・成果品質、CI成功の証拠ではない。関連試験の最終件数・時間と限定レビュー結果は実装状況文書へ記録する。
+
+最終実装の関連73/73成功（48162.6215ms、exit0）。最後に追加した非Windows previewのOS別回帰を含む復旧31件は30成功・非Windows実OSを必要とする1スキップ・失敗0（26681.658ms、exit0）。両集合は重複し、合算しない。型検査・最終ビルド成功。client assetsは従来の`index-CvLJ6iRB.css`/`index-C-cjKz75.js`のままである。独立した限定再レビューでは修正した4経路にP1/P2指摘が残らず、後続の正当な進捗後の同じ確認照会も別fixtureで再確認した。
+
+Windowsの実一時filesystemで、live/PID再利用、別owner/別確認、署名/部分/旧版/変更、hardlink、実processの部分書込・保存後・解除後exit、並行解除、後から現れるowner、8KBを越えるUTF8 cwdを確認した。容量の9,999/10,000/10,001境界とnative排他内の満杯検知は合成inventory名を使い、10,000件の実filesystem走査や性能を検証したものではない。Linuxのnative拒否分岐はWindows上から直接呼出し、guard/receipt/ownerの不変を確認した。非Windows authorityの実OS試験は前記1スキップであり、Linux動作を実証したとは扱わない。
 
 ## 検証
 

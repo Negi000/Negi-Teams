@@ -50,13 +50,13 @@ test("lost thread/start response holds same request, different requests and turn
  const status=await f.reopen().status(f.request.requestId);assert.equal(status?.stage,"needs_reconciliation");assert.equal(status?.exclusionHeld,false);
  let calls=0;assert.equal((await f.reopen().start(f.request,async()=>{calls++;return identity;})).stage,"needs_reconciliation");assert.equal(calls,0);
  await assert.rejects(f.reopen().start({...f.request,requestId:randomUUID()},async()=>identity),MasterConversationHeldError);
- await assert.rejects(f.reopen().admitTurn(f.cwd,async()=>{calls++;}),MasterConversationHeldError);assert.equal(calls,0);
+ await assert.rejects(f.reopen().admitTurn({...turnRequest(f.cwd),requestId:randomUUID()}),MasterConversationHeldError);assert.equal(calls,0);
 }));
 
 test("per-Master exclusion prevents duplicate reset and reservation during a dispatched callback",async()=>fixture(async f=>{
  let release!:()=>void;const held=new Promise<void>(resolve=>{release=resolve;});let started!:()=>void;const ready=new Promise<void>(resolve=>{started=resolve;});
  const pending=f.authority.start(f.request,async mark=>{await mark();started();await held;return identity;});await ready;
- try { assert.equal((await f.reopen().status(f.request.requestId))?.exclusionHeld,true);await assert.rejects(f.reopen().admitTurn(f.cwd,async()=>{}),MasterConversationHeldError);await assert.rejects(f.reopen().start({...f.request,requestId:randomUUID()},async()=>identity),MasterConversationHeldError); }
+ try { assert.equal((await f.reopen().status(f.request.requestId))?.exclusionHeld,true);await assert.rejects(f.reopen().admitTurn({...turnRequest(f.cwd),requestId:randomUUID()}),MasterConversationHeldError);await assert.rejects(f.reopen().start({...f.request,requestId:randomUUID()},async()=>identity),MasterConversationHeldError); }
  finally {release();await pending;}
 }));
 
@@ -85,10 +85,10 @@ test("hardlinked stage and redirected authority directory are held",async()=>fix
 }));
 
 test("unknown and active Master claims cannot be bypassed with spare planner capacity or different thread",async()=>fixture(async f=>{
- await f.scheduler.ensureSubscriptionConfiguration({maxConcurrent:4,planners:2,workers:2});const admission=scheduledMasterTurns({root:f.turnRoot,masterId:"master",scheduler:f.scheduler});
- const lease=await f.authority.admitTurn(f.cwd,()=>admission.reserve(turnRequest(f.cwd)));await assert.rejects(f.reopen().assertIdle(f.cwd),MasterConversationHeldError);
+ await f.scheduler.ensureSubscriptionConfiguration({maxConcurrent:4,planners:2,workers:2});
+ const lease=await f.authority.admitTurn({...turnRequest(f.cwd),requestId:randomUUID()});await assert.rejects(f.reopen().assertIdle(f.cwd),MasterConversationHeldError);
  await lease.dispatching();await lease.unknown("lost result");const before=await f.scheduler.read();
- await assert.rejects(f.reopen().start(f.request,async()=>identity),MasterConversationHeldError);await assert.rejects(f.reopen().admitTurn(f.cwd,()=>admission.reserve({...turnRequest(f.cwd),threadId:"new-thread"})),MasterConversationHeldError);assert.deepEqual(await f.scheduler.read(),before);
+ await assert.rejects(f.reopen().start(f.request,async()=>identity),MasterConversationHeldError);await assert.rejects(f.reopen().admitTurn({...turnRequest(f.cwd),requestId:randomUUID(),threadId:"new-thread"}),MasterConversationHeldError);assert.deepEqual(await f.scheduler.read(),before);
 }));
 
 test("only exact terminal/cancelled/unsent evidence permits next admission",async()=>fixture(async f=>{
@@ -173,12 +173,12 @@ test("stop during asynchronous startup admission cannot launch after guard retur
 test("changed lock owner is retained rather than deleting another owner's path",async()=>fixture(async f=>{
  const owner=join(f.root,"masters","master","owner.lock");
  await assert.rejects(f.authority.start(f.request,async mark=>{await mark();await writeFile(owner,JSON.stringify({schemaVersion:"negi-master-conversation-owner/1",nonce:randomUUID(),pid:process.pid})+"\n");return identity;}),/owner lock replaced/);
- assert.equal((await f.reopen().status(f.request.requestId))?.exclusionHeld,true);await assert.rejects(f.reopen().admitTurn(f.cwd,async()=>{}),MasterConversationHeldError);assert.ok(await readFile(owner,"utf8"));
+ await assert.rejects(f.reopen().status(f.request.requestId),MasterConversationHeldError);await assert.rejects(f.reopen().admitTurn({...turnRequest(f.cwd),requestId:randomUUID()}),MasterConversationHeldError);assert.ok(await readFile(owner,"utf8"));
 }));
 
 test("editing canonical Master owner cannot bypass unknown startup or admission",async()=>fixture(async f=>{
  await f.scheduler.ensureSubscriptionConfiguration({maxConcurrent:4,planners:2,workers:2});const lease=await scheduledMasterTurns({root:f.turnRoot,masterId:"master",scheduler:f.scheduler}).reserve(turnRequest(f.cwd));await lease.dispatching();await lease.unknown("lost");
- const path=join(f.turnRoot,lease.workId,"request.json"),request=JSON.parse(await readFile(path,"utf8"));request.masterId="another-master";await writeFile(path,JSON.stringify(request)+"\n");const before=await f.scheduler.read();await assert.rejects(f.reopen().assertIdle(f.cwd),MasterConversationHeldError);await assert.rejects(f.reopen().admitTurn(f.cwd,async()=>{}),MasterConversationHeldError);assert.deepEqual(await f.scheduler.read(),before);
+ const path=join(f.turnRoot,lease.workId,"request.json"),request=JSON.parse(await readFile(path,"utf8"));request.masterId="another-master";await writeFile(path,JSON.stringify(request)+"\n");const before=await f.scheduler.read();await assert.rejects(f.reopen().assertIdle(f.cwd),MasterConversationHeldError);await assert.rejects(f.reopen().admitTurn({...turnRequest(f.cwd),requestId:randomUUID()}),MasterConversationHeldError);assert.deepEqual(await f.scheduler.read(),before);
 }));
 
 test("unresolved legacy owner is held globally; known terminal legacy evidence remains readable",async()=>fixture(async f=>{
@@ -192,7 +192,7 @@ test("ordinary registered Task prefix is not classified as a resident Master",as
 
 test("bound ownership permits independent Masters while preserving another unknown claim",async()=>fixture(async f=>{
  await f.scheduler.ensureSubscriptionConfiguration({maxConcurrent:4,planners:2,workers:2});const other=await scheduledMasterTurns({root:f.turnRoot,masterId:"another-master",scheduler:f.scheduler}).reserve(turnRequest(f.cwd));await other.dispatching();await other.unknown("another owned Master remains unknown");await f.authority.assertIdle(f.cwd);
- const current=await f.authority.admitTurn(f.cwd,()=>scheduledMasterTurns({root:f.turnRoot,masterId:"master",scheduler:f.scheduler}).reserve({...turnRequest(f.cwd),threadId:"current"}));assert.equal((await f.scheduler.read()).state?.entries.find(e=>e.work.id===other.workId)?.status,"needs_reconciliation");await current.cancelBeforeDispatch();await f.authority.assertIdle(f.cwd);
+ const current=await f.authority.admitTurn({...turnRequest(f.cwd),requestId:randomUUID(),threadId:"current"});assert.equal((await f.scheduler.read()).state?.entries.find(e=>e.work.id===other.workId)?.status,"needs_reconciliation");await current.cancelBeforeDispatch();await f.authority.assertIdle(f.cwd);
 }));
 
 test("scheduler rejects forged Master bindings on ordinary work",async()=>fixture(async f=>{

@@ -1,5 +1,5 @@
 // Candidate server-owned empty-thread transactions; production uses only the read-only startup audit.
-// The writer is not connected to provider RPC/UI until inventory, performance and owner recovery gates pass.
+// The writer is not connected to provider RPC/UI until inventory, performance and full reconciliation gates pass.
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { lstat, mkdir, open, readdir, realpath, unlink } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -8,6 +8,9 @@ import type { CodexThreadIdentity } from "../master/appServerClient.ts";
 import { assertMasterIdleEvidence } from "./masterIdleEvidence.ts";
 import { readMasterTurnArtifact as artifact, verifyMasterTurnDirectory as directory } from "./masterTurnRecords.ts";
 import type { FileScheduler } from "./scheduler.ts";
+import { masterOwnerAuxiliary, masterOwnerEvidence, signedMasterOwner, validatedMasterOwner, type MasterOwnerKind, type MasterOwner } from "./masterConversationOwner.ts";
+import { observeWriter, recoverWriter, type WriterOperation } from "./writerRecovery.ts";
+import { scheduledMasterTurns, type MasterTurnRequest, type MasterTurnLease } from "./masterTurnAdmission.ts";
 
 type Stage = "requested" | "old_idle" | "start_dispatched" | "bound" | "completed" | "cancelled" | "needs_reconciliation";
 export interface MasterConversationRequest {
@@ -23,6 +26,14 @@ export interface MasterConversationResult {
   request: MasterConversationRequest; stage: Stage; identity: CodexThreadIdentity | null; reason: string | null;
 }
 export interface MasterConversationStatus extends MasterConversationResult { exclusionHeld: boolean }
+export interface MasterOwnerRecoveryPreview {
+  ownerId:string; requestId:string; kind:MasterOwnerKind; ownerState:"live"|"dead"|"unknown";
+  ownerSha256:string; proofSha256:string; canRelease:boolean; reason:string|null;
+}
+interface RecoveryPayload {
+  schemaVersion:"negi-master-owner-recovery/1"; masterId:string; decisionId:string; cwdSha256:string;
+  owner:MasterOwner; proofSha256:string; action:"release-owner-only"; at:string;
+}
 interface Operation { path: string; records: RecordPayload[]; bytes: string[] }
 export class MasterConversationHeldError extends Error {
   constructor(message = "統括の会話または実行記録の照合が必要です。新しい処理は開始していません。") {
@@ -61,7 +72,7 @@ function nextStage(previous: Stage | null, next: Stage) {
 
 export class MasterConversationAuthority {
   private readonly root: string;
-  constructor(private readonly options: { root: string; turnRoot: string; masterId: string; scheduler: FileScheduler }) {
+  constructor(private readonly options: { root: string; turnRoot: string; masterId: string; scheduler: FileScheduler; onReleased?: () => Promise<void> }) {
     check(isAbsolute(options.root) && isAbsolute(options.turnRoot) && /^[a-zA-Z0-9_-]{1,100}$/.test(options.masterId), "server registration invalid");
     this.root = resolve(options.root);
   }
@@ -87,17 +98,25 @@ export class MasterConversationAuthority {
     return { master, key: Buffer.from(key.value.key, "hex"), keyBytes: key.bytes, canonicalCwd };
   }
 
-  private async withLock<T>(cwd: string, run: (state: Awaited<ReturnType<MasterConversationAuthority["prepare"]>>) => Promise<T>): Promise<T> {
+  private async withLock<T>(cwd: string, run: (state: Awaited<ReturnType<MasterConversationAuthority["prepare"]>>) => Promise<T>,
+      target?: { kind: MasterOwnerKind; operation: WriterOperation }): Promise<T> {
     let state;
     try { state = await this.prepare(cwd); } catch { throw new MasterConversationHeldError(); }
     const path = join(state.master, "owner.lock");
-    const bytes = JSON.stringify({ schemaVersion: "negi-master-conversation-owner/1", nonce: randomUUID(), pid: process.pid }) + "\n";
+    const kind = target?.kind ?? "inspection";
+    const operation: WriterOperation = target?.operation ?? { domain:"master-conversation", requestId:randomUUID(), hash:hash(JSON.stringify({masterId:this.options.masterId,cwd:state.canonicalCwd,kind})) };
+    const evidenceOptions = { ...this.options, root:this.root, master:state.master };
+    let evidenceSha256:string;
+    try{evidenceSha256 = await masterOwnerEvidence(evidenceOptions,kind,operation.requestId);}catch{throw new MasterConversationHeldError();}
+    const bytes = signedMasterOwner({ schema:"negi-master-conversation-owner/2", owner:randomUUID(), pid:process.pid,
+      createdAt:new Date().toISOString(), masterId:this.options.masterId, kind, cwdSha256:hash(state.canonicalCwd), operation, evidenceSha256 },state.key);
     let file;
     try { file = await open(path, "wx", 0o600); }
     catch { throw new MasterConversationHeldError("会話の変更または実行受付が進行中か、所有者の照合が必要です。自動では再試行しません。"); }
     const pinned = await file.stat();
     try {
       await file.writeFile(bytes, "utf8"); await file.sync();
+      check(evidenceSha256 === await masterOwnerEvidence(evidenceOptions,kind,operation.requestId), "evidence changed before owner admission");
       return await run(state);
     } finally {
       try {
@@ -139,13 +158,153 @@ export class MasterConversationAuthority {
     return operation;
   }
 
-  private async operations(master: string, key: Buffer) {
-    const identity = await directory(master), names = (await readdir(master)).filter(name => name !== "owner.lock").sort();
+  private async operations(master: string, key: Buffer, pendingOwner?:string) {
+    await this.recoveryDecisions(master,key,pendingOwner);
+    const nativeGuard = await lstat(join(master,"owner-recovery-flock-v2.lock")).catch(error=>{
+      if((error as NodeJS.ErrnoException).code!=="ENOENT")throw error;return null;
+    });
+    if(nativeGuard)check(nativeGuard.isFile()&&!nativeGuard.isSymbolicLink()&&nativeGuard.nlink===1&&nativeGuard.size===0,"native guard invalid");
+    const identity = await directory(master), names = (await readdir(master)).filter(name => !masterOwnerAuxiliary.includes(name)).sort();
     check(names.length <= 10_000 && names.every(name => uuid.test(name)), "unexpected Master conversation entry");
     const operations: Operation[] = [];
     for (const name of names) operations.push(await this.readOperation(join(master, name), key));
-    check(identity === await directory(master) && isDeepStrictEqual(names, (await readdir(master)).filter(name => name !== "owner.lock").sort()), "Master conversation inventory changed");
+    check(identity === await directory(master) && isDeepStrictEqual(names, (await readdir(master)).filter(name => !masterOwnerAuxiliary.includes(name)).sort()), "Master conversation inventory changed");
     return operations;
+  }
+
+  private validateRecoveryRecord(value:Record<string,unknown>,name:string,key:Buffer) {
+    const payload=value.payload as RecoveryPayload,signature=value.signature;
+    check(Object.keys(value).length===2&&payload&&!Array.isArray(payload)&&Object.keys(payload).length===8&&payload.schemaVersion==="negi-master-owner-recovery/1"&&
+      payload.masterId===this.options.masterId&&typeof payload.decisionId==="string"&&uuid.test(payload.decisionId)&&typeof payload.cwdSha256==="string"&&/^[0-9a-f]{64}$/.test(payload.cwdSha256)&&
+      typeof payload.proofSha256==="string"&&/^[0-9a-f]{64}$/.test(payload.proofSha256)&&payload.action==="release-owner-only"&&
+      typeof payload.at==="string"&&Number.isFinite(Date.parse(payload.at))&&typeof signature==="string"&&/^[0-9a-f]{64}$/.test(signature),"recovery shape");
+    validatedMasterOwner(payload.owner as unknown as Record<string,unknown>,this.options.masterId,key);
+    check(payload.owner.cwdSha256===payload.cwdSha256&&name===payload.owner.owner+".json"&&
+      timingSafeEqual(createHmac("sha256",key).update(JSON.stringify(payload)).digest(),Buffer.from(signature,"hex")),"recovery signature/owner mismatch");
+    return payload;
+  }
+
+  private async recoveryDecisions(master:string,key:Buffer,pendingOwner?:string) {
+    const root=join(master,"recoveries");
+    try {await directory(root);}catch(error){if((error as NodeJS.ErrnoException).code==="ENOENT")return [];throw error;}
+    const identity=await directory(root),names=(await readdir(root)).sort(),rows:Array<{payload:RecoveryPayload;bytes:string}>=[];
+    check(names.length<=10_000,"recovery inventory limit");
+    for(const name of names){
+      const pending=/^\.pending-([0-9a-f-]{36})-([0-9a-f-]{36})\.json$/.exec(name);
+      if(pending){
+        check(pendingOwner===pending[1]&&uuid.test(pending[1]!)&&uuid.test(pending[2]!),"pending recovery requires its exact owner");
+        const info=await lstat(join(root,name));check(info.isFile()&&!info.isSymbolicLink()&&info.nlink===1&&info.size<=8000,"unsafe pending recovery");
+        continue; // Never treat incomplete staging bytes as an accepted decision.
+      }
+      check(/^[0-9a-f-]{36}\.json$/.test(name),"unexpected recovery entry");
+      const record=await artifact(join(root,name),8000);check(record,"recovery record missing");
+      const payload=this.validateRecoveryRecord(record.value,name,key);
+      check(!rows.some(row=>row.payload.decisionId===payload.decisionId),"duplicate recovery decision");rows.push({payload,bytes:record.bytes});
+    }
+    check(identity===await directory(root)&&isDeepStrictEqual(names,(await readdir(root)).sort()),"recovery inventory changed");
+    for(const row of rows)check((await artifact(join(root,row.payload.owner.owner+".json"),8000))?.bytes===row.bytes,"recovery decision changed");
+    return rows;
+  }
+
+  private async recoveryState(cwd:string) {
+    const canonicalCwd=await realpath(resolve(cwd));
+    check(!inside(canonicalCwd,this.root)&&!inside(canonicalCwd,this.options.turnRoot)&&!inside(canonicalCwd,this.options.scheduler.path),"recovery state inside checkout");
+    try {await directory(this.root);}catch(error){if((error as NodeJS.ErrnoException).code==="ENOENT")return null;throw error;}
+    check(isDeepStrictEqual((await readdir(this.root)).sort(),["masters","signing-key.json"]),"recovery authority entries invalid");
+    const keyRecord=await artifact(join(this.root,"signing-key.json"),1000);
+    check(keyRecord&&Object.keys(keyRecord.value).length===2&&keyRecord.value.schemaVersion==="negi-master-conversation-key/1"&&
+      typeof keyRecord.value.key==="string"&&/^[0-9a-f]{64}$/.test(keyRecord.value.key),"recovery key invalid");
+    await directory(join(this.root,"masters"));const master=join(this.root,"masters",this.options.masterId);
+    try {await directory(master);}catch(error){if((error as NodeJS.ErrnoException).code==="ENOENT")return null;throw error;}
+    return {canonicalCwd,master,key:Buffer.from(keyRecord.value.key,"hex"),keyBytes:keyRecord.bytes};
+  }
+
+  private async ownerRecoveryEvidence(state:NonNullable<Awaited<ReturnType<MasterConversationAuthority["recoveryState"]>>>,owner:MasterOwner) {
+    check(owner.cwdSha256===hash(state.canonicalCwd),"owner checkout changed");
+    const operations=await this.operations(state.master,state.key,owner.owner),target=operations.find(op=>op.records[0]!.request.requestId===owner.operation.requestId);
+    check(operations.every(op=>op===target||["completed","cancelled"].includes(op.records.at(-1)!.stage)),"another conversation requires reconciliation");
+    if(owner.kind==="thread-start")check(target&&hash(JSON.stringify(target.records[0]!.request)+"\n")===owner.operation.hash&&
+      target.records[0]!.request.cwd===state.canonicalCwd,"recovery target request missing/changed");
+    if(owner.kind==="inspection")check(owner.operation.hash===hash(JSON.stringify({masterId:this.options.masterId,cwd:state.canonicalCwd,kind:owner.kind})),"inspection conditions changed");
+    if(owner.kind==="turn-admission"){
+      // This release handles only an admission stopped before any request/claim.
+      // Existing target records need their own durable reconciliation first.
+      const targetWork="master-"+owner.operation.requestId;
+      try{await lstat(join(this.options.turnRoot,targetWork));throw Error("admission target exists; preserve owner");}
+      catch(error){if((error as NodeJS.ErrnoException).code!=="ENOENT")throw error;}
+      check(!(await this.options.scheduler.read()).state?.entries.some(entry=>entry.work.id===targetWork),"admission claim exists; preserve owner");
+    }
+    await assertMasterIdleEvidence(this.options.turnRoot,this.options.masterId,this.options.scheduler);
+    const evidenceSha256=await masterOwnerEvidence({...this.options,root:this.root,master:state.master},owner.kind,owner.operation.requestId);
+    check(evidenceSha256===owner.evidenceSha256,"owner baseline changed; preserve hold");
+    check((await artifact(join(this.root,"signing-key.json"),1000))?.bytes===state.keyBytes,"recovery key changed");
+    const proofSha256=hash(JSON.stringify({masterId:this.options.masterId,cwd:state.canonicalCwd,keyBytes:state.keyBytes,
+      ownerBytes:JSON.stringify(owner)+"\n",ownerState:"dead",operations:operations.map(op=>op.bytes),evidenceSha256}));
+    return {operations,evidenceSha256,proofSha256};
+  }
+
+  /** Read-only preview. No native guard, key, decision, owner or provider is created. */
+  async ownerRecovery(cwd:string):Promise<MasterOwnerRecoveryPreview|null> {
+    try{
+      const state=await this.recoveryState(cwd);if(!state)return null;
+      const record=await artifact(join(state.master,"owner.lock"),2000);if(!record)return null;
+      const owner=validatedMasterOwner(record.value,this.options.masterId,state.key),before=await this.ownerRecoveryEvidence(state,owner);
+      const observed=await observeWriter(state.master,"master");
+      check(observed.sha256===hash(record.bytes)&&observed.operation&&isDeepStrictEqual(observed.operation,owner.operation)&&!observed.legacyGuard,"native owner observation changed");
+      const after=await this.ownerRecoveryEvidence(state,owner);
+      check(before.proofSha256===after.proofSha256&&(await artifact(join(state.master,"owner.lock"),2000))?.bytes===record.bytes,"owner evidence changed during preview");
+      const ownerState=observed.state==="dead"?"dead":observed.state==="live"?"live":"unknown";
+      const supported=process.platform==="win32";
+      return {ownerId:owner.owner,requestId:owner.operation.requestId,kind:owner.kind,ownerState,ownerSha256:hash(record.bytes),
+        proofSha256:before.proofSha256,canRelease:ownerState==="dead"&&supported,
+        reason:ownerState!=="dead"?"所有者の終了を確認できません。所有記録を保持しています。":supported?null:"このOSでは正確な所有記録の解除を保証できません。所有記録を保持しています。"};
+    }catch{throw new MasterConversationHeldError();}
+  }
+
+  /** Explicit exact-owner cleanup. Repeating the same decision never executes a model operation. */
+  async releaseOwner(cwd:string,decisionId:string,expectedProofSha256:string):Promise<{decisionId:string;requestId:string;ownerReleased:true;operationComplete:false}> {
+    check(uuid.test(decisionId)&&/^[0-9a-f]{64}$/.test(expectedProofSha256),"recovery decision invalid");
+    try{
+      const state=await this.recoveryState(cwd);check(state,"recovery authority absent");
+      let record=await artifact(join(state.master,"owner.lock"),2000);
+      const owner=record?validatedMasterOwner(record.value,this.options.masterId,state.key):null;
+      const decisions=await this.recoveryDecisions(state.master,state.key,owner?.owner),existing=decisions.find(row=>row.payload.decisionId===decisionId);
+      if(!record){
+        check(existing&&existing.payload.cwdSha256===hash(state.canonicalCwd)&&existing.payload.proofSha256===expectedProofSha256,"absent owner has no matching decision");
+        // The receipt describes this past exact owner. Later legitimate work
+        // must not turn a lost response into a new recovery/model operation.
+        check((await artifact(join(state.master,"recoveries",existing.payload.owner.owner+".json"),8000))?.bytes===existing.bytes&&
+          (await artifact(join(this.root,"signing-key.json"),1000))?.bytes===state.keyBytes,"saved decision changed");
+        check(await artifact(join(state.master,"owner.lock"),2000)===null,"a new owner appeared");
+        return {decisionId,requestId:existing.payload.owner.operation.requestId,ownerReleased:true,operationComplete:false};
+      }
+      check(owner,"owner absent");const preview=await this.ownerRecovery(cwd);
+      check(preview?.canRelease&&preview.proofSha256===expectedProofSha256&&preview.ownerSha256===hash(record.bytes),"owner recovery preview is stale or live");
+      const target=decisions.find(row=>row.payload.owner.owner===owner.owner);
+      check(!existing||existing===target,"decision already belongs to another owner");
+      check(!target||target.payload.decisionId===decisionId,"another decision already owns this recovery");
+      check(target||decisions.length<10_000,"no capacity for a new recovery decision");
+      const root=join(state.master,"recoveries");
+      const pendingNames=await readdir(root).catch(error=>{if((error as NodeJS.ErrnoException).code!=="ENOENT")throw error;return [];});
+      check(pendingNames.every(name=>!name.startsWith(".pending-")||name===`.pending-${owner.owner}-${decisionId}.json`),"another pending decision owns recovery");
+      const path=join(root,owner.owner+".json");
+      let receiptBytes=target?.bytes;
+      if(!target){
+        const payload:RecoveryPayload={schemaVersion:"negi-master-owner-recovery/1",masterId:this.options.masterId,decisionId,cwdSha256:hash(state.canonicalCwd),
+          owner,proofSha256:expectedProofSha256,action:"release-owner-only",at:new Date().toISOString()};
+        receiptBytes=JSON.stringify({payload,signature:createHmac("sha256",state.key).update(JSON.stringify(payload)).digest("hex")})+"\n";
+      }
+      check(receiptBytes&&Buffer.byteLength(receiptBytes)<=8000,"recovery receipt exceeds boundary");
+      const payload=this.validateRecoveryRecord(JSON.parse(receiptBytes),owner.owner+".json",state.key);
+      check(payload.decisionId===decisionId&&payload.cwdSha256===hash(state.canonicalCwd)&&payload.proofSha256===expectedProofSha256&&
+        isDeepStrictEqual(payload.owner,owner),"recovery decision changed");
+      check((await this.ownerRecovery(cwd))?.proofSha256===expectedProofSha256,"evidence changed before native owner release");
+      await recoverWriter(state.master,"master",owner.operation,hash(record.bytes),receiptBytes);
+      check(await artifact(join(state.master,"owner.lock"),2000)===null,"owner was replaced after native release");
+      check((await artifact(path,8000))?.bytes===receiptBytes&&(await this.ownerRecoveryEvidence(state,owner)).proofSha256===expectedProofSha256,"recovery evidence changed after native release");
+      check(await artifact(join(state.master,"owner.lock"),2000)===null,"new owner appeared after recovery");
+      return {decisionId,requestId:owner.operation.requestId,ownerReleased:true,operationComplete:false};
+    }catch{throw new MasterConversationHeldError();}
   }
   private async idle(state: Awaited<ReturnType<MasterConversationAuthority["prepare"]>>) {
     const operations = await this.operations(state.master, state.key);
@@ -160,8 +319,15 @@ export class MasterConversationAuthority {
     await this.withLock(cwd, async state => { try { await this.idle(state); } catch { throw new MasterConversationHeldError(); } });
   }
   /** Turn reservation and empty-thread rotation use this same per-Master lock. */
-  async admitTurn<T>(cwd: string, reserve: () => Promise<T>): Promise<T> {
-    return this.withLock(cwd, async state => { try { await this.idle(state); } catch { throw new MasterConversationHeldError(); } return reserve(); });
+  async admitTurn(raw: MasterTurnRequest & {requestId:string}): Promise<MasterTurnLease> {
+    check(uuid.test(raw.requestId), "admission request invalid");
+    const cwd=await realpath(resolve(raw.cwd)),request={cwd,model:raw.model,effort:raw.effort,threadId:raw.threadId,text:raw.text};
+    const workId="master-"+raw.requestId,requestedAt=new Date().toISOString();
+    const requestBytes=JSON.stringify({schemaVersion:"negi-master-turn/1",workId,masterId:this.options.masterId,...request,inputSha256:hash(request.text),at:requestedAt})+"\n";
+    return this.withLock(cwd, async state => {
+      try { await this.idle(state); } catch { throw new MasterConversationHeldError(); }
+      return scheduledMasterTurns({...this.options,root:this.options.turnRoot,workId,requestedAt}).reserve(request);
+    },{kind:"turn-admission",operation:{domain:"master-conversation",requestId:raw.requestId,hash:hash(requestBytes)}});
   }
 
   private async startupEvidence() {
@@ -220,8 +386,7 @@ export class MasterConversationAuthority {
       catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
       const operations = await this.operations(master, Buffer.from(key.value.key, "hex"));
       const owner = await artifact(join(master, "owner.lock"), 8000);
-      if (owner) check(Object.keys(owner.value).length === 3 && owner.value.schemaVersion === "negi-master-conversation-owner/1" &&
-        uuid.test(String(owner.value.nonce)) && Number.isSafeInteger(owner.value.pid) && Number(owner.value.pid) > 0, "status owner invalid");
+      if (owner) validatedMasterOwner(owner.value,this.options.masterId,Buffer.from(key.value.key,"hex"));
       check(rootIdentity === await directory(this.root) && (await artifact(join(this.root, "signing-key.json"), 1000))?.bytes === key.bytes, "status authority changed");
       const last = operations.find(op => op.records[0]!.request.requestId === requestId)?.records.at(-1);
       return last ? structuredClone({ request: last.request, stage: last.stage, identity: last.identity, reason: last.reason, exclusionHeld: owner !== null }) : null;
@@ -274,6 +439,6 @@ export class MasterConversationAuthority {
         catch { /* Partial/unknown evidence remains a startup hold; no replay. */ }
         throw new MasterConversationHeldError(uncertain ? "新しい会話の作成結果を確認できません。同じ要求の照合が必要です。自動では再作成しません。" : "新しい会話は未作成です。準備を確認してから、別の要求で明示的に再試行してください。");
       }
-    });
+    },{kind:"thread-start",operation:{domain:"master-conversation",requestId:request.requestId,hash:hash(JSON.stringify(request)+"\n")}});
   }
 }

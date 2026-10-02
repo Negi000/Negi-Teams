@@ -6,8 +6,8 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { isReviewRequestId } from "./humanReviewProof.ts";
 
-export interface WriterOperation { domain:"vault-initialization"|"project-configuration"|"project-setup";requestId:string;hash:string }
-export type WriterKind="vault"|"configuration"|"setup";
+export interface WriterOperation { domain:"vault-initialization"|"project-configuration"|"project-setup"|"master-conversation";requestId:string;hash:string }
+export type WriterKind="vault"|"configuration"|"setup"|"master";
 export interface WriterObservation { state:"absent"|"live"|"dead"|"unknown";operation:WriterOperation|null;sha256:string|null;legacyGuard:boolean }
 export function canRecoverWriter(value:WriterObservation,operation:WriterOperation){
   return !value.legacyGuard&&(value.state==="absent"||value.state==="dead"&&value.operation?.domain===operation.domain&&
@@ -35,15 +35,22 @@ export async function observeWriter(root:string,kind:WriterKind):Promise<WriterO
     !["absent","live","dead","unknown"].includes(value.state)||typeof value.legacyGuard!=="boolean"||
     value.sha256!==null&&(typeof value.sha256!=="string"||! /^[0-9a-f]{64}$/.test(value.sha256))||
     op!==null&&(!op||Array.isArray(op)||Object.keys(op).sort().join()!=="domain,hash,requestId"||
-      !["project-setup","project-configuration","vault-initialization"].includes(op.domain)||
+      !["project-setup","project-configuration","vault-initialization","master-conversation"].includes(op.domain)||
       !isReviewRequestId(op.requestId)||op.requestId!==op.requestId.toLowerCase()||! /^[0-9a-f]{64}$/.test(op.hash))||
     (["absent","unknown"].includes(value.state)?op!==null:op===null)||
     value.state==="absent"&&value.sha256!==null)throw Error("Native writer observation invalid");
   return value;
 }
-export async function recoverWriter(root:string,kind:WriterKind,operation:WriterOperation){
+export async function recoverWriter(root:string,kind:WriterKind,operation:WriterOperation,ownerSha256?:string,receiptBytes?:string){
+  if(kind==="master"&&(!ownerSha256||! /^[0-9a-f]{64}$/.test(ownerSha256)))throw Error("Master recovery requires exact owner bytes");
+  if(ownerSha256!==undefined&&! /^[0-9a-f]{64}$/.test(ownerSha256))throw Error("Recovery owner hash invalid");
+  if(receiptBytes!==undefined&&(kind!=="master"||Buffer.byteLength(receiptBytes)>8000))throw Error("Recovery receipt invalid");
   const path=await script();
-  await exec("python",[path,"--root",root,"--kind",kind,"--domain",operation.domain,
-    "--request-id",operation.requestId.toLowerCase(),"--hash",operation.hash],
+  const result=await exec("python",[path,"--root",root,"--kind",kind,"--domain",operation.domain,
+    "--request-id",operation.requestId.toLowerCase(),"--hash",operation.hash,...(ownerSha256?["--owner-sha256",ownerSha256]:[]),
+    ...(receiptBytes?["--receipt-json",receiptBytes]:[])],
     {windowsHide:true,timeout:10000,maxBuffer:20000,env:{...process.env,PYTHONIOENCODING:"utf-8"}});
+  const value=JSON.parse(result.stdout) as {released:boolean};
+  if(!value||Array.isArray(value)||Object.keys(value).join()!=="released"||typeof value.released!=="boolean")throw Error("Native writer recovery result invalid");
+  return value.released;
 }

@@ -265,7 +265,7 @@ export class LocalTaskService {
   /** Shared server-owned exclusion and signed empty-thread journal. No provider/UI dispatch here. */
   masterConversationAuthority(masterId: string): MasterConversationAuthority {
     return new MasterConversationAuthority({ root: join(this.root, "master-conversations"),
-      turnRoot: join(this.root, "master-turns"), masterId, scheduler: this.scheduler });
+      turnRoot: join(this.root, "master-turns"), masterId, scheduler: this.scheduler,onReleased:()=>this.pump() });
   }
   /** Fixed catalog metadata for the planner. Does not disclose local paths or run commands. */
   dispatchCatalog(): Array<{ id: string; title: string; project: string; taskId: string; version: number; configSha256: string }> {

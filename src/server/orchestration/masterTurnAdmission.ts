@@ -39,9 +39,12 @@ async function writeNew(path: string, value: unknown): Promise<string> {
 
 /** The server supplies the root, identity and scheduler; provider input cannot select them. */
 export function scheduledMasterTurns(options: { root: string; masterId: string;
-  scheduler: FileScheduler; onReleased?: () => Promise<void> }): MasterTurnAdmission {
+  scheduler: FileScheduler; onReleased?: () => Promise<void>; workId?: string; requestedAt?: string }): MasterTurnAdmission {
   if (!isAbsolute(options.root) || !/^[a-zA-Z0-9_-]{1,100}$/.test(options.masterId))
     throw new Error("Master scheduler registration invalid");
+  if ((options.workId !== undefined && !/^master-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(options.workId)) ||
+      (options.requestedAt !== undefined && (!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(options.requestedAt) || !Number.isFinite(Date.parse(options.requestedAt)))))
+    throw new Error("Master admission identity invalid");
   return { async reserve(raw) {
     const request = structuredClone(raw);
     if (!request.model || !request.effort || !request.threadId || !request.text.trim() ||
@@ -62,11 +65,11 @@ export function scheduledMasterTurns(options: { root: string; masterId: string;
     const root = await realpath(rootPath);
     if (inside(cwd, root)) throw new MasterInputNotSentError("統括の実行記録は作業場所の外に設定してください。未送信です。");
     await options.scheduler.ensureSubscriptionConfiguration();
-    const workId = `master-${randomUUID()}`;
+    const workId = options.workId ?? `master-${randomUUID()}`;
     const out = join(root, workId);
     await mkdir(out);
     const requestRef = await writeNew(join(out, "request.json"), { schemaVersion: "negi-master-turn/1", workId,
-      masterId: options.masterId, ...request, cwd, inputSha256: sha256(request.text), at: new Date().toISOString() });
+      masterId: options.masterId, ...request, cwd, inputSha256: sha256(request.text), at: options.requestedAt ?? new Date().toISOString() });
     const record = (suffix: string, action: SchedulerAction) => options.scheduler.append({
       key: `${workId}:${suffix}`, at: new Date().toISOString(), action });
     await record("submit", { type: "submit", work: { id: workId, parentId: null, dependencies: [],
