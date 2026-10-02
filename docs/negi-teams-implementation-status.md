@@ -301,3 +301,12 @@ Material 3 Expressiveの画面構成を維持し、buildのclient assetsは`inde
 非canonicalなpath casingは保留し、productionのcanonical stateRootを使う。旧索引rootにguardが無い場合の明示移行、旧binaryのversion fence、owner2→3・receipt intent/baseline・初回thread記録、索引intentの通常記録への接続、hot-journal rollback/repair/保持と性能は引き続き必要。曖昧なtransfer/release時に残すprocess内registrationは、全native handleが残る保証ではない。Windows以外のguardは未対応で保留し、UNC/SUBST/外部同権限process/停電等の残条件も維持する。
 
 Material 3 Expressiveは作業一覧・Task・レビュー・初回設定・知識・チーム・会話・端末へ実装済みで、今回は共通tokensと保存済みPC/375px画面を確認した。最終buildのclient assetsは`index-CvLJ6iRB.css`/`index-C-cjKz75.js`のまま。実機safe-area/keyboardと人の受入は未確認。新機能の画面はAPIが整った段階で同じPC/スマホ別導線へ接続する。Codex「新しい会話」は未有効化で、先行の全残条件・全73要件・Phase0–8と全体ゴールはACTIVE。
+
+
+## 2026-10-02追加: 新規owner/3と復旧時のprocess作成時刻照合
+
+[保存版と検証範囲](negi-teams-master-conversation-inventory.md#2026-10-02-新規owner3とnative-process作成tokenの復旧照合)。新規inspection/turn-admission/thread-start ownerを、root guardがnativeで取得した直接Node親PIDとcreation FILETIME付きのowner/3へ揃えた。既存owner/2の原文・署名・receiptは保持する。共通TS/native parserで版を厳密判別し、Windows復旧では同じprocess handleで生存状態と開始tokenを照合する。token一致の生存ownerは保留、不一致は元identityの終了を区別し、query/access失敗はunknown。生存processを停止しない。Linux owner/3診断は未対応でunknownを保持する。
+
+最終関連9 test filesは**189件中188成功・1スキップ・失敗/取消0（202,725.2583ms）**。旧版原文receipt/retry、実live/dead試験owner、署名とmetadataの不正、native query failure、simulated PID再利用で記録ownerだけ解除し生存process identityを保持すること、通常起動・受付・索引候補を確認した。実OSのPID再利用を再現したとは扱わない。初回のfixture2件の不正な新版PIDを修正し、別の失敗logを保持した。最終Python AST・型検査・build・差分検査成功。独立read-onlyレビューの指摘は修正済み。合成providerと試験専用childだけを使い、終了を待った。
+
+owner/3が残る場合のowner/2専用版へのrollbackは保留され、新版復旧が必要。旧binary/version fence、既存履歴baseline/移行intent、stage/receipt/turn/scheduler索引の全面接続、初回thread、明示SQLite rollback/repair/保持/性能、実provider会話切替と確認UI等は継続中である。Material 3 Expressiveのclient assets `index-CvLJ6iRB.css`/`index-C-cjKz75.js`は一致し、新GUI/実機/人の受入/実Codex/model/Jev/CI成功の確認ではない。先行の全残条件と全73要件・Phase0–8を保持し、ゴールはACTIVE。

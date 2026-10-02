@@ -21,7 +21,7 @@ SQLiteの設定とprocess exit試験は実電源断の保証ではない。[SQLi
 
 intentだけが保存されてfileがない場合、`pending`と欠落pathを返し、`lookup`で索引の固定bytesを読み出せる。次のappendは保留する。既存の部分/異なるfileや未登録directory/fileは変更せず保留する。取消stageを後付けしたり、モデル処理を再実行したりしない。自動復元や人の確認済み復元APIはまだ提供していない。
 
-appendは選択Masterの正確な署名ownerと、呼出前に固定したheadを要求する。新部品のowner/3はPID、nonce、要求hash、cwd hashに加え、Windowsのnative process作成FILETIME、またはLinuxのboot ID＋開始tickを署名する。Pythonを直接起動した親processのPID/作成tokenと一致する必要がある。PIDが同じだけの古いownerやowner/2はappendへ使えない。既存authority/native復旧はowner/2なので、version移行と解除側の同じtoken照合を一緒に接続する必要がある。
+appendは選択Masterの正確な署名ownerと、呼出前に固定したheadを要求する。新部品のowner/3はPID、nonce、要求hash、cwd hashに加え、Windowsのnative process作成FILETIME、またはLinuxのboot ID＋開始tickを署名する。Pythonを直接起動した親processのPID/作成tokenと一致する必要がある。PIDが同じだけの古いownerやowner/2はappendへ使えない。2026-10-02に新規authority ownerとnative復旧の版判別をowner/3へ接続した。過去owner/2の原文は保持し、署名と保守的なPID終了確認を維持する。stage/receiptの索引intentと既存履歴のbaseline/version移行の全面接続は引き続き必要である。
 
 Windowsの読取は同じnative handle APIのfile ID・link数・size・作成/更新時刻を前後で照合する。PythonのWindows lstat/fstatが異なるctimeを返したため、両API間のctime比較を廃した。正規directoryのhandleを保持し、DB/fileのreparse/hardlinkを拒否する。選択headを読取後とappend直前に再確認し、全filesystem本文走査をSQLiteのwrite transactionから外した。
 
@@ -135,3 +135,20 @@ helperのCLI/importでContextVarが二重化する問題、文字大小を潰し
 関連8 test filesは**182件中181成功・1スキップ・失敗/取消0（198,548.3924ms）**。スキップはWindows上の非Windows owner preview試験。実Windowsのcase-sensitive fixture、Node所有process終了、外部helperの排除、未awaitの入れ子保存のjoin、read-only非作成、root/handle差替え拒否、inventory/native recovery/通常受付との結合を確認した。この実行開始後に追加したstartup競合修正は、後続のBrain全ファイル**24/24成功（5,841.9578ms）**で検証し、両実行を一つの最新183件suiteとして合算しない。強制停止のunknownと確認済み中断のfailedを区別するよう誤った試験期待を直した。故障fixtureのUTF-8不足など初期失敗は別logへ保持する。最終Python AST・client/server型検査・build・差分検査は成功。独立read-onlyレビューの具体的な指摘は修正済み。合成Node providerと試験専用childだけを使い、その終了を待った。
 
 これは参加writerの排他で、旧binaryや外部の同一権限processを隔離するsandboxではない。Windowsを今回の対象runtimeとし、Linux/macOSのguardは未対応で保留する。UNC/SUBST/全filesystem・停電での受入も未確認。既存owner/2の独立DB presence gateは維持する。索引intentの通常記録への接続、owner2→3/version fence、stage/receipt intent・baseline・初回thread記録、hot-journal rollback、repair、保持/版移行と性能、実provider/UI切替は未達のまま。Material 3 ExpressiveのUI assets `index-CvLJ6iRB.css`/`index-C-cjKz75.js`は一致し、今回の新しいGUI/実機/人の受入/実Codex/model/Jev/CI成功は主張しない。全73要件・Phase0–8の進捗であり、Codex「新しい会話」と全体受入は継続中。
+
+
+### 2026-10-02: 新規owner/3とnative process作成tokenの復旧照合
+
+新規のinspection・turn-admission・thread-start ownerは`owner/3`で署名する。既に取得済みのactiveなroot storage guardがnativeで確認した直接のNode親PIDとcreation FILETIMEを使う。`createdAt`やPIDだけからprocessの開始を推定しない。所有nonce、kind、cwd hash、固定要求hash、baseline証拠hashも署名対象として保持する。
+
+共通のTS検証とnative parserはowner/2・owner/3を厳密に判別する。owner/3はprocessIdentityの正確な3フィールド、top-level PIDとの一致、Windowsの正のuint64 tokenまたはLinuxのboot ID＋開始tick形式を要求する。追加・欠落・不正なtokenは保留し、tokenの編集もHMACで検出する。過去owner/2を現在のprocessへ昇格したり、開始tokenを後から補ったりしない。原文の署名・versionを保持し、復旧receiptにも同じ原文ownerを保存する。
+
+Windowsの判定は、query権限と待機権限で開いた同じprocess handleを使う。終了済みまたは存在しないPIDは元ownerの終了を確認する。生存中なら[GetProcessTimes](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesstimes)のcreation FILETIMEを比較し、同じPID＋開始tokenならliveとして保留する。異なるtokenは別processであり、記録されたowner identityの終了を区別する。PIDの一意性は[processの終了まで](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getcurrentprocessid)に限られる。processをsignal/terminateせず、handleはfinallyで閉じる。作成時刻取得・アクセス・待機判定の失敗はunknownとして保持する。
+
+previewとnative解除の両方へ接続した。解除はreceipt公開前と正確なowner削除前に版に応じて再確認し、owner bytes・署名済みreceipt・原文baseline・DB presence gate・root排他を維持する。owner/2には開始tokenが無いため、再利用されたPIDがliveなら従来どおり保留する。Linuxでのowner/3 native診断は開始tokenの比較を実装していないのでunknownとし、PIDだけでlive/deadを補わない。WindowsでLinux identityを読んだ場合もunknown。LinuxのMaster削除は引き続き未対応である。
+
+最終関連9 test filesは**189件中188成功・1スキップ・失敗/取消0（202,725.2583ms）**。スキップはWindows上の非Windows owner preview試験。実際のlive owner/3、終了した試験Node owner、旧owner/2の原文receiptと同じdecisionのretry、署名編集・不正なprocess identity、native query failureとplatform mismatch、通常起動・実行受付・索引候補との形式整合を確認した。PID再利用は、署名済みfixtureに同じ生存PIDと異なる開始tokenを設定して同じnative分岐を検証したもので、実OSがPIDを再利用したという証拠ではない。記録ownerだけを解除し、生存processのnative identityが変わらず、receipt ownerが原文と一致することを確認した。
+
+初回の4 test filesは126件中123成功・2失敗・1スキップ。owner/3なのにtop-level PIDだけを書換え、内側PIDを変更していなかった既存fixtureを修正した。旧PID-onlyの保守的試験はowner/2として保持し、後続の生存ownerは実際のnative開始tokenを使う。focused6成功を経て前記最終suiteを完了し、試験の期待を緩めて不正ownerを採用していない。Python AST・client/server型検査・build・差分検査も成功。独立read-onlyレビューの指摘したfixture2件を修正後、追加の具体的な欠陥は見つからなかった。試験childの終了を待ち、実Codex/model/Jevは起動していない。
+
+これは新規writerと復旧parserのowner版を揃える実装であり、既存stage/turn/scheduler/receiptの索引移行を完成したものではない。owner/3が残った状態でowner/2専用版へrollbackすると保留され、新版の復旧経路を必要とする。旧binaryのversion fence、既存履歴の署名baselineと移行intent、索引intentの通常記録への全面接続、初回threadのdispatch/identity証拠、明示hot-journal rollback/repair、保持/性能と先行の全条件を維持する。Material 3 Expressive client assetsは`index-CvLJ6iRB.css`/`index-C-cjKz75.js`で一致し、新GUI/実機/人の受入/CI成功の確認ではない。Codex「新しい会話」は未有効化で、全73要件・Phase0–8と全体ゴールはACTIVE。

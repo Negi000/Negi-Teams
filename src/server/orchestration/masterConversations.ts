@@ -11,7 +11,7 @@ import type { FileScheduler } from "./scheduler.ts";
 import { masterOwnerAuxiliary, masterOwnerEvidence, signedMasterOwner, validatedMasterOwner, type MasterOwnerKind, type MasterOwner } from "./masterConversationOwner.ts";
 import { observeWriter, recoverWriter, type WriterOperation } from "./writerRecovery.ts";
 import { guardMasterAdmission, scheduledMasterTurns, type MasterTurnRequest, type MasterTurnLease } from "./masterTurnAdmission.ts";
-import { MasterStorageHeldError, withMasterStorageGuard } from "./masterStorageGuard.ts";
+import { MasterStorageHeldError, masterStorageTicket, withMasterStorageGuard } from "./masterStorageGuard.ts";
 
 type Stage = "requested" | "old_idle" | "start_dispatched" | "bound" | "completed" | "cancelled" | "needs_reconciliation";
 export interface MasterConversationRequest {
@@ -84,7 +84,7 @@ export class MasterConversationAuthority {
       try { await lstat(database + suffix); return true; }
       catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
     }));
-    // The owner/2 writer does not index stage or recovery receipt intents yet.
+    // This authority does not index stage or recovery receipt intents yet.
     // Even a valid DB must not silently admit this older writer. Do not open it
     // with SQLite: a read could roll back a hot journal before explicit recovery.
     return present.every(value => !value);
@@ -146,8 +146,11 @@ export class MasterConversationAuthority {
     const evidenceOptions = { ...this.options, root:this.root, master:state.master };
     let evidenceSha256:string;
     try{evidenceSha256 = await masterOwnerEvidence(evidenceOptions,kind,operation.requestId);}catch{throw new MasterConversationHeldError();}
-    const bytes = signedMasterOwner({ schema:"negi-master-conversation-owner/2", owner:randomUUID(), pid:process.pid,
-      createdAt:new Date().toISOString(), masterId:this.options.masterId, kind, cwdSha256:hash(state.canonicalCwd), operation, evidenceSha256 },state.key);
+    const ticket = masterStorageTicket(this.root);
+    check(process.platform === "win32" && ticket?.pid === process.pid, "native owner identity unavailable");
+    const bytes = signedMasterOwner({ schema:"negi-master-conversation-owner/3", owner:randomUUID(), pid:process.pid,
+      createdAt:new Date().toISOString(), masterId:this.options.masterId, kind, cwdSha256:hash(state.canonicalCwd), operation, evidenceSha256,
+      processIdentity: { platform: "windows", pid: ticket.pid, startToken: ticket.startToken } },state.key);
     await this.requireLegacyInventoryAbsent();
     let file;
     try { file = await open(path, "wx", 0o600); }

@@ -32,7 +32,7 @@ def paths(kind):
 
 
 def master_inventory_absent(root):
-    # Owner/2 receipt publication/deletion is not integrated with the independent
+    # Receipt publication/deletion is not integrated with the independent
     # index yet. A TS-only fence would leave this direct native entry unprotected.
     if root.parent.name != "masters":raise ValueError("Canonical Master authority layout required")
     database = str(root.parent.parent) + ".inventory.sqlite3"
@@ -55,6 +55,8 @@ def validate(raw, kind, domain, request_id, expected_hash):
                          {"requestId", "hash"} if kind != "configuration" else {"operation"})
     schema = {"vault":"negi-vault-writer/1", "setup":"negi-setup-writer/1", "configuration":"negi-configuration-writer/1",
               "master":"negi-master-conversation-owner/2"}[kind]
+    if kind == "master" and isinstance(value, dict) and value.get("schema") == "negi-master-conversation-owner/3":
+        schema = value["schema"];required.add("processIdentity")
     if (not isinstance(value, dict) or set(value) != required or value.get("schema") != schema
             or type(value.get("pid")) is not int or not 0 < value["pid"] <= 0x7fffffff
             or not isinstance(value.get("owner"), str) or not UUID.fullmatch(value["owner"])
@@ -71,6 +73,14 @@ def validate(raw, kind, domain, request_id, expected_hash):
                 or not isinstance(value["evidenceSha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", value["evidenceSha256"])
                 or not isinstance(value["signature"], str) or not re.fullmatch(r"[0-9a-f]{64}", value["signature"])):
             raise ValueError("Master writer evidence identity invalid")
+        if schema == "negi-master-conversation-owner/3":
+            identity = value["processIdentity"]
+            if (not isinstance(identity, dict) or set(identity) != {"platform", "pid", "startToken"}
+                    or type(identity["pid"]) is not int or identity["pid"] != value["pid"] or not isinstance(identity["startToken"], str)
+                    or not (identity["platform"] == "windows" and re.fullmatch(r"[1-9][0-9]{0,19}", identity["startToken"])
+                            and int(identity["startToken"]) < (1 << 64)
+                            or identity["platform"] == "linux" and re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}:[0-9]{1,30}", identity["startToken"]))):
+                raise ValueError("Master process creation identity invalid")
     elif kind != "configuration":
         if domain != ("vault-initialization" if kind == "vault" else "project-setup") or value["requestId"] != request_id or value["hash"] != expected_hash:
             raise ValueError("Writer belongs to another request")
@@ -103,6 +113,7 @@ def windows_kernel():
         ("ReleaseMutex", [wintypes.HANDLE], wintypes.BOOL),
         ("CloseHandle", [wintypes.HANDLE], wintypes.BOOL),
         ("OpenProcess", [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD], wintypes.HANDLE),
+        ("GetProcessTimes", [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4, wintypes.BOOL),
         ("CreateFileW", [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE], wintypes.HANDLE),
         ("GetFinalPathNameByHandleW", [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD], wintypes.DWORD),
         ("GetFileInformationByHandle", [wintypes.HANDLE, ctypes.c_void_p], wintypes.BOOL),
@@ -135,7 +146,14 @@ def win_info(kernel, handle, directory=False, limit=2000):
     return info
 
 
-def win_dead(kernel, pid):
+def master_start_token(raw, kind):
+    value = json.loads(raw.decode("utf-8"))
+    if kind != "master" or value.get("schema") != "negi-master-conversation-owner/3":return None
+    if value["processIdentity"]["platform"] != "windows":raise OSError("Master process identity platform unsupported")
+    return value["processIdentity"]["startToken"]
+
+
+def win_dead(kernel, pid, start_token=None):
     # os.kill(pid, 0) must not be used on Windows: Python uses TerminateProcess.
     handle = kernel.OpenProcess(0x00100000 | 0x1000, False, pid)
     if not handle:
@@ -145,7 +163,15 @@ def win_dead(kernel, pid):
     try:
         result = kernel.WaitForSingleObject(handle, 0)
         if result == 0:return
-        if result == 258:raise ValueError("Writer is still live")
+        if result == 258:
+            if start_token is not None:
+                times = [wintypes.FILETIME() for _ in range(4)]
+                if not kernel.GetProcessTimes(handle, *(ctypes.byref(value) for value in times)):raise ctypes.WinError(ctypes.get_last_error())
+                actual = str(times[0].dwHighDateTime << 32 | times[0].dwLowDateTime)
+                # A live process with the same PID and a different native start
+                # token is a different owner. Never signal or terminate it.
+                if actual != start_token:return
+            raise ValueError("Writer is still live")
         raise ctypes.WinError(ctypes.get_last_error())
     finally:kernel.CloseHandle(handle)
 
@@ -301,10 +327,11 @@ def _recover_windows(root, kind, domain, request_id, expected_hash, owner_sha256
         try:
             win_info(kernel, handle);raw = win_bytes(kernel, handle)
             if owner_sha256 is not None and hashlib.sha256(raw).hexdigest() != owner_sha256:raise ValueError("Observed owner bytes changed")
-            pid = validate(raw, kind, domain, request_id, expected_hash);win_dead(kernel, pid)
+            pid = validate(raw, kind, domain, request_id, expected_hash)
+            token = master_start_token(raw, kind);win_dead(kernel, pid, token)
             if kind == "master":publish_receipt_windows(kernel, root, raw, receipt_json)
             if win_bytes(kernel, handle) != raw:raise ValueError("Writer changed during recovery")
-            win_dead(kernel, pid)
+            win_dead(kernel, pid, token)
             if kind == "master":master_inventory_absent(root)
             # Delete the exact opened file on close; path substitution cannot make
             # us unlink another entry. The handle denies FILE_SHARE_DELETE.
@@ -398,7 +425,7 @@ def inspect_writer(root, kind):
                 return result
             try:
                 before = win_info(kernel, handle);raw = win_bytes(kernel, handle)
-                observed = observation(raw, kind, lambda pid:win_dead(kernel, pid))
+                observed = observation(raw, kind, lambda pid:win_dead(kernel, pid, master_start_token(raw, kind)))
                 current = win_open_reader(kernel, path)
                 if current != ctypes.c_void_p(-1).value:
                     try:
@@ -420,6 +447,10 @@ def inspect_writer(root, kind):
                 raw = os.read(fd, 2001)
                 if len(raw) > 2000:return result
                 def dead(pid):
+                    # This boundary has no Linux owner/3 creation-token proof.
+                    # Keep its diagnosis unknown rather than infer identity from PID.
+                    if kind == "master" and json.loads(raw.decode("utf-8")).get("schema") == "negi-master-conversation-owner/3":
+                        raise OSError("Master owner/3 identity inspection unsupported on Linux")
                     try:os.kill(pid, 0)
                     except ProcessLookupError:return
                     raise ValueError("Writer is still live")

@@ -11,6 +11,7 @@ import { FileScheduler } from "../src/server/orchestration/scheduler.ts";
 import { scheduledMasterTurns } from "../src/server/orchestration/masterTurnAdmission.ts";
 import { observeWriter,recoverWriter } from "../src/server/orchestration/writerRecovery.ts";
 import { MasterStorageHeldError } from "../src/server/orchestration/masterStorageGuard.ts";
+import { MasterConversationInventory } from "../src/server/orchestration/masterConversationInventory.ts";
 
 const bytes=(value:unknown)=>JSON.stringify(value)+"\n";
 const hash=(value:string)=>createHash("sha256").update(value).digest("hex");
@@ -123,7 +124,8 @@ test("a live signed owner cannot be released and preview leaves every artifact u
 
 test("dead inspection before any side effect has explicit exact cleanup and idempotent same decision",async()=>fixture(async f=>{
  const before=await stoppedOwner(f),owner=JSON.parse(before),preview=await f.reopen().ownerRecovery(f.cwd);assert.equal(preview?.ownerState,"dead");assert.equal(preview?.canRelease,true);
- assert.equal(owner.schema,"negi-master-conversation-owner/2");assert.equal(owner.kind,"inspection");assert.equal(owner.operation.domain,"master-conversation");assert.match(owner.evidenceSha256,/^[0-9a-f]{64}$/);
+ assert.equal(owner.schema,"negi-master-conversation-owner/3");assert.equal(owner.kind,"inspection");assert.equal(owner.operation.domain,"master-conversation");assert.match(owner.evidenceSha256,/^[0-9a-f]{64}$/);
+ assert.equal(owner.processIdentity.platform,"windows");assert.equal(owner.processIdentity.pid,owner.pid);assert.match(owner.processIdentity.startToken,/^[1-9][0-9]{0,19}$/);
  await assert.rejects(readdir(join(f.master,"recoveries")),{code:"ENOENT"});
  const decision=randomUUID(),result=await f.reopen().releaseOwner(f.cwd,decision,preview!.proofSha256);
  assert.deepEqual(result,{decisionId:decision,requestId:owner.operation.requestId,ownerReleased:true,operationComplete:false});
@@ -133,6 +135,25 @@ test("dead inspection before any side effect has explicit exact cleanup and idem
  assert.equal(await readFile(join(f.master,"recoveries",owner.owner+".json"),"utf8"),receipt);
  await assert.rejects(f.reopen().releaseOwner(f.cwd,randomUUID(),preview!.proofSha256),MasterConversationHeldError);
  await f.reopen().assertStartupSafe(f.cwd);assert.equal((await f.scheduler.read()).state,null);
+}));
+
+test("historical signed owner/2 recovery preserves its version and exact original receipt bytes",async()=>fixture(async f=>{
+ const current=JSON.parse(await stoppedOwner(f)),{processIdentity:_token,signature:_signature,...oldPayload}=current;
+ const original=await resign(f,{...oldPayload,schema:"negi-master-conversation-owner/2"});await writeFile(join(f.master,"owner.lock"),original);
+ const preview=await f.reopen().ownerRecovery(f.cwd);assert.equal(preview?.ownerState,"dead");assert.equal(preview?.canRelease,true);
+ assert.equal(await readFile(join(f.master,"owner.lock"),"utf8"),original);
+ const decision=randomUUID(),result=await f.reopen().releaseOwner(f.cwd,decision,preview!.proofSha256);
+ assert.equal(result.operationComplete,false);const receipt=await readFile(join(f.master,"recoveries",current.owner+".json"),"utf8"),saved=JSON.parse(receipt);
+ assert.equal(JSON.stringify(saved.payload.owner)+"\n",original);assert.equal(saved.payload.owner.schema,"negi-master-conversation-owner/2");assert.equal("processIdentity" in saved.payload.owner,false);
+ assert.deepEqual(await f.reopen().releaseOwner(f.cwd,decision,preview!.proofSha256),result);
+ assert.equal(await readFile(join(f.master,"recoveries",current.owner+".json"),"utf8"),receipt);
+}));
+
+test("malformed signed owner/3 creation identity preserves the owner and never publishes a receipt",async()=>fixture(async f=>{
+ const good=JSON.parse(await stoppedOwner(f)),bad=await resign(f,{...good,processIdentity:{...good.processIdentity,startToken:"18446744073709551616"}});
+ await writeFile(join(f.master,"owner.lock"),bad);await assert.rejects(f.reopen().ownerRecovery(f.cwd),MasterConversationHeldError);
+ const receipt=await recoveryReceipt(f,bad,randomUUID(),"a".repeat(64));await assert.rejects(recoverWriter(f.master,"master",good.operation,hash(bad),receipt),MasterStorageHeldError);
+ assert.equal(await readFile(join(f.master,"owner.lock"),"utf8"),bad);await assert.rejects(readdir(join(f.master,"recoveries")),{code:"ENOENT"});
 }));
 
 test("pre-admission owner pins unique work ID before reserve and can be cleaned with no claim",async()=>fixture(async f=>{
@@ -179,13 +200,26 @@ test("native boundary refuses later dead owner with same request instead of dele
  assert.equal(await readFile(join(f.master,"owner.lock"),"utf8"),replacement);
 }));
 
-test("reused live PID, owner signature edits and hardlinked owner all preserve the hold",async()=>fixture(async f=>{
+test("legacy reused live PID, owner signature edits and hardlinked owner all preserve the hold",async()=>fixture(async f=>{
  const before=await stoppedOwner(f),owner=JSON.parse(before),path=join(f.master,"owner.lock");
- await writeFile(path,await resign(f,{...owner,pid:process.pid}));const reused=await f.reopen().ownerRecovery(f.cwd);
+ const {processIdentity:_token,...legacy}=owner;
+ await writeFile(path,await resign(f,{...legacy,schema:"negi-master-conversation-owner/2",pid:process.pid}));const reused=await f.reopen().ownerRecovery(f.cwd);
  assert.equal(reused?.ownerState,"live");await assert.rejects(f.reopen().releaseOwner(f.cwd,randomUUID(),reused!.proofSha256),MasterConversationHeldError);
  await writeFile(path,bytes({...owner,kind:"thread-start"}));await assert.rejects(f.reopen().ownerRecovery(f.cwd),MasterConversationHeldError);
  await writeFile(path,before);await link(path,join(f.dir,"linked-owner"));await assert.rejects(f.reopen().ownerRecovery(f.cwd),MasterConversationHeldError);
  await unlink(join(f.dir,"linked-owner"));assert.equal((await f.reopen().ownerRecovery(f.cwd))?.canRelease,true);
+}));
+
+test("simulated owner/3 PID reuse releases only the recorded owner and leaves the live process intact",async()=>fixture(async f=>{
+ const old=JSON.parse(await stoppedOwner(f)),inventory=new MasterConversationInventory({root:f.root,masterId:"master"}),live=await inventory.currentProcessIdentity();
+ assert.notEqual(live.startToken,old.processIdentity.startToken);
+ const reused=await resign(f,{...old,pid:live.pid,processIdentity:{...old.processIdentity,pid:live.pid}});await writeFile(join(f.master,"owner.lock"),reused);
+ const preview=await f.reopen().ownerRecovery(f.cwd);assert.equal(preview?.ownerState,"dead");assert.equal(preview?.canRelease,true);
+ await f.reopen().releaseOwner(f.cwd,randomUUID(),preview!.proofSha256);
+ assert.deepEqual(await inventory.currentProcessIdentity(),live);
+ const receipt=JSON.parse(await readFile(join(f.master,"recoveries",old.owner+".json"),"utf8"));
+ assert.equal(JSON.stringify(receipt.payload.owner)+"\n",reused);
+ await assert.rejects(readFile(join(f.master,"owner.lock")),{code:"ENOENT"});
 }));
 
 test("changed terminal evidence or removed target directory never becomes a releasable dead owner",async()=>fixture(async f=>{
@@ -292,7 +326,8 @@ test("parallel different decisions publish at most one receipt and never remove 
 }));
 
 test("a new owner appearing after native release stays in place and prevents success",async()=>fixture(async f=>{
- const before=await stoppedOwner(f),replacement=await resign(f,{...JSON.parse(before),owner:randomUUID(),pid:process.pid}),path=join(f.master,"owner.lock");
+ const before=await stoppedOwner(f),processIdentity=await new MasterConversationInventory({root:f.root,masterId:"master"}).currentProcessIdentity();
+ const replacement=await resign(f,{...JSON.parse(before),owner:randomUUID(),pid:process.pid,processIdentity}),path=join(f.master,"owner.lock");
  const authority=f.reopen(),preview=await authority.ownerRecovery(f.cwd);
  const methods=authority as unknown as {ownerRecoveryEvidence:(...args:unknown[])=>Promise<unknown>};
  const original=methods.ownerRecoveryEvidence.bind(authority);

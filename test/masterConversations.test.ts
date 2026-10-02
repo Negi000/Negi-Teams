@@ -62,7 +62,7 @@ test("unexpected sibling directory, hardlink and redirected path remain untouche
  });
 });
 
-test("a valid independent database still rejects unindexed owner/2 mutation",async()=>fixture(async f=>{
+test("a valid independent database still rejects unindexed authority mutation",async()=>fixture(async f=>{
  await f.authority.assertIdle(f.cwd);
  const inventory=new MasterConversationInventory({root:f.root,masterId:"master"});await inventory.initialize();
  const before=await readFile(inventory.databasePath),key=await readFile(join(f.root,"signing-key.json"));
@@ -112,7 +112,8 @@ test("an index appearing after owner fsync keeps the signed owner without dispat
   };
   await assert.rejects(action==="start"?f.authority.start(f.request,async()=>{calls++;return identity;}):
    f.authority.admitTurn({...turnRequest(f.cwd),requestId:randomUUID()}),MasterConversationHeldError);
-  assert.ok(pinned);assert.equal(JSON.parse(pinned).schema,"negi-master-conversation-owner/2");assert.equal(calls,0);
+  assert.ok(pinned);assert.equal(JSON.parse(pinned).schema,"negi-master-conversation-owner/3");
+  assert.deepEqual(JSON.parse(pinned).processIdentity,await new MasterConversationInventory({root:f.root,masterId:"master"}).currentProcessIdentity());assert.equal(calls,0);
   assert.equal(await readFile(owner,"utf8"),pinned);assert.deepEqual(await readdir(join(f.root,"masters","master")),["owner.lock"]);
   assert.equal(await readFile(sibling,"utf8"),"late index");assert.equal((await read()).state,null);
   await assert.rejects(readdir(f.turnRoot),{code:"ENOENT"});
