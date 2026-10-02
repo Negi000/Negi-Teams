@@ -17,9 +17,16 @@
 .negi-workspace #registry-table tr:hover { background:var(--md-surface-high) }
 .negi-workspace #registry-table td { display:block; padding:0; border:0; font-size:12px; max-width:100%; overflow-wrap:anywhere; white-space:normal; overflow:visible }
 .negi-workspace #registry-table td:first-child { width:100%; font-size:14px; font-weight:700 }
+.negi-workspace #registry-table tr.agent-row td,.negi-workspace #registry-table tr.agent-row:hover td,.negi-workspace #registry-table tr.agent-row.active td { background:transparent; color:var(--md-on-surface) }
+.negi-workspace #registry-table tr.agent-row td:first-child { box-shadow:none }
+.negi-workspace #registry-table tr.active:hover { background:var(--md-secondary-container) }
+.negi-workspace #registry-table .kind-badge.kind-master,.negi-workspace #registry-table .kind-badge.kind-supervisor { background:var(--md-tertiary-container); color:var(--md-on-tertiary-container); border-radius:8px }
+.negi-workspace #registry-table .backend-badge { background:var(--md-surface-high); color:var(--md-on-surface-variant); border:0; border-radius:8px }
 .negi-workspace #registry-table td:nth-child(4),.negi-workspace #registry-table td:nth-child(5),.negi-workspace #registry-table td:nth-child(6) { display:none }
-.negi-workspace .mode-toggle { min-height:36px; padding:4px 12px; font-size:11px; border:0 }
-.negi-workspace .viewer-row-close { min-height:40px; width:40px; padding:0 }
+.negi-workspace .mode-toggle { min-height:48px; padding:8px 16px; font-size:12px; border:0 }
+.negi-workspace .mode-toggle.connected { background:var(--md-primary-container); color:var(--md-on-primary-container) }
+.negi-workspace .mode-toggle.isolated { background:var(--md-surface-container); color:var(--md-on-surface-variant) }
+.negi-workspace .viewer-row-close { min-height:48px; width:48px; padding:0 }
 .negi-workspace .log { margin-top:24px; border-top:1px solid var(--md-outline-variant); background:transparent }
 .negi-workspace #notice-list { padding-left:4px; font-size:11px; max-height:200px; overflow:auto; color:var(--md-on-surface-variant) }
 .negi-workspace .conn { font-size:12px; padding:6px 10px; border-radius:10px; background:var(--md-surface-container); white-space:nowrap }
@@ -62,10 +69,52 @@
 .negi-workspace .chat-input-row { align-items:end }
 .negi-workspace .chat-input { background:var(--md-surface-high); border:0; border-radius:24px; min-height:56px; padding:16px; font-size:16px }
 .negi-workspace .chat-send { background:var(--md-primary); color:var(--md-on-primary); min-height:52px; padding:12px 22px }
-.negi-workspace .chat-stop { color:var(--md-error); min-height:48px }
+.negi-workspace .chat-stop { color:var(--md-error); background:var(--md-surface-high); min-height:48px }
 .negi-workspace .chat-hint { font-size:14px; padding:12px 16px; margin-bottom:8px; border-radius:var(--md-radius-md); overflow-wrap:anywhere }
 .negi-workspace .chat-hint.level-error { color:var(--md-error); background:var(--md-error-container) }
 .negi-workspace .chat-log { padding:20px 28px }
+.negi-workspace .chat-state { padding:4px 12px; border:0; background:var(--md-surface-high); font-weight:650 }
+.negi-workspace .chat-state.state-idle { background:var(--md-primary-container); color:var(--md-on-primary-container) }
+.negi-workspace .chat-state.state-busy,.negi-workspace .chat-state.state-waiting { background:var(--md-warning-container); color:var(--md-warning) }
+.negi-workspace .chat-stat.lv-critical,.negi-workspace .chat-system.level-error,.negi-workspace .chat-turnend.error { color:var(--md-error) }
+.negi-workspace .chat-bubble.inbound { background:var(--md-secondary-container); color:var(--md-on-surface) }
+.negi-workspace .chat-bubble.pending { background:var(--md-warning-container); color:var(--md-on-surface); border-radius:28px 28px 28px 10px }
+.negi-workspace .chat-bubble.pending.settled-allowed { background:var(--md-primary-container) }
+.negi-workspace .chat-bubble.pending.settled-denied { background:var(--md-error-container) }
+.negi-workspace .chat-pending-title { font-size:16px; line-height:1.5; margin:8px 0 }
+.negi-workspace .chat-pending-detail { color:var(--md-on-surface); font-size:13px }
+.negi-workspace .chat-pending-actions { gap:12px; margin-top:16px }
+.negi-workspace .chat-pending-btn.allow { background:var(--md-primary); color:var(--md-on-primary); border:0 }
+.negi-workspace .chat-pending-btn.deny { background:var(--md-error-container); color:var(--md-error); border:0 }
+.negi-workspace .chat-pending-btn:hover:not(:disabled) { box-shadow:0 2px 8px #0002 }
+.negi-workspace .chat-pending-btn.allow:hover:not(:disabled) { background:var(--md-primary); color:var(--md-on-primary) }
+.negi-workspace .chat-pending-btn.deny:hover:not(:disabled) { background:var(--md-error-container); color:var(--md-error) }
+.negi-workspace .chat-bubble.pending.settled-denied .chat-pending-settled { color:var(--md-error) }
+.negi-workspace .chat-pending-bar { background:var(--md-warning-container); color:var(--md-warning); padding:12px 16px; margin-bottom:8px; text-align:left; justify-content:start; border-radius:16px; white-space:normal }
+.negi-workspace .chat-question-option { display:grid; grid-template-columns:24px minmax(0,1fr); align-items:center; gap:4px 12px; min-height:48px; padding:12px; border-radius:16px; font-size:14px; background:var(--md-surface-low); cursor:pointer }
+.negi-workspace .chat-question-option input { margin:0; width:20px; height:20px; accent-color:var(--md-primary) }
+.negi-workspace .chat-question-desc { grid-column:2; font-size:12px; overflow-wrap:anywhere }
+.negi-workspace .chat-question-option:has(input:checked) { background:var(--md-primary-container); color:var(--md-on-primary-container) }
+.negi-workspace .chat-question { gap:8px }
+.negi-workspace .chat-tool,.negi-workspace .chat-thinking { background:var(--md-surface-container); color:var(--md-on-surface-variant); border:0; border-radius:20px; padding:4px 16px }
+.negi-workspace .chat-tool.state-error { border-left:3px solid var(--md-error) }
+.negi-workspace .chat-tool-input,.negi-workspace .chat-tool-result,.negi-workspace .chat-thinking-body,.negi-workspace .chat-md pre.md-code { background:var(--md-surface-low); border:0; border-radius:12px; padding:12px; }
+.negi-workspace .chat-reply-btn { position:static; display:flex; margin:8px 0 0 auto; min-width:48px; min-height:48px; opacity:1; background:var(--md-surface-container); color:var(--md-primary); border:0 }
+.negi-workspace .chat-quote,.negi-workspace .chat-reply-jump { border:0; border-left:3px solid var(--md-primary); background:var(--md-surface-container); color:var(--md-on-surface-variant); border-radius:12px; justify-content:start; }
+.negi-workspace .chat-new-dialog { max-height:calc(100dvh - 32px - env(safe-area-inset-top) - env(safe-area-inset-bottom)); overflow:auto }
+.negi-workspace .chat-new-dialog .md-actions { justify-content:flex-end }
+.negi-workspace .chat-lightbox { inset:0; margin:0; border:0; width:100%; max-width:none; height:100dvh; max-height:none; padding:max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(16px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left)); gap:16px; background:var(--md-surface); color:var(--md-on-surface); overflow:hidden }
+.negi-workspace .chat-lightbox:not([open]) { display:none }
+.negi-workspace .chat-lightbox::backdrop { background:#10241766 }
+.negi-workspace .chat-lightbox-header { display:flex; align-items:center; justify-content:space-between; gap:16px; width:100%; flex:none }
+.negi-workspace .chat-lightbox-counter { position:static; border:0; border-radius:12px; color:var(--md-on-surface-variant); background:var(--md-surface-container); padding:8px 12px }
+.negi-workspace .chat-lightbox-close,.negi-workspace .chat-lightbox-nav { position:static; transform:none; min-width:48px; min-height:48px; color:var(--md-on-primary-container); background:var(--md-primary-container); border:0; border-radius:16px }
+.negi-workspace .chat-lightbox-stage { flex:1; min-height:0; width:100%; max-width:none; max-height:none }
+.negi-workspace .chat-lightbox-img { max-height:100%; max-width:100%; border-radius:20px }
+.negi-workspace .chat-lightbox-foot { flex:none; max-width:100%; max-height:25dvh; overflow:auto; color:var(--md-on-surface) }
+.negi-workspace .chat-lightbox-caption,.negi-workspace .chat-lightbox-path { color:var(--md-on-surface-variant) }
+.negi-workspace .chat-lightbox-title { font-size:16px }
+.negi-workspace .chat-lightbox-controls { display:flex; justify-content:center; gap:16px; flex:none }
 .negi-workspace .task-result-card { display:flex; flex-wrap:wrap; align-items:center; gap:12px; margin:16px 0; padding:20px; border-radius:28px 28px 28px 10px; background:var(--md-tertiary-container); color:var(--md-on-tertiary-container); text-align:left; overflow-wrap:anywhere }
 .negi-workspace .task-result-card>strong { flex:1; min-width:100px; font-size:18px }
 .negi-workspace .task-result-card>p,.negi-workspace .task-result-card>small,.negi-workspace .task-result-card>.md-actions { flex-basis:100%; margin:0 }

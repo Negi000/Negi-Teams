@@ -754,9 +754,9 @@ function setDrawer(open: boolean): void {
 }
 sidebarToggle.addEventListener("click", () => setDrawer(!sidebar.classList.contains("open")));
 sidebarBackdrop.addEventListener("click", () => setDrawer(false));
-document.addEventListener("keydown", event => { if (event.key === "Escape" && !spawnDialog.open && !filePicker.isOpen() && sidebar.classList.contains("open")) { setDrawer(false); sidebarToggle.focus(); } });
+document.addEventListener("keydown", event => { if (event.key === "Escape" && !document.querySelector("dialog[open]") && sidebar.classList.contains("open")) { setDrawer(false); sidebarToggle.focus(); } });
 document.addEventListener("keydown", event => {
-  if (event.key !== "Tab" || spawnDialog.open || filePicker.isOpen() || sidebar.getAttribute("aria-modal") !== "true") return;
+  if (event.key !== "Tab" || document.querySelector("dialog[open]") || sidebar.getAttribute("aria-modal") !== "true") return;
   const targets = [sidebarToggle, ...sidebar.querySelectorAll<HTMLElement>("button:not(:disabled), summary, a[href], input:not(:disabled), select:not(:disabled), [tabindex='0']")].filter(element => element.getClientRects().length > 0);
   const first = targets[0], last = targets.at(-1)!;
   if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }

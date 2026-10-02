@@ -108,6 +108,9 @@ export class ChatPanel {
   private lightboxUi: LightboxUi | null = null;
   /** ライトボックスを開く直前にフォーカスしていた要素（閉じたら戻す）。 */
   private lightboxOpener: HTMLElement | null = null;
+  private newConversationDialog: HTMLDialogElement | null = null;
+  private newConversationConfirm: HTMLButtonElement | null = null;
+  private newConversationTarget: string | null = null;
 
   constructor(
     private readonly el: HTMLElement,
@@ -137,16 +140,8 @@ export class ChatPanel {
     this.newBtn = document.createElement("button");
     this.newBtn.className = "chat-new";
     this.newBtn.textContent = "新しい会話";
-    this.newBtn.title =
-      "頭脳プロセスを resume 無しで起動し直し、文脈をリセットします（これまでの表示は残ります）";
-    this.newBtn.addEventListener("click", () => {
-      if (!this.masterId || this.codexReadOnly) return;
-      if (!window.confirm("新しい会話を始めます（いまの文脈はリセットされます）。よろしいですか？")) return;
-      // 会話が切り替わるとコスト累計も文脈も 0 からなので、次の turnEnd まで「—」に戻す。
-      this.transcript.resetStats();
-      this.updateStats();
-      this.onNew(this.masterId);
-    });
+    this.newBtn.title = "文脈をリセットし、画面を新しい会話へ切り替えます";
+    this.newBtn.addEventListener("click", () => this.showNewConversationDialog());
     this.head.append(title, this.stateBadge, this.statsEl, this.newBtn);
 
     // ---- ログ ----
@@ -161,7 +156,8 @@ export class ChatPanel {
 
     // ---- 入力欄 ----
     const foot = div("chat-foot");
-    this.pendingBar = div("chat-pending-bar");
+    this.pendingBar = document.createElement("button");
+    this.pendingBar.className = "chat-pending-bar";
     this.pendingBar.hidden = true;
     this.pendingBar.title = "クリックすると未応答の承認/質問までスクロールします";
     this.pendingBar.addEventListener("click", () => this.scrollToPending());
@@ -211,6 +207,7 @@ export class ChatPanel {
     this.el.append(this.head, body, foot);
     this.history = new InputHistory(safeLocalStorage());
     this.history.load();
+    window.addEventListener("resize", () => { if (this.visible) this.autoGrow(); });
     this.syncControls();
   }
 
@@ -224,7 +221,7 @@ export class ChatPanel {
     this.visible = visible;
     this.el.hidden = !visible;
     // 表示に切り替えた瞬間は最下部へ寄せる（隠れている間の新着を見せる）。
-    if (visible) this.scrollToBottom(true);
+    if (visible) { this.autoGrow(); this.scrollToBottom(true); }
   }
 
   /** WS `chatState`。chat モードの master が居ることの判定材料も兼ねる。 */
@@ -243,7 +240,7 @@ export class ChatPanel {
     this.codexReadOnly = enabled;
     this.newBtn.title = enabled
       ? "Codex master の新しい会話は結果照合と run 台帳の接続後に利用できます"
-      : "頭脳プロセスを resume 無しで起動し直し、文脈をリセットします（これまでの表示は残ります）";
+      : "文脈をリセットし、画面を新しい会話へ切り替えます";
     this.syncControls();
     this.updateStats();
   }
@@ -554,7 +551,13 @@ export class ChatPanel {
       : this.state === "busy"
         ? "実行中でも送れます（Enter で送信 / 中断は ⏹）"
         : "依頼・相談";
-    this.newBtn.disabled = this.codexReadOnly || this.state === "starting";
+    this.newBtn.disabled = !this.masterId || this.disconnected || this.codexReadOnly || this.state === "starting";
+    if (this.newConversationConfirm) this.newConversationConfirm.disabled = this.newBtn.disabled;
+    // A confirmation applies only to the Master and connection the user saw when opening it.
+    if (this.newConversationDialog?.open &&
+        (this.newBtn.disabled || this.newConversationTarget !== this.masterId)) {
+      this.newConversationDialog.close();
+    }
     if (this.pending > 0) {
       this.pendingBar.hidden = false;
       this.pendingBar.textContent =
@@ -562,6 +565,48 @@ export class ChatPanel {
     } else {
       this.pendingBar.hidden = true;
     }
+  }
+
+  private showNewConversationDialog(): void {
+    if (this.newBtn.disabled || !this.masterId) return;
+    if (!this.newConversationDialog) {
+      const dialog = document.createElement("dialog");
+      dialog.className = "md-dialog chat-new-dialog";
+      const title = document.createElement("h2");
+      title.id = "chat-new-dialog-title";
+      title.textContent = "新しい会話を始めますか？";
+      const copy = document.createElement("p");
+      copy.id = "chat-new-dialog-description";
+      copy.textContent = "現在の文脈をリセットし、会話の表示を切り替えます。実行中の応答と未回答の確認は終了します。入力中のメッセージは残ります。";
+      dialog.setAttribute("aria-labelledby", title.id);
+      dialog.setAttribute("aria-describedby", copy.id);
+      const actions = div("md-actions");
+      const cancel = document.createElement("button");
+      cancel.className = "md-text";
+      cancel.textContent = "今の会話を続ける";
+      cancel.autofocus = true;
+      cancel.addEventListener("click", () => dialog.close());
+      const confirm = document.createElement("button");
+      confirm.className = "md-primary";
+      confirm.textContent = "新しい会話を始める";
+      confirm.addEventListener("click", () => {
+        const target = this.newConversationTarget;
+        if (!target || target !== this.masterId || this.newBtn.disabled) return;
+        dialog.close();
+        // Only the server's cleared event resets the transcript and metrics.
+        this.onNew(target);
+      });
+      actions.append(cancel, confirm);
+      dialog.append(title, copy, actions);
+      dialog.addEventListener("keydown", event => containDialogFocus(dialog, event));
+      dialog.addEventListener("close", () => { this.newConversationTarget = null; });
+      this.el.append(dialog);
+      this.newConversationDialog = dialog;
+      this.newConversationConfirm = confirm;
+    }
+    this.newConversationTarget = this.masterId;
+    this.newConversationConfirm!.disabled = false;
+    if (!this.newConversationDialog.open) this.newConversationDialog.showModal();
   }
 
   /** 未応答の承認/質問までスクロールする（スティッキーバーのクリック）。 */
@@ -747,19 +792,15 @@ export class ChatPanel {
     if (!this.lightbox.open(key)) return;
     this.lightboxOpener = opener;
     const ui = this.ensureLightboxUi();
-    ui.root.hidden = false;
-    // 背面スクロール抑止（iOS Safari で特に効く）。閉じたら戻す。
-    document.body.style.overflow = "hidden";
     this.renderLightbox();
-    ui.root.focus();
+    if (!ui.root.open) ui.root.showModal();
   }
 
   /** 閉じる（Esc / 背景クリック / ×）。フォーカスは開いたサムネイルへ戻す。 */
   private closeLightbox(): void {
     if (!this.lightbox.isOpen && !this.lightboxUi) return;
     this.lightbox.close();
-    if (this.lightboxUi) this.lightboxUi.root.hidden = true;
-    document.body.style.overflow = "";
+    if (this.lightboxUi?.root.open) this.lightboxUi.root.close();
     const opener = this.lightboxOpener;
     this.lightboxOpener = null;
     // 元のサムネイルがまだ画面にあるときだけ戻す（描き替えで消えていることがある）。
@@ -797,9 +838,9 @@ export class ChatPanel {
   /** ライトボックスの DOM を 1 回だけ作る（body 直下＝チャットのレイアウトに影響されない）。 */
   private ensureLightboxUi(): LightboxUi {
     if (this.lightboxUi) return this.lightboxUi;
-    const root = div("chat-lightbox");
-    root.hidden = true;
-    root.tabIndex = -1;
+    const root = document.createElement("dialog");
+    root.className = "chat-lightbox";
+    root.setAttribute("aria-label", "会話の画像を拡大表示");
     const img = document.createElement("img");
     img.className = "chat-lightbox-img";
     img.addEventListener("error", () => {
@@ -810,12 +851,15 @@ export class ChatPanel {
     close.className = "chat-lightbox-close";
     close.textContent = "✕";
     close.title = "閉じる（Esc）";
+    close.setAttribute("aria-label", "画像を閉じる");
+    close.autofocus = true;
     close.addEventListener("click", () => this.closeLightbox());
     const counter = span("chat-lightbox-counter", "");
     const prev = document.createElement("button");
     prev.className = "chat-lightbox-nav prev";
     prev.textContent = "‹";
     prev.title = "前の画像（←）";
+    prev.setAttribute("aria-label", "前の画像");
     prev.addEventListener("click", (e) => {
       e.stopPropagation();
       this.step(-1);
@@ -824,6 +868,7 @@ export class ChatPanel {
     next.className = "chat-lightbox-nav next";
     next.textContent = "›";
     next.title = "次の画像（→）";
+    next.setAttribute("aria-label", "次の画像");
     next.addEventListener("click", (e) => {
       e.stopPropagation();
       this.step(1);
@@ -835,16 +880,22 @@ export class ChatPanel {
     foot.append(title, caption, path);
     const stage = div("chat-lightbox-stage");
     stage.appendChild(img);
-    root.append(close, counter, prev, next, stage, foot);
+    const header = div("chat-lightbox-header");
+    header.append(counter, close);
+    const navigation = div("chat-lightbox-controls");
+    navigation.append(prev, next);
+    root.append(header, stage, foot, navigation);
     // 背景（画像の外側）クリックで閉じる。画像そのもののクリックでは閉じない。
     root.addEventListener("click", (e) => {
       if (e.target === root || e.target === stage || e.target === foot) this.closeLightbox();
     });
+    root.addEventListener("cancel", (e) => {
+      e.preventDefault();
+      this.closeLightbox();
+    });
     root.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        this.closeLightbox();
-      } else if (e.key === "ArrowRight") {
+      containDialogFocus(root, e);
+      if (e.key === "ArrowRight") {
         e.preventDefault();
         this.step(1);
       } else if (e.key === "ArrowLeft") {
@@ -892,7 +943,7 @@ export class ChatPanel {
 
 /** ライトボックスの DOM 参照一式（ChatPanel が値を書き込む先）。 */
 interface LightboxUi {
-  root: HTMLElement;
+  root: HTMLDialogElement;
   img: HTMLImageElement;
   title: HTMLElement;
   caption: HTMLElement;
@@ -900,6 +951,17 @@ interface LightboxUi {
   counter: HTMLElement;
   prev: HTMLButtonElement;
   next: HTMLButtonElement;
+}
+
+/** Keep the dialog's controls in the Tab cycle, including Chromium's browser-chrome boundary. */
+function containDialogFocus(dialog: HTMLDialogElement, event: KeyboardEvent): void {
+  if (event.key !== "Tab") return;
+  const targets = [...dialog.querySelectorAll<HTMLElement>("button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex='0']")]
+    .filter(element => element.getClientRects().length > 0);
+  const first = targets[0], last = targets.at(-1);
+  if (!first || !last) return;
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
 }
 
 /** サムネイルを押したときの通知（key = collectImages() のキー・opener = 復帰先のフォーカス）。 */
@@ -976,8 +1038,7 @@ function buildItem(
     case "inbound": {
       const row = bubbleRow("inbound");
       const bubble = div(`chat-bubble inbound tag-${item.tag}`);
-      const label =
-        item.tag === "reply" ? "🦐 返信" : item.tag === "idle" ? "🦐 待機通知" : "🦐 メッセージ";
+      const label = item.tag === "reply" ? "返信" : item.tag === "idle" ? "待機通知" : "メッセージ";
       bubble.append(meta(`${label}（${item.from}）`, item.ts));
       if (item.tag === "idle" && item.text.trim().length === 0) {
         bubble.appendChild(span("chat-idle-note", "本文なし（作業完了の合図）"));

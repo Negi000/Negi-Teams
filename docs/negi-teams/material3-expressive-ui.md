@@ -92,3 +92,15 @@ Chrome上のビルド済みUIを、実HTTP/Task・Review service/Brain/scheduler
 PCは場所・仕様と担当条件を二列に置き、スマホは縦の単一フォームと下部ナビを使う。長いmetadataを初期表示から詳細へ移し、仕様本文を先に読む配置にした。初期本文と完全な文書はtextContentで表示する。
 
 ビルド済みセットアップUI、実Git/Vault/HTTPと合成の停止状態で、確認・入力変更による確認失効・採用・新しいVault・通常の設定保存・store再読込・署名済み途中要求の明示完了を確認した。Chromium1440/320/375px、ライト/ダーク、48px操作、キーボード、全文展開、横幅と下部ナビより上の承認ボタンを確認した。実Codexの起動・モデルturn・Jev・実機safe-area/仮想キーボード・人の成果受入の証拠ではない。
+
+## 2026-10-02: 統括チャットとチーム一覧の仕上げ
+
+統括の承認・質問・ツール結果・担当からの返信・引用・状態表示を共通のMaterial tokensへ揃えた。チーム一覧の旧オレンジのcell背景と固定担当の旧アクセントを除き、選択行・担当chip・接続切替も共通配色にした。接続切替と返信、承認、画像の操作は48px以上。返信ボタンは本文と重ねず、質問は選択行全体で操作する。
+
+既存Claude/Geminiの「新しい会話」はブラウザ標準confirmから、内容を説明するMaterialのnative dialogへ変更した。キャンセルからfocusを開始し、Tab/Shift+Tabをdialog内で循環、Escで元へ戻す。接続切断・起動中・対象Master変更・Codexへ変更した確認は閉じる。会話・使用量のリセットはサーバの`cleared`受信時に行い、送信しただけではリセットしない。Codexの新規会話は既存の未対応条件を維持する。入力の高さは画面幅と表示切替で再計算し、下書きを保持する。
+
+画像表示もnative modalへ変更し、Material surface・独立した閉じる/前/次操作・安全領域の余白を使う。画像の左右キー切替とEsc、元のサムネイルへのfocus復帰を保つ。背面drawerのキー処理は前面dialogを優先する。
+
+最終ソースの関連テスト77/77成功（505.8384ms）、型検査・ビルド成功。ビルド済みUIを合成Cookie認証付きHTTP/WS fixtureでChromium1440×900/375×812/320×812、ライト/ダークの両方へ接続した。本文と操作、横幅一致、48px、入力欄bottom724px < 下部ナビtop740px、reduced motion、キャンセル未送信、明示確定1回、結果未確認時の使用量/入力保持、Codex切替/切断で確認失効、拒否と質問回答、画像キー/focus、drawer内dialogのEsc順序、サーバ`cleared`後だけの表示リセットを確認した。承認本文contrast8.00以上、拒否5.31以上、許可hover6.52以上。最終対象console error/warning・page errorは0、providerプロセス/model turn/Jevは0。実モデルの新規会話、実機safe-area/仮想キーボード、人の使いやすさの受入を実施したという意味ではない。
+
+Browser plugin not availableのため既存Playwright CLIを利用。最初のfixtureのWindows ESM path指定、CLIの非ref click、非表示通知への待機はQA側の誤りとして別記録を保持した。初回の画像Tab循環試験は失敗し、focus循環を追加した後、チーム一覧の最終CSSも含めて全操作を再確認した。既存の全件回帰を今回の変更の全件成功に換算せず、スクリーンショット・fixture・ログは公開差分へ含めない。
