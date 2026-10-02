@@ -75,6 +75,8 @@ import { LocalProjectSetup } from "./orchestration/projectSetup.ts";
 import { LocalProjectConfiguration, type ConfigurationAdmission, type ProjectConfiguration } from "./orchestration/projectConfiguration.ts";
 import { createProjectSetupHttp } from "./orchestration/projectSetupHttp.ts";
 import { startConfirmedSetupMaster } from "./orchestration/projectSetupStartup.ts";
+import { LocalStorageConsole } from "./orchestration/storageConsole.ts";
+import { createStorageHttp } from "./orchestration/storageHttp.ts";
 import { ChatAttachmentStore, MAX_ATTACHMENTS_PER_TURN } from "./chatAttachments.ts";
 import { shareChatImage } from "./chatImages.ts";
 import { configureFixedEbiLog, fixedEbiLogPath, logFixedEbi } from "./fixedEbiLog.ts";
@@ -121,10 +123,15 @@ const authConfig = loadAuthConfig();
 const legacyProjectConfiguration=Boolean(process.env.NEGI_TASK_CONFIG||process.env.NEGI_REVIEW_CONFIG||
   process.env.NEGI_TASK_AUTHORING_CONFIG||process.env.NEGI_INTEGRATION_CONFIG||process.env.NEGI_KNOWLEDGE_CONFIG);
 if(process.env.NEGI_SETUP_ROOT&&!authConfig.token)throw Error("NEGI_SETUP_ROOT requires EBI_AUTH_TOKEN");
-const projectSetup=process.env.NEGI_SETUP_ROOT&&!legacyProjectConfiguration?
-  await LocalProjectSetup.open(process.env.NEGI_SETUP_ROOT,[process.cwd()]):null;
-const projectConfiguration=projectSetup?await LocalProjectConfiguration.open(projectSetup):null;
+const storageMaintenance=process.env.NEGI_STORAGE_MAINTENANCE==="1";
+if(storageMaintenance&&!authConfig.token)throw Error("Storage maintenance requires EBI_AUTH_TOKEN");
+let projectSetup:LocalProjectSetup|null=null,projectConfiguration:LocalProjectConfiguration|null=null;
 let bootConfiguration:ProjectConfiguration|null=null,configurationStartupHeld=false;
+try{
+  projectSetup=process.env.NEGI_SETUP_ROOT&&!legacyProjectConfiguration?
+    await LocalProjectSetup.open(process.env.NEGI_SETUP_ROOT,[process.cwd()]):null;
+  projectConfiguration=projectSetup?await LocalProjectConfiguration.open(projectSetup):null;
+}catch{configurationStartupHeld=true;}
 try{bootConfiguration=await projectConfiguration?.current()??null}catch{configurationStartupHeld=true;}
 let setupStartup:Awaited<ReturnType<LocalProjectConfiguration["startup"]>>|null=null;
 if(bootConfiguration)try{setupStartup=await projectConfiguration!.startup(bootConfiguration)}catch{configurationStartupHeld=true;}
@@ -132,64 +139,73 @@ let setupModelsVerified=!setupStartup&&!configurationStartupHeld;
 let setupActivationError:string|null=configurationStartupHeld?"設定・作業場所の起動条件を確認できません。プロジェクト設定で保存状態を確認してください。":null;
 const reviewConfigPath = process.env.NEGI_REVIEW_CONFIG;
 let reviewService: LocalReviewService | null = null;
-if (reviewConfigPath) {
-  if (!isAbsolute(reviewConfigPath) || !authConfig.token)
-    throw new Error("NEGI_REVIEW_CONFIG requires an absolute config path and EBI_AUTH_TOKEN");
-  const bytes = await readFile(reviewConfigPath);
-  if (bytes.length > 256_000) throw new Error("Review config exceeds local size limit");
-  reviewService = await LocalReviewService.open(JSON.parse(bytes.toString("utf8")));
-}else if(setupStartup)reviewService=await LocalReviewService.open(setupStartup.reviews);
 const taskConfigPath = process.env.NEGI_TASK_CONFIG;
 let taskService: LocalTaskService | null = null;
-if (taskConfigPath) {
-  if (!isAbsolute(taskConfigPath) || !authConfig.token)
-    throw new Error("NEGI_TASK_CONFIG requires an absolute config path and EBI_AUTH_TOKEN");
-  const bytes = await readFile(taskConfigPath);
-  if (bytes.length > 256_000) throw new Error("Task config exceeds local size limit");
-  taskService = await LocalTaskService.open(JSON.parse(bytes.toString("utf8")));
-}else if(setupStartup)taskService=await LocalTaskService.open(setupStartup.tasks);
-if (taskService && reviewService) await taskService.connectReviews(reviewService);
 let taskAuthoringService:LocalTaskAuthoringService|null=null;
-if(process.env.NEGI_TASK_AUTHORING_CONFIG){
-  const path=process.env.NEGI_TASK_AUTHORING_CONFIG;
-  if(!isAbsolute(path)||!authConfig.token||!taskService)throw new Error("Task authoring requires an absolute config path and authenticated Task service");
-  const bytes=await readFile(path);if(bytes.length>256000)throw new Error("Task authoring config exceeds local size limit");
-  taskAuthoringService=await LocalTaskAuthoringService.open(JSON.parse(bytes.toString("utf8")),taskService);
-}else if(setupStartup&&taskService)taskAuthoringService=await LocalTaskAuthoringService.open(setupStartup.authoring,taskService);
+const integrationConfigPath = process.env.NEGI_INTEGRATION_CONFIG;
+let integrationReviewService: LocalIntegrationReviewService | null = null;
+const knowledgeConfigPath = process.env.NEGI_KNOWLEDGE_CONFIG;
+let integrationExecutionService:LocalIntegrationExecutionService|null=null;
+let knowledgeService:LocalKnowledgeService|null=null;
+let taskCatalog:unknown=null,storageStartupHeld=false;
+const executionHeld=()=>configurationStartupHeld||storageStartupHeld||storageMaintenance||!!setupStartup&&!setupModelsVerified;
+const storageHost=()=>({maintenance:storageMaintenance,executionHeld:executionHeld(),startupError:setupActivationError});
+let storageConsole:LocalStorageConsole|null=null;
+const readServiceConfig=async(path:string,limit=256_000)=>{
+  if(!isAbsolute(path)||!authConfig.token)throw Error("Service requires an absolute config path and EBI_AUTH_TOKEN");
+  const bytes=await readFile(path);if(bytes.length>limit)throw Error("Service config exceeds local size limit");
+  return JSON.parse(bytes.toString("utf8")) as unknown;
+};
+try{
+  // Capture the trusted catalog before opening any runtime service, so its
+  // read-only maintenance registration survives a later storage failure.
+  taskCatalog=taskConfigPath?await readServiceConfig(taskConfigPath):setupStartup?.tasks??null;
+  if(taskCatalog){
+    storageConsole=new LocalStorageConsole({...await LocalTaskService.inspectStorageRegistration(taskCatalog),
+      masterId:setupStartup?"negi-master":process.env.NEGI_STORAGE_MASTER_ID??"negi-master"},storageHost);
+    if(!storageMaintenance)await storageConsole.assertLegacyExecutionAllowed();
+  }
+  if(!storageMaintenance&&!configurationStartupHeld){
+    const reviews=reviewConfigPath?await readServiceConfig(reviewConfigPath):setupStartup?.reviews;
+    if(reviews)reviewService=await LocalReviewService.open(reviews);
+    if(taskCatalog)taskService=await LocalTaskService.open(taskCatalog);
+    if(taskService&&reviewService)await taskService.connectReviews(reviewService);
+    if(process.env.NEGI_TASK_AUTHORING_CONFIG){
+      if(!taskService)throw Error("Task authoring requires authenticated Tasks");
+      taskAuthoringService=await LocalTaskAuthoringService.open(await readServiceConfig(process.env.NEGI_TASK_AUTHORING_CONFIG),taskService);
+    }else if(setupStartup&&taskService)taskAuthoringService=await LocalTaskAuthoringService.open(setupStartup.authoring,taskService);
+    if(integrationConfigPath){
+      if(!reviewService)throw Error("Integration review requires authenticated reviews");
+      integrationReviewService=await LocalIntegrationReviewService.open(await readServiceConfig(integrationConfigPath),reviewService,taskAuthoringService);
+    }
+    if(knowledgeConfigPath){
+      if(!taskService||!reviewService)throw Error("Knowledge requires authenticated Tasks and reviews");
+      knowledgeService=await LocalKnowledgeService.open(await readServiceConfig(knowledgeConfigPath,16_000),taskService,reviewService);
+    }
+    if(taskAuthoringService&&taskService&&reviewService)integrationExecutionService=await LocalIntegrationExecutionService.open(taskAuthoringService,taskService,reviewService);
+  }
+}catch{
+  storageStartupHeld=true;setupModelsVerified=false;
+  // Await started service work before discarding it; do not retry or reopen.
+  for(const service of [integrationExecutionService,integrationReviewService,taskService])try{await service?.close()}catch{}
+  taskService=null;taskAuthoringService=null;reviewService=null;integrationExecutionService=null;integrationReviewService=null;knowledgeService=null;
+  setupActivationError="保存状態・実行設定を確認できないため開始を保留しています。保存状態の画面で元の記録を確認してください。";
+}
+const storageApi=createStorageHttp(storageConsole,authConfig,storageHost);
 const taskAuthoringApi=createTaskAuthoringHttp(taskAuthoringService,authConfig);
 const conversationApi=createConversationHttp(taskService,taskAuthoringService,authConfig);
 const projectSetupApi=createProjectSetupHttp(projectSetup,authConfig,()=>({legacyConfigured:legacyProjectConfiguration,
-  active:!!setupStartup&&setupModelsVerified&&!!taskAuthoringService&&!!masterSession&&masterSession.state!=="stopped"&&masterSession.state!=="starting",activationError:setupActivationError,bootHash:bootConfiguration?.hash}),projectConfiguration);
-const integrationConfigPath = process.env.NEGI_INTEGRATION_CONFIG;
-let integrationReviewService: LocalIntegrationReviewService | null = null;
-if (integrationConfigPath) {
-  if (!isAbsolute(integrationConfigPath) || !authConfig.token || !reviewService)
-    throw new Error("NEGI_INTEGRATION_CONFIG requires an absolute config path and authenticated reviews");
-  const bytes = await readFile(integrationConfigPath);
-  if (bytes.length > 256_000) throw new Error("Integration review config exceeds local size limit");
-  integrationReviewService = await LocalIntegrationReviewService.open(JSON.parse(bytes.toString("utf8")), reviewService,taskAuthoringService);
-}
-const knowledgeConfigPath = process.env.NEGI_KNOWLEDGE_CONFIG;
-const integrationExecutionService=taskAuthoringService&&taskService&&reviewService?
-  await LocalIntegrationExecutionService.open(taskAuthoringService,taskService,reviewService):null;
+  active:!!setupStartup&&!executionHeld()&&!!taskAuthoringService&&!!masterSession&&masterSession.state!=="stopped"&&masterSession.state!=="starting",activationError:setupActivationError,bootHash:bootConfiguration?.hash}),projectConfiguration);
 const integrationApi=createIntegrationHttp(integrationExecutionService,authConfig);
 if(projectConfiguration&&bootConfiguration){
   const admission:ConfigurationAdmission=operation=>{
-    if(!setupModelsVerified)throw Error("担当モデルの起動条件を確認できないため保留しています。");
+    if(executionHeld())throw Error("保存・担当モデルの起動条件を確認できないため保留しています。");
     return projectConfiguration.admit(bootConfiguration.hash,operation);
   };
   taskService?.bindConfigurationAdmission(admission);taskAuthoringService?.bindConfigurationAdmission(admission);
   integrationExecutionService?.bindConfigurationAdmission(admission);
 }
 const taskApi=createTaskHttp(taskService,authConfig,taskAuthoringService!==null,integrationExecutionService!==null);
-let knowledgeService: LocalKnowledgeService | null = null;
-if (knowledgeConfigPath) {
-  if (!isAbsolute(knowledgeConfigPath) || !authConfig.token || !taskService || !reviewService)
-    throw new Error("NEGI_KNOWLEDGE_CONFIG requires an absolute path, authenticated Tasks and reviews");
-  const bytes = await readFile(knowledgeConfigPath);
-  if (bytes.length > 16_000) throw new Error("Knowledge config exceeds local size limit");
-  knowledgeService = await LocalKnowledgeService.open(JSON.parse(bytes.toString("utf8")), taskService, reviewService);
-}
 const knowledgeApi = createKnowledgeHttp(knowledgeService, authConfig);
 const reviewApi = createReviewHttp(reviewService, authConfig);
 // spawn する対象コマンド。claude が PATH に無い環境では EBI_COMMAND=bash 等で fallback。
@@ -496,6 +512,7 @@ if (taskService) {
 
 /** MasterSession を作って起動し、registry へ chat 配送先として登録する。 */
 async function startMasterChatSession(spec: FixedEbiSpec, setupOptions?:ReturnType<typeof codexMasterLaunchOptions>): Promise<void> {
+  if(configurationStartupHeld||storageStartupHeld||storageMaintenance)throw Error("Storage or configuration requires reconciliation before starting a Master");
   const codexReadOnly = setupOptions ?? (spec.brain === "codex"
     ? codexMasterLaunchOptions({ model: spec.launch.model, extraArgs: spec.extraArgs })
     : null);
@@ -880,8 +897,9 @@ const httpServer = createServer(async (req, res) => {
   }
 
   // Reviews require an authenticated browser cookie, even on loopback.
+  if (await storageApi(req, res, url)) return;
   if (await projectSetupApi(req, res, url)) return;
-  if(setupStartup&&!setupModelsVerified&&req.method==="POST"&&!url.pathname.endsWith("/stop")&&(/^\/api\/tasks(?:\/|$)/.test(url.pathname)||/^\/api\/task-plans(?:\/|$)/.test(url.pathname)||/^\/api\/integrations(?:\/|$)/.test(url.pathname))){
+  if(executionHeld()&&req.method==="POST"&&!url.pathname.endsWith("/stop")&&(/^\/api\/tasks(?:\/|$)/.test(url.pathname)||/^\/api\/task-plans(?:\/|$)/.test(url.pathname)||/^\/api\/integrations(?:\/|$)/.test(url.pathname))){
     res.writeHead(503,{"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store"});res.end(JSON.stringify({error:"担当モデルの接続・利用条件を確認できないため、新しい作業を保留しています。プロジェクト設定を確認してください。"}));return;
   }
   if (await reviewApi(req, res, url)) return;
@@ -912,6 +930,10 @@ const httpServer = createServer(async (req, res) => {
   }
 
   // 制御API（/control/*）を最優先で処理する。該当すれば静的配信へは進まない。
+  if(executionHeld()&&urlPath.startsWith("/control/")){
+    res.writeHead(503,{"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store"});
+    res.end(JSON.stringify({error:"保存・起動条件の確認中です。新しい実行・旧ツールの操作を保留しています。"}));return;
+  }
   if (await controlApi(req, res, urlPath, url.searchParams)) return;
   let filePath = join(CLIENT_DIST, normalize(urlPath === "/" ? "/index.html" : urlPath));
   // ディレクトリトラバーサル防止。
@@ -1001,6 +1023,9 @@ function idsOf(msg: SubscribeMessage | UnsubscribeMessage): string[] {
 }
 
 function handleClientMessage(ws: WebSocket, msg: ClientMessage): void {
+  if(executionHeld()&&["input","setMode","summarize","chatAnswer"].includes(msg.type)){
+    send(ws,{type:"error",text:"保存・起動条件の確認中です。新しい入力や実行を保留しています。"});return;
+  }
   switch (msg.type) {
     case "spawn": {
       void handleSpawn(ws, msg);
@@ -1122,7 +1147,7 @@ function handleClientMessage(ws: WebSocket, msg: ClientMessage): void {
           accepted, ...(reason ? { reason } : {}) });
         else if (!accepted) send(ws, { type: "error", text: reason ?? "送信できませんでした" });
       };
-      if(configurationStartupHeld||setupStartup&&!setupModelsVerified){report(false,"設定・担当モデルの起動条件を確認できないため保留しています。今回の入力は未送信です。");break}
+      if(executionHeld()){report(false,"保存・担当モデルの起動条件を確認できないため保留しています。今回の入力は未送信です。");break}
       const session = chatSessionFor(ws, msg.id);
       if (!session) { report(false, "統括が起動していません。今回の入力は未送信です。"); break; }
       void (async () => {
@@ -1173,7 +1198,7 @@ function handleClientMessage(ws: WebSocket, msg: ClientMessage): void {
       const session = chatSessionFor(ws, msg.id);
       if (!session) break;
       void (async()=>{
-        if(configurationStartupHeld||setupStartup&&!setupModelsVerified)throw Error("設定・担当モデルの起動条件を確認できないため保留しています。");
+        if(executionHeld())throw Error("保存・担当モデルの起動条件を確認できないため保留しています。");
         if(projectConfiguration&&bootConfiguration)await projectConfiguration.admit(bootConfiguration.hash,()=>session.newConversation());
         else await session.newConversation();
       })().catch((err) => {
@@ -1234,6 +1259,7 @@ async function handleSpawn(ws: WebSocket, msg: SpawnMessage): Promise<void> {
  * spawned / registry のブロードキャストもここで行い、起動した agent id を返す。
  */
 async function spawnAgent(params: GeneralizedSpawnParams): Promise<string> {
+  if(executionHeld())throw Error("保存・起動条件を確認できないため開始を保留しています。");
   const cwd = params.cwd && params.cwd.trim() ? params.cwd.trim() : DEFAULT_CWD;
 
   // 役割（EBI_ROLES）を解決する。後方互換: asEngineer=true は role="engineer" と等価。
@@ -1643,6 +1669,7 @@ export type SendMessageResult =
  * 「まだ」= 1 で spawn → 2 で ready 待ち → 3/4 で送信。分岐はこの関数内で完結する。
  */
 async function sendMessage(params: SendMessageParams): Promise<SendMessageResult> {
+  if(executionHeld())throw Error("保存・起動条件を確認できないため送信を保留しています。");
   const { to, message } = params;
   const from = params.from ?? "user";
 
@@ -1770,6 +1797,7 @@ async function sendMessage(params: SendMessageParams): Promise<SendMessageResult
 async function summarizeAgent(
   id: string,
 ): Promise<{ ok: true; text: string } | { ok: false; reason: string }> {
+  if(executionHeld())return {ok:false,reason:"保存・起動条件の確認中のため要約を保留しています。"};
   const agent = registry.get(id);
   if (!agent) return { ok: false, reason: `agent が見つかりません: ${id}` };
   return supervisor.summarize(agent.getScrollback());
@@ -1809,7 +1837,7 @@ async function handleSummarize(ws: WebSocket, id: string): Promise<void> {
 async function startFixedEbi(): Promise<void> {
   try {
     const raw = await loadFixedEbi(CONFIG_PATH, { command: COMMAND, backend: BACKEND_ID });
-    if(configurationStartupHeld)throw Error("Project configuration requires reconciliation before starting any fixed agent");
+    if(configurationStartupHeld||storageStartupHeld||storageMaintenance)throw Error("Storage/configuration requires reconciliation before starting any fixed agent");
     if(setupStartup){
       if(raw.length)throw Error("Saved project setup conflicts with fixed agents; choose the startup configuration explicitly");
       const config=setupStartup.config,spec:FixedEbiSpec={id:"negi-master",kind:"master",ui:"chat",brain:"codex",permissionMode:"plan",extraArgs:[],notifySubscribe:false,

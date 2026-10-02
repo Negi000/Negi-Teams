@@ -178,7 +178,7 @@ export function delay(ms: number): Promise<void> {
  * トークンを入力→POST /login→サーバが Cookie をセット→ "/" へ遷移、の一枚。
  */
 export function loginReturnTo(returnTo: string): string {
-  if (["/reviews", "/tasks", "/knowledge", "/setup", "/task-plans", "/integrations"].includes(returnTo) ||
+  if (["/reviews", "/tasks", "/knowledge", "/setup", "/storage", "/task-plans", "/integrations"].includes(returnTo) ||
       /^\/tasks\?run=[a-zA-Z0-9._-]{1,128}$/.test(returnTo)) return returnTo;
   if (!returnTo.startsWith("/") || returnTo.startsWith("//") || returnTo.length > 4096) return "/";
   try {

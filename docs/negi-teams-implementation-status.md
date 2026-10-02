@@ -432,3 +432,17 @@ production TaskService/HTTP/M3はまだ新しいindexed登録を有効にして�
 型検査/build・差分/秘密情報pattern検査が成功。compiled実TaskService→固定helper fallback/native署名→indexed通常Master受付/未送信取消/startup読取→runtime clean/artifacts2・同じscheduler instanceを確認し、開始childは実終了済み。独立read-onlyレビューで追加medium以上の問題は確認されず、レビュー側変更/試験実行なし。focused2のE2E全体233837.2414msにはGit/worktree/Task/統合/復元と照合を含み、個別応答時間や大規模性能の証明ではない。Windows以外、実provider/停止・transport、複数process競合・長期性能は未検証。Material 3 Expressive client assetsは`index-CvLJ6iRB.css`/`index-C-cjKz75.js`を維持する。
 
 server index/HTTP/M3での有効化、旧CLI/MCP/PTY/過去binaryの参加version・静止、全Masterのstage設定、初回root/key/indexの明示操作、停止/transport/実provider・性能/保持/移行・実機/人の受入は残る。全73要件・Phase0–8の全体ゴールはACTIVE。Material 3 Expressiveの既存画面資産とPC/スマホ別導線を維持し、今回画面/実機/人間受入の完了を主張しない。
+
+## 2026-10-03追加: Material 3 Expressiveの保存確認・登録・復旧画面
+
+[操作・境界・証拠と残条件](negi-teams-storage-console.md)。認証済み`/storage`にstage登録、runtime baseline登録、SQLite hot journal復旧を接続した。PCは操作一覧＋詳細、スマホは操作選択＋単一詳細。明暗テーマ・下部ナビ・reduced motionと設定往復を共通化した。作業一覧・Task・レビュー・初回設定・知識・チーム・会話・端末のM3資産を維持し、保存確認の新画面にも同じ表現を適用する。
+
+trusted catalogのread-only検査から固定root/turnRoot/sharedscheduler/Master IDを登録し、Cookie認証・Origin・正確なJSON・明示確認を要求する。初回root/key/guardを自動生成しない。maintenance起動と当該serverのexecutionHeldに限り保存し、登録・復旧後も実行を開始しない。通常起動はサービスopen前にstage/runtime DB・marker・sidecarを検査し、stageだけの存在でも旧実行経路を保留する。設定・保存検査失敗時も診断HTTPを残す。
+
+確認IDごとのlocalStorage記録、複数タブの保持内容選択・storage event・送信直前再読込みを追加した。通信断後は元ID/proofで未保存内容を続けるか受理済み内容を照合し、providerを再送しない。受理した当該IDだけ消去できる。stage状態は指定Master、runtimeはroot全体の範囲を明示する。
+
+最終修正後の関連3 test filesは**60/60成功・失敗/取消/skip 0（67582.3314ms、actual exit0）**、実行中runtime/test317 SHA不変、型検査/build/差分検査成功。先行11files **190/190・515254.7829ms・actual exit0**はWindows scheduler比較・スマホ見出しの修正前であり、最終60件へ合算しない。独立read-onlyレビューの起動fence・複数タブ・scope・Windows path互換指摘を修正し、再レビューで未解決Medium以上なし。監査側の編集・試験再実行なし。
+
+Browser plugin not availableのため既存Playwright CLI/Chromeでビルド済み実serverと独立native fixtureを操作した。ログイン、実stage/runtime登録、2タブ保持、保存後応答切断→元ID再確認→当該IDのみ消去、実hot journal→複製preview→正確な元DB hashへの復旧/同ID ACK、通常再起動の実行保留、keyboard Space、設定往復、1440/768/375/320px・明暗・テーマ保持・reduced motionを確認。最終通常画面の予期しないconsole/page error0、通信断注入のexpected net::ERR_FAILEDだけ1件。GUI証拠は公開差分外へ保存した。client assets名の一致だけを新HTMLの証拠にせず、最終画面を直接検証した。
+
+旧server/外部writerの停止は運用条件で、当該serverの保留や画面チェックはroot-wide version参加・外部process静止の測定証拠ではない。初回root/key/indexの明示操作、全Master/旧writer参加、通常indexed production有効化、owner/欠落stage等の完全な手動復旧導線、性能/保持/移行/実provider/停止/transport、実機safe-area/keyboard・人の全導線受入を継続する。Codex新規会話は未有効化、全73要件・Phase0–8と全体ゴールはACTIVE。今回のlocal/native/GUI検証をrelease・実model/Jev・CI成功と扱わない。

@@ -100,8 +100,29 @@ interface Runtime {
 }
 /** Fixed server registration after explicit baseline; never read from a Task or browser payload. */
 export interface TaskServiceStorageOptions { storage?: "indexed" }
+export interface TaskStorageRegistration { root: string; turnRoot: string; schedulerPath: string }
 
 export class LocalTaskService {
+  /** Read-only registration for the authenticated maintenance console, including
+   * when normal open is held. The catalog is trusted server input, never HTTP. */
+  static async inspectStorageRegistration(raw: unknown): Promise<TaskStorageRegistration> {
+    const frozen: unknown = structuredClone(raw);
+    if (!frozen || typeof frozen !== "object" || Array.isArray(frozen)) throw Error("Task catalog invalid");
+    const row = frozen as Record<string, unknown>;
+    if (typeof row.stateRoot !== "string" || !Array.isArray(row.runs) || row.runs.length > 100) throw Error("Task catalog roots/runs invalid");
+    const stateRoot = await localDestination(row.stateRoot, true);
+    let schedulerPath = row.schedulerPath === undefined ? null : await localDestination(String(row.schedulerPath), false);
+    for (const entry of row.runs) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw Error("Task catalog run invalid");
+      const config = await canonicalVaultRunRegistration(parseVaultRunConfig((entry as Record<string, unknown>).config));
+      await assertVaultRunOutputPaths(config);
+      if (inside(config.checkout, stateRoot) || inside(config.vault, stateRoot)) throw Error("Task state must be outside checkout and Vault");
+      if (schedulerPath && schedulerPath.toLowerCase() !== config.schedulerPath.toLowerCase()) throw Error("All catalog runs must share the registered scheduler");
+      schedulerPath = config.schedulerPath;
+    }
+    if (!schedulerPath) throw Error("Task catalog requires a shared scheduler path");
+    return Object.freeze({ root: join(stateRoot, "master-conversations"), turnRoot: join(stateRoot, "master-turns"), schedulerPath });
+  }
   private configurationAdmission:ConfigurationAdmission=operation=>operation();
   bindConfigurationAdmission(admission:ConfigurationAdmission){this.configurationAdmission=admission;}
   private readonly admissionGuards=new Map<string,TaskAdmissionGuard>();

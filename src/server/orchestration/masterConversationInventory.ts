@@ -63,7 +63,7 @@ async function script() {
 async function invoke(request: Record<string, unknown>): Promise<Record<string, unknown>> {
   const frozen = structuredClone(request);
   return frozen.action === "processIdentity" ? invokeHeld(frozen) : withMasterStorageGuard(String(frozen.root), () => invokeHeld(frozen),
-    { createIfMissing: !["audit", "ownerBaseline", "lookup", "latestStage", "appendRecoveryIntent", "recoveryIntent", "ownerRecoveryIntent", "releaseRecovery", "previewMigration", "previewDatabaseRecovery", "recoverDatabase"].includes(String(frozen.action)) });
+    { createIfMissing: !["audit", "ownerBaseline", "lookup", "latestStage", "appendRecoveryIntent", "recoveryIntent", "ownerRecoveryIntent", "releaseRecovery", "previewMigration", "migrate", "previewDatabaseRecovery", "recoverDatabase"].includes(String(frozen.action)) });
 }
 
 async function invokeHeld(request: Record<string, unknown>): Promise<Record<string, unknown>> {
