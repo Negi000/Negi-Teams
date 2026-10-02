@@ -73,6 +73,9 @@ function absent(state: "missing" | "attention", message: string): MasterTurnEvid
     finalText: null, outcome: null, inputSha256: null, outcomeSha256: null };
 }
 
+// Shared by the conversation authority; retain the same stable canonical read rules.
+export { artifact as readMasterTurnArtifact, normalDirectory as verifyMasterTurnDirectory };
+
 export async function readMasterTurnOrigin(root: string, scheduler: FileScheduler, origin: MasterOrigin): Promise<MasterTurnEvidence> {
   try {
     check([origin.masterId, origin.threadId, origin.turnId, origin.callId].every(label), "origin identity");
@@ -100,6 +103,8 @@ export async function readMasterTurnOrigin(root: string, scheduler: FileSchedule
     check(Object.keys(d).length === 3 && d.workId === id && d.threadId === origin.threadId &&
       typeof d.at === "string" && Number.isFinite(Date.parse(d.at)), "dispatch identity");
     check(before.work.role === "astra" && before.work.checkout === r.cwd && before.work.checkoutMode === "read", "scheduler owner");
+    if (before.work.masterOwner) check(before.work.masterOwner.masterId === r.masterId &&
+      before.work.masterOwner.requestSha256 === hash(request.bytes), "Master owner/request binding changed");
     const terminal = await artifact(join(directory, "outcome.json"), 2_000_000);
     let finalText: string | null = null, outcomeSha256: string | null = null;
     if (terminal) {

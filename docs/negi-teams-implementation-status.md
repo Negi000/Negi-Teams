@@ -215,3 +215,13 @@ Codex Masterではprovider turnの完了後も登録ツールが保存中なら�
 最終関連194/194成功（5032.3924ms）、最終型検査・ビルド成功。独立監査の3件を修正し、追加ブロッカーなし。実MasterSession＋合成brainのGUIでChromium1440/375/320px・両テーマ、48px/focus/reduced motion/横幅/下部ナビ、キャンセル未送信、起動待ち、二重拒否、再接続、失敗時保持、旧質問破棄、明示再試行、終了競合を確認した。明示切替3回、成功境界1回、UI chatSend0、最終GUI console error/warning/page error0。provider/model/Jev0であり、実機・実モデルの会話切替・人の品質受入を証明しない。初期のテスト/QA手順失敗とfixture再起動中の旧page再接続エラーは別記録を保持した。
 
 NT-067/073の追加進捗。Codexの同じ常駐process内の空thread作成なら正常な会話切替でprocessを置換せずに進められると独立確認したが、API/UIは引き続き拒否する。永続要求ID・RPC前intent・新旧thread隔離・設定admission・active/unknown Master claim・起動時照合・lost ACK保持が必要である。shutdown/crash/transport喪失時のcontainmentも残る。前節を含む全残条件と全73要件、Phase0–8を維持し、全体ゴールはACTIVE。
+
+## 2026-10-02追加: Codex会話要求の候補と起動前の記録照合
+
+[範囲と残条件](negi-teams-conversation-lifecycle.md#2026-10-02追加-永続要求の候補と読み取り専用の起動検査)。通常の統括request全文hashと担当IDをscheduler submitへ結合し、元の会話読取も照合する。Codex processのlaunch前に、未完了・未知・孤立・変更されたMaster証拠を読み取り専用で検査する。旧所有者bindingのない未解決Astra/read Masterは保留する。通常Sol Taskが同じUUID形式のIDを使ってもMasterとは分類しない。起動検査はkey/journal/lockを作らず、検査中の状態変更とstop後のlaunchを拒否する。
+
+署名付き段階、RPC前のfsync intent、同じ要求の状態読取、Masterごとの排他は候補APIとして実装・検証した。本番RPC・UI・通常入力へは未接続。独立監査の毎入力の全履歴走査（短い終端500件で約8.5秒）とcrash後owner復旧の指摘を受け、writerの本番接続を撤去した。署名付きinventory/増分検査/保持・移行/性能、明示owner復旧、初回threadと実切替の永続化、runtime静止、新旧threadとcwd照合、再接続・表示境界が有効化前の必須条件である。Codex「新しい会話」は引き続き拒否し、10,000件上限・旧Astra/read UUIDの曖昧性・外部書換え/ABAなど先行残条件も維持する。
+
+最終関連62/62成功（28769.3316ms）、別の会話表示12/12成功（14966.0021ms）、最終型検査・ビルド成功。実Node子processをintent保存後にexit23とし、段階とownerが残って自動再実行されないことを確認した。実Task登録経路とTaskService配線の回帰は一時Git/Vault・合成runtimeを使い、モデルturn/Jev0。画面改修や新しいGUI実証はなく、直前のMaterial 3 assetsと同じ。初期のpump待機とtimestamp fixtureの失敗を修正後の結果と区別して保存した。集合を合算せず、CIや実モデル切替・実機・人の受入成功を主張しない。
+
+NT-067/073の追加進捗。全73要件・Phase0–8と、先行記録の全残条件を変更せず、全体ゴールはACTIVE。

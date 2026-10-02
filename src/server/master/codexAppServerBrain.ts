@@ -97,6 +97,8 @@ export class CodexAppServerBrain implements MasterBrain {
     }
     this.closed = false;
     this.stopping = false;
+    await this.options.admission?.assertIdle?.(options.cwd);
+    if (this.closed || this.stopping) throw new Error("Codex brain stopped before App Server launch");
     this.startOptions = { cwd: options.cwd, model: options.model };
     const process = (this.options.launch ?? AppServerProcess.launch)({
       executable: this.options.executable, args: this.options.args, cwd: options.cwd,

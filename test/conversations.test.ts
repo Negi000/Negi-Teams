@@ -23,13 +23,14 @@ const canonical = (value: unknown) => JSON.stringify(value) + "\n";
 const hash = (bytes: string) => createHash("sha256").update(bytes).digest("hex");
 
 async function recordFixture(run: (f: { root: string; scheduler: FileScheduler; workId: string;
-  lease: Awaited<ReturnType<ReturnType<typeof scheduledMasterTurns>["reserve"]>> }) => Promise<void>) {
+  lease: Awaited<ReturnType<ReturnType<typeof scheduledMasterTurns>["reserve"]>> }) => Promise<void>, dispatchDelayMs = 0) {
   const dir = await mkdtemp(join(tmpdir(), "negi-source-")), root = join(dir, "records"), cwd = join(dir, "checkout");
   await mkdir(cwd);
   const scheduler = new FileScheduler(join(dir, "scheduler.jsonl"));
   try {
     const lease = await scheduledMasterTurns({ root, scheduler, masterId: origin.masterId }).reserve({
       cwd, model: origin.model, effort: origin.effort, threadId: origin.threadId, text: "元の依頼 <img src=x onerror=bad()>" });
+    if (dispatchDelayMs) await new Promise(resolve => setTimeout(resolve, dispatchDelayMs));
     await lease.dispatching(); await lease.bind(origin.turnId);
     await run({ root, scheduler, lease, workId: lease.workId });
   } finally { await rm(dir, { recursive: true, force: true }); }
@@ -71,11 +72,9 @@ test("source timestamps describe dispatch preparation rather than earlier reques
     await f.lease.complete(terminal);
     const directory = join(f.root, f.workId), requestPath = join(directory, "request.json"), dispatchPath = join(directory, "dispatch.json");
     const request = JSON.parse(await readFile(requestPath, "utf8")), dispatch = JSON.parse(await readFile(dispatchPath, "utf8"));
-    request.at = "2026-10-02T00:00:00.000Z"; dispatch.at = "2026-10-02T00:01:00.000Z";
-    await writeFile(requestPath, canonical(request)); await writeFile(dispatchPath, canonical(dispatch));
     const source = await readMasterTurnOrigin(f.root, f.scheduler, requestOrigin);
     assert.equal(source.state, "available"); assert.equal(source.sentAt, dispatch.at); assert.notEqual(source.sentAt, request.at);
-  });
+  }, 10);
 });
 
 test("failed and interrupted sources retain their known terminal status without fabricating a final response", async () => {
@@ -188,7 +187,12 @@ test("draft creation, browser execution and historical source identity remain di
     assert.deepEqual(metadata.created, requestOrigin); assert.equal(metadata.requested, null);
     const state = await f.tasks.snapshot(run); await f.tasks.start(run, state.configSha256, randomUUID(), { kind: "browser" });
     const until = Date.now() + 10000;
-    while ((await f.tasks.snapshot(run)).live) { assert.ok(Date.now() < until); await new Promise(resolve => setTimeout(resolve, 20)); }
+    for (;;) {
+      const current = await f.tasks.snapshot(run);
+      if (current.status === "ready_for_review" && !current.live) break;
+      assert.ok(Date.now() < until, "authorized Task must finish before the read-only source assertion");
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
     const calls = f.calls(), schedulerBytes = await readFile(f.config.schedulerPath, "utf8");
     const requested = await (await fetch(base + "/api/conversations/origin?run=" + run, { headers: cookie })).json();
     const created = await (await fetch(base + "/api/conversations/origin?run=" + run + "&source=created", { headers: cookie })).json();

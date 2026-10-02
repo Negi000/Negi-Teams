@@ -4,6 +4,7 @@ import { lstat, mkdir, open, readFile, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { FileScheduler, parseSchedulerCapacity, schedulerCapacityUsage, schedulerWorkEligible, type ScheduledPhase } from "./scheduler.ts";
 import { scheduledMasterTurns, type MasterTurnAdmission } from "./masterTurnAdmission.ts";
+import { MasterConversationAuthority } from "./masterConversations.ts";
 import type { ConfigurationAdmission } from "./projectConfiguration.ts";
 import { FileTaskLedger, type TaskEvent, type TaskSnapshot } from "./singleTask.ts";
 import { HumanReviewProofStore, isReviewRequestId } from "./humanReviewProof.ts";
@@ -255,7 +256,16 @@ export class LocalTaskService {
   masterTurnAdmission(masterId: string): MasterTurnAdmission {
     const admission=scheduledMasterTurns({ root: join(this.root, "master-turns"), masterId,
       scheduler: this.scheduler, onReleased: () => this.pump() });
-    return {reserve:request=>this.configurationAdmission(()=>admission.reserve(request))};
+    const conversations = this.masterConversationAuthority(masterId);
+    // Startup is a read-only audit. The reset writer requires its inventory/recovery
+    // gates before it can be used by normal dispatch; do not create crash locks here.
+    return { reserve: request => this.configurationAdmission(() => admission.reserve(request)),
+      assertIdle: cwd => conversations.assertStartupSafe(cwd) };
+  }
+  /** Shared server-owned exclusion and signed empty-thread journal. No provider/UI dispatch here. */
+  masterConversationAuthority(masterId: string): MasterConversationAuthority {
+    return new MasterConversationAuthority({ root: join(this.root, "master-conversations"),
+      turnRoot: join(this.root, "master-turns"), masterId, scheduler: this.scheduler });
   }
   /** Fixed catalog metadata for the planner. Does not disclose local paths or run commands. */
   dispatchCatalog(): Array<{ id: string; title: string; project: string; taskId: string; version: number; configSha256: string }> {

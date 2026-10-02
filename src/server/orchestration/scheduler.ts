@@ -33,6 +33,8 @@ export interface ScheduledWork {
   reserveUsd: number;
   /** Old unphased Sol writers conservatively reserve both role limits until terminal. */
   execution?: "direct" | "astra_to_sol";
+  /** Server-owned binding for resident Master records. Legacy records lack this binding. */
+  masterOwner?: { masterId: string; requestSha256: string };
 }
 export interface ScheduledEntry {
   work: ScheduledWork;
@@ -179,6 +181,10 @@ export function reduceScheduler(state: SchedulerSnapshot | null,
   }
   if (action.type === "submit") {
     const work = action.work;
+    reject(work.masterOwner === undefined || (Boolean(work.masterOwner) && typeof work.masterOwner === "object" && !Array.isArray(work.masterOwner) && Object.keys(work.masterOwner).length === 2 &&
+      /^master-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(work.id) && work.role === "astra" && work.checkoutMode === "read" &&
+      typeof work.masterOwner.masterId === "string" && /^[a-zA-Z0-9_-]{1,100}$/.test(work.masterOwner.masterId) &&
+      typeof work.masterOwner.requestSha256 === "string" && /^[0-9a-f]{64}$/.test(work.masterOwner.requestSha256)), "invalid Master owner binding");
     reject(Boolean(work.id) && !next.entries.some((entry) => entry.work.id === work.id) &&
       Boolean(work.checkout) && isAbsolute(work.checkout) && Array.isArray(work.dependencies) &&
       Array.isArray(work.resources) && money(work.reserveUsd) &&

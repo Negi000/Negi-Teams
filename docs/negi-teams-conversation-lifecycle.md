@@ -27,6 +27,38 @@ ChatLogは従来のbest-effortな表示記録である。今回のフラグやPr
 
 `MasterSession.newConversation()`とMaterial UIはCodexの切替を引き続き拒否する。今回の登録ツール待機を、上記の全条件の実装完了へ換算しない。
 
+## 2026-10-02追加: 永続要求の候補と読み取り専用の起動検査
+
+Material 3の会話切替へ接続する前の基盤を追加した。現在の接続範囲は以下のとおり。
+
+| 範囲 | 現在の状態 |
+| --- | --- |
+| 通常の統括入力 | fsync済みのrequest全文のSHA-256とMaster IDをschedulerのsubmitへ束縛する。configuration admissionは従来どおり一回。会話writer・全履歴監査は入力へ接続しない |
+| Codex起動前 | provider processのlaunch前に読み取り専用で検査する。未完了・結果不明・孤立・不一致のMaster記録、対象Masterの残留ownerや未完了の候補切替記録は保留する。検査ではkey、journal、lockを作らず、修復・解除・再送しない |
+| 切替の候補authority | 専用keyによるHMAC、連続した段階と前段hash、UUID要求、新旧threadとmodel/provider/settingsの固定、RPC直前のfsync intent、同じ要求の状態読取、Masterごとの排他を実装した。`start`/`admitTurn`/writerを使う`assertIdle`は本番RPC・UI・通常入力へ未接続 |
+| Codex「新しい会話」 | API・UIは引き続き拒否する。新規threadの実作成、初回threadの永続記録、再接続照会、表示境界の通知は未実装 |
+
+新しいMaster記録は、requestの担当IDや本文・日時などのbytesが変わると、別Masterとして読み飛ばさず保留する。旧記録は所有者を証明するbindingを持たないため、Astra/readでMasterのUUID形式を使った未解決記録を全Masterで保留する。通常のSol Taskは同じID形式を使えてもMasterとは分類しない。旧Astra/readの通常workが同じIDを使った場合の曖昧性は移行条件として残る。起動監査の前後でauthorityのディレクトリ・inventory・key・段階とscheduler/turn証拠を再確認し、検査中の変更も保留する。監査待ちのstop後にprocessをlaunchしない。
+
+### 候補writerを有効にする前の必須条件
+
+- 署名付きinventory/checkpointと増分検査、保持・移行の規則。段階単体の署名ではoperationディレクトリ全体の削除を検知できない。現行の完全走査は10,000件上限を持つ。独立監査では短い終端記録500件でも約8.5秒を要したため、通常入力へ使わない。起動監査も履歴件数に比例する。500/1,000件の性能検証は未完了。
+- ownerへ処理種別・要求・期待する証拠を束縛し、PID再利用・正確なファイル・journal・schedulerを照合する明示的な復旧。現行候補ownerはnonce/PIDのみで、crash後の安全な解除を提供しない。死んだPIDだけで解除・自動再試行しない。実子processの停止試験ではdispatch intentとownerを保持したまま起動を保留した。読み取り専用の本番起動検査自体はこのownerを作らない。
+- 実App Serverの初回threadと切替を同じ永続authorityへ接続し、cwdを含む戻り値、現在のthread・設定、登録ツール・approval・server request・waiterの静止を照合する。通常入力と切替の排他を同時に有効化する。
+- 永続的な完了後だけ要求IDと新旧threadを含む表示境界を通知し、再接続で同じIDを照会する。shutdown/crash/transport喪失時のcontainment、部分marker・混在版・外部書換え/ABA・停電・Linux/UNC実filesystemの条件も残る。
+
+### 今回の検証
+
+- 最終のauthority/Master admission/Brain/scheduler関連62/62成功（28769.3316ms、exit0）。別の会話表示12/12成功（14966.0021ms、exit0）。集合は合算せず、過去の全件試験を最終ソースの全件検証とは扱わない。最後の変更は上部コメントだけ。最終の型検査・ビルド成功。
+- 実一時filesystemで署名・同じ要求の再読取・異なる条件の拒否・lost ACK・並行候補要求・部分/変更/削除段階・hardlink/junction・担当ID変更・旧未解決記録・別Master・起動前保留・stop中のlaunch抑止を確認した。子Nodeはintent保存後にexit23とし、保存済み段階とownerを再読取した。TaskServiceの本番配線が読み取り時にkey/lockを作らず、通常reserveがconfiguration admissionを一回だけ使うことも確認した。
+- 実`submitVaultRun`でMasterのUUID形式の通常Sol Taskを登録し、起動監査が通り、scheduler bytesを変えず、Master journalを作らないことを確認した。fixtureは一時Git/Vaultと合成runtime。実provider RPC・モデルturn・Jevは0であり、実Codex会話切替、GUI操作、実機、人による受入の証拠ではない。今回のclient build assetsは直前のMaterial 3端末UIと同じで、画面改修はない。
+
+初期関連試験の1件は、Task pumpがclaimする前にfixtureの待機が終わり、読み取り中にschedulerが変わった。`ready_for_review`かつ非liveまで待つよう修正した。別の1件はrequest hashを束縛した後でtimestamp fixtureがrequestを編集したため正しく保留された。reserveとdispatchの間に実待機を挟み、記録を変更せず時刻の違いを確認するfixtureへ修正した。失敗結果と修正後の成功を別記録として保持する。
+
+独立監査の担当ID書換え、通常Taskのprefix/UUID衝突は回帰を追加して修正した。毎入力の全履歴走査とcrash owner復旧の指摘を受け、候補writerの本番入力/起動への接続を撤去した。これらの候補writerの課題を解決済みには扱わない。
+
+最後の限定再監査では追加のP1/P2指摘はなかった。監査側の30件再実行は親の62件と重複するため合算しない。別の全件実行は最終編集と重なり、最終ソースの全件完了主張へ使わない。
+
 ## 検証
 
 - 最終関連194/194成功（5032.3924ms、exit0）。AppServer client/Brain、MasterSession、共通実行枠、会話モデル・配線、permissionを含む。既存全件試験とは合算しない。

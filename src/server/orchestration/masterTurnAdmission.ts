@@ -21,6 +21,8 @@ export interface MasterTurnLease {
 }
 export interface MasterTurnAdmission {
   reserve(request: MasterTurnRequest): Promise<MasterTurnLease>;
+  /** Before App Server process launch; callers already own configuration admission. */
+  assertIdle?(cwd: string): Promise<void>;
 }
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 function inside(root: string, path: string): boolean {
@@ -63,12 +65,13 @@ export function scheduledMasterTurns(options: { root: string; masterId: string;
     const workId = `master-${randomUUID()}`;
     const out = join(root, workId);
     await mkdir(out);
-    await writeNew(join(out, "request.json"), { schemaVersion: "negi-master-turn/1", workId,
+    const requestRef = await writeNew(join(out, "request.json"), { schemaVersion: "negi-master-turn/1", workId,
       masterId: options.masterId, ...request, cwd, inputSha256: sha256(request.text), at: new Date().toISOString() });
     const record = (suffix: string, action: SchedulerAction) => options.scheduler.append({
       key: `${workId}:${suffix}`, at: new Date().toISOString(), action });
     await record("submit", { type: "submit", work: { id: workId, parentId: null, dependencies: [],
-      role: "astra", checkout: cwd, checkoutMode: "read", resources: [], reserveUsd: 0 } });
+      role: "astra", checkout: cwd, checkoutMode: "read", resources: [], reserveUsd: 0,
+      masterOwner: { masterId: options.masterId, requestSha256: requestRef.slice(-64) } } });
     const claimed = await options.scheduler.tryClaim(workId, `${workId}:dispatch`);
     if (!claimed) {
       await record("capacity-miss", { type: "cancel_queued", workId,
