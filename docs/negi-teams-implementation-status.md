@@ -386,3 +386,15 @@ owner/4またはそのreceiptを、missing DBからlegacy解除/移行へdowngra
 最終関連8 test filesは**156件中155成功・OS条件1スキップ・失敗/取消0（705120.9183ms、actual exit0）**。実行中の17 runtime/test filesのhashは不変だった。Python AST5・固定mjs構文・client/server型検査・build・差分検査成功。独立read-onlyレビューは署名形式、取得prefix/後続行、SQLite/FS snapshot、欠損DBのdowngrade拒否とWindows native/旧形式の互換境界を確認し、material findingなし。レビュー側の変更・試験の重複実行はない。開始した試験childの終了を待った。途中focused集合と最終suiteは合算しない。client assetsは`index-CvLJ6iRB.css`/`index-C-cjKz75.js`と一致する。
 
 production caller、通常turn/provider/起動、認証済み人間確認UIの互換gateは維持する。turn/scheduler索引baseline、初回root/config/targetとreturned identity/旧runtime静止、参加version fence、repair/保持/版移行/性能、外部rollback/ABA、実停電/UNC/Linuxとnative phone/全導線の人間受入は残る。Material 3 Expressive assetsを維持し、今回新GUI/実model/Jev/CI成功の証拠ではない。Codex「新しい会話」は未有効化。全73要件・Phase0–8と全体ゴールはACTIVE。
+
+## 2026-10-03追加: 通常turnと共有schedulerの保存境界
+
+[接続条件と方式](negi-teams-storage-journal.md)。通常FileSchedulerとscheduledMasterTurnsへserver登録のjournal境界を追加した。共通storage scope→exclusive scheduler lock→元snapshotのaudit→固定intent→create-only/正確なoffset書込みとfsync→保存後のauditを使う。全scheduler writer pathsが同じ境界を通り、callbackや登録元の変更を原文へ使わない。turnのrequest intentはdirectory作成前に保存し、各leaseも同じscopeで前後照合する。
+
+dispatch ACK消失・部分記録は未送信取消へ変換しない。既存dispatch/provider/outcomeがある場合の取消拒否を既定legacyにも適用し、oversize artifactは既存readerの上限に合わせ保存前に拒否する。unknown、出力保存失敗、未完了intentのclaimは保持する。公開済みevent/原文を自動で削除・書き直し・再送しない。
+
+独立read-onlyレビューで、request intent中の公開scheduler path変更が別台帳へsubmit/claimを書ける経路を見つけて修正した。既定/journalとも実I/Oをconstructor固定pathへ限定し、intent後・directory作成前・各scheduler呼出し前後・最終audit後の照合を追加した。設定済みA/B不変・turn directory未作成・claimなし、最終audit中の変更による既存claim保留、既定schedulerの検証callback中の変更拒否の3回帰を追加した。
+
+最終関連9 test filesは**196件中196成功・失敗/取消/スキップ0（108785.4547ms、actual exit0）**。新規19ケースを含み、Windows nativeの共通scope/最後の枠競合と既定turn/起動/会話/Task互換を確認した。実行中tracked runtime/test307 files hash不変、client/server型検査・build・差分検査が成功した。独立read-only再レビューでP2閉鎖・追加material regressionなし。監査側の変更/試験重複はない。開始した試験childの終了を待った。修正前193/193と途中focused30/30を最終suiteへ合算しない。client assetsは`index-CvLJ6iRB.css`/`index-C-cjKz75.js`を維持する。fixture callbackは製品の署名DB/baseline/repairの実証ではなく、今回新GUI/実model/provider/Jev/実機/人の受入/CI成功を確認した結果ではない。
+
+これは通常の保存経路へ差し込むinterfaceと排他/公開の実装であり、署名付きturn/scheduler索引の保存実装、明示baseline・参加version fence・production caller/起動/providerへの全面接続・認証済み確認UIは次の工程である。Codex新規会話は未有効化。Material 3 Expressiveの既存画面を維持し、初回thread/returned identity/旧runtime静止、repair/保持/性能、旧dispatch/Jev/知識/Policy/履歴、実機safe-area/keyboardと人の受入を含む全73要件・Phase0–8を保持する。ゴールはACTIVE。

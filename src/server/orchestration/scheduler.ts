@@ -1,9 +1,10 @@
 // Phase 4: one durable admission point for registered local work.
 // This does not start a model, grant filesystem access, or enforce an OS sandbox.
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, unlink } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { setTimeout as wait } from "node:timers/promises";
+import { verifyMasterTurnDirectory } from "./masterTurnRecords.ts";
 
 export type ScheduledRole = "astra" | "sol" | "luna";
 export type ScheduledStatus = "queued" | "running" | "needs_reconciliation" |
@@ -69,6 +70,20 @@ export type SchedulerAction =
   | { type: "revalidate"; workId: string; evidenceRef: string; validationWorkId?: string }
   | { type: "cancel_queued"; workId: string; reason: string };
 export interface SchedulerEvent { key: string; at: string; action: SchedulerAction }
+
+/** Server-owned durable storage participant. It must use a reentrant storage
+ * scope, audit exact snapshots, and commit an intent before returning. These
+ * callbacks must not call this scheduler or dispatch a provider. */
+export interface SchedulerJournal {
+  withStorage<T>(run: () => Promise<T>): Promise<T>;
+  audit(snapshot: { path: string; bytes: string; state: SchedulerSnapshot | null; events: SchedulerEvent[] }): Promise<void>;
+  appendIntent(input: { path: string; previousBytes: string; bytes: string; event: SchedulerEvent }): Promise<void>;
+}
+interface SchedulerFileStamp { dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number; nlink: number }
+interface SchedulerRead { state: SchedulerSnapshot | null; events: SchedulerEvent[]; bytes: string; stamp: SchedulerFileStamp | null; parentIdentity: string | null }
+function fileStamp(stat: SchedulerFileStamp): SchedulerFileStamp {
+  return { dev: stat.dev, ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, nlink: stat.nlink };
+}
 
 function reject(unless: boolean, reason: string): asserts unless {
   if (!unless) throw new Error(`Scheduler rejected: ${reason}`);
@@ -299,14 +314,52 @@ export function reduceScheduler(state: SchedulerSnapshot | null,
 
 export class FileScheduler {
   readonly path: string;
-  constructor(path: string) { this.path = resolve(path); }
+  private readonly registeredPath: string;
+  private readonly journal: SchedulerJournal | undefined;
+  constructor(path: string, options: { journal?: SchedulerJournal } = {}) {
+    this.path = this.registeredPath = resolve(path);
+    const journal = options.journal;
+    if (journal) {
+      reject([journal.withStorage, journal.audit, journal.appendIntent].every(fn => typeof fn === "function"), "journal registration invalid");
+      this.journal = Object.freeze({ withStorage: journal.withStorage.bind(journal),
+        audit: journal.audit.bind(journal), appendIntent: journal.appendIntent.bind(journal) });
+    }
+  }
 
   async read(): Promise<{ state: SchedulerSnapshot | null; events: SchedulerEvent[] }> {
+    const read = async () => { const value = await this.readChecked(); return { state: value.state, events: value.events }; };
+    return this.journal ? this.journal.withStorage(read) : read();
+  }
+
+  private assertPath(): void {
+    reject(this.path === this.registeredPath, "registered scheduler path changed");
+  }
+
+  private async capture(): Promise<SchedulerRead> {
+    this.assertPath();
     let data: string;
-    try { data = await readFile(this.path, "utf8"); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { state: null, events: [] };
-      throw error;
+    let stamp: SchedulerFileStamp | null = null;
+    let parentIdentity: string | null = null;
+    if (this.journal) {
+      parentIdentity = await verifyMasterTurnDirectory(dirname(this.registeredPath));
+      let before;
+      try { before = await lstat(this.registeredPath); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      if (!before) data = "";
+      else {
+        reject(before.isFile() && !before.isSymbolicLink() && before.nlink === 1, "unsafe journal scheduler file");
+        stamp = fileStamp(before);
+        const file = await open(this.registeredPath, "r");
+        try {
+          reject(same(stamp, fileStamp(await file.stat())), "scheduler changed before read");
+          const raw = await file.readFile(); data = raw.toString("utf8");
+          reject(Buffer.from(data, "utf8").equals(raw) && same(stamp, fileStamp(await file.stat())) &&
+            same(stamp, fileStamp(await lstat(this.registeredPath))), "scheduler changed or has invalid UTF-8");
+        } finally { await file.close(); }
+      }
+    } else {
+      try { data = await readFile(this.registeredPath, "utf8"); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") data = ""; else throw error; }
     }
     reject(!data || data.endsWith("\n"), "incomplete event log tail");
     let state: SchedulerSnapshot | null = null;
@@ -320,15 +373,36 @@ export class FileScheduler {
       state = reduceScheduler(state, event);
       events.push(event);
     }
-    return { state, events };
+    this.assertPath();
+    return { state, events, bytes: data, stamp, parentIdentity };
+  }
+
+  private async readChecked(): Promise<SchedulerRead> {
+    const current = await this.capture();
+    if (this.journal) {
+      await this.journal.audit(structuredClone({ path: this.registeredPath, bytes: current.bytes, state: current.state, events: current.events }));
+      const after = await this.capture();
+      reject(current.bytes === after.bytes && same(current.stamp, after.stamp) && current.parentIdentity === after.parentIdentity, "scheduler changed during journal audit");
+    }
+    return current;
   }
 
   private async withLock<T>(fn: () => Promise<T>): Promise<T> {
-    await mkdir(dirname(this.path), { recursive: true });
-    const lockPath = `${this.path}.lock`;
+    return this.journal ? this.journal.withStorage(() => this.withFileLock(fn)) : this.withFileLock(fn);
+  }
+
+  private async withFileLock<T>(fn: () => Promise<T>): Promise<T> {
+    this.assertPath();
+    if (this.journal) {
+      await verifyMasterTurnDirectory(dirname(this.registeredPath));
+    }
+    this.assertPath();
+    await mkdir(dirname(this.registeredPath), { recursive: true });
+    const lockPath = `${this.registeredPath}.lock`;
     const deadline = Date.now() + 2_000;
     let lock: Awaited<ReturnType<typeof open>>;
     for (;;) {
+      this.assertPath();
       try { lock = await open(lockPath, "wx"); break; }
       catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
@@ -338,13 +412,43 @@ export class FileScheduler {
         await wait(10);
       }
     }
-    try { return await fn(); }
+    try { this.assertPath(); const result = await fn(); this.assertPath(); return result; }
     finally { await lock.close(); await unlink(lockPath); }
   }
 
-  private async write(event: SchedulerEvent): Promise<void> {
-    const file = await open(this.path, "a");
-    try { await file.writeFile(JSON.stringify(event) + "\n", "utf8"); await file.sync(); }
+  private async write(event: SchedulerEvent, current: SchedulerRead): Promise<void> {
+    this.assertPath();
+    const bytes = JSON.stringify(event) + "\n";
+    if (this.journal) {
+      await this.journal.appendIntent(structuredClone({ path: this.registeredPath, previousBytes: current.bytes, bytes, event }));
+      const before = await this.capture();
+      reject(current.bytes === before.bytes && same(current.stamp, before.stamp) && current.parentIdentity === before.parentIdentity, "scheduler changed after journal intent");
+      // Existing logs must not be recreated after deletion. The create-only path
+      // also rejects a file which appeared after an absent snapshot.
+      const file = await open(this.registeredPath, current.stamp ? "r+" : "wx+", 0o600);
+      try {
+        this.assertPath();
+        const pinned = await file.stat();
+        reject(pinned.isFile() && pinned.nlink === 1 && (current.stamp ? same(current.stamp, fileStamp(pinned)) : pinned.size === 0), "scheduler replaced before publication");
+        const raw = Buffer.from(bytes, "utf8"), position = Buffer.byteLength(current.bytes, "utf8");
+        let offset = 0;
+        while (offset < raw.length) {
+          this.assertPath();
+          const { bytesWritten } = await file.write(raw, offset, raw.length - offset, position + offset);
+          reject(bytesWritten > 0, "scheduler publication made no progress"); offset += bytesWritten;
+        }
+        await file.sync();
+        this.assertPath();
+        const after = await lstat(this.registeredPath);
+        reject(after.isFile() && !after.isSymbolicLink() && after.nlink === 1 && after.dev === pinned.dev && after.ino === pinned.ino,
+          "scheduler replaced during publication");
+      } finally { await file.close(); }
+      const saved = await this.readChecked();
+      reject(saved.bytes === current.bytes + bytes && saved.parentIdentity === current.parentIdentity, "scheduler publication differs from committed intent");
+      return;
+    }
+    const file = await open(this.registeredPath, "a");
+    try { this.assertPath(); await file.writeFile(bytes, "utf8"); await file.sync(); this.assertPath(); }
     finally { await file.close(); }
   }
 
@@ -352,15 +456,15 @@ export class FileScheduler {
     const pinned = structuredClone(event);
     reject(pinned.action.type !== "claim" && pinned.action.type !== "start_worker", "use atomic claim methods for dispatch");
     return this.withLock(async () => {
-      const current = await this.read();
+      const current = await this.readChecked();
       const old = current.events.find((item) => item.key === pinned.key);
       if (old) {
         reject(same(old.action, pinned.action), "idempotency key reused for different action");
         return current.state!;
       }
-      if(validate)reject(await validate(structuredClone(current)), "current scheduler evidence changed");
+      if(validate)reject(await validate(structuredClone({state:current.state,events:current.events})), "current scheduler evidence changed");
       const next = reduceScheduler(current.state, pinned);
-      await this.write(pinned);
+      await this.write(pinned, current);
       return next;
     });
   }
@@ -369,7 +473,7 @@ export class FileScheduler {
   async ensureSubscriptionConfiguration(capacity?: SchedulerCapacity): Promise<SchedulerSnapshot> {
     const explicit = capacity === undefined ? undefined : parseSchedulerCapacity(structuredClone(capacity));
     return this.withLock(async () => {
-      const current = await this.read();
+      const current = await this.readChecked();
       if (current.state) {
         reject(current.state.budgetUsd === 0, "subscription scheduler must not share an API budget");
         const desired = explicit ?? { maxConcurrent: current.state.maxConcurrent,
@@ -380,7 +484,7 @@ export class FileScheduler {
           action: { type: "set_capacity", capacity: desired,
             sourceRef: explicit ? "server:trusted-task-catalog-capacity" : "server:role-limits-migration/1" } };
         const next = reduceScheduler(current.state, event);
-        await this.write(event);
+        await this.write(event, current);
         return next;
       }
       const desired = explicit ?? DEFAULT_SUBSCRIPTION_CAPACITY;
@@ -388,7 +492,7 @@ export class FileScheduler {
         action: { type: "configure", maxConcurrent: desired.maxConcurrent, budgetUsd: 0,
           roleLimits: { planners: desired.planners, workers: desired.workers } } };
       const next = reduceScheduler(null, event);
-      await this.write(event);
+      await this.write(event, current);
       return next;
     });
   }
@@ -402,7 +506,7 @@ export class FileScheduler {
   /** A capacity miss is known before dispatch; corrupt logs and reused keys still throw. */
   async tryClaim(workId: string, key: string = randomUUID()): Promise<ScheduledEntry | null> {
     return this.withLock(async () => {
-      const current = await this.read();
+      const current = await this.readChecked();
       reject(current.state !== null, "scheduler not configured");
       reject(!current.events.some((item) => item.key === key),
         "claim key already used; inspect the existing dispatch");
@@ -413,14 +517,14 @@ export class FileScheduler {
       const event: SchedulerEvent = { key, at: new Date().toISOString(),
         action: { type: "claim", workId } };
       const next = reduceScheduler(current.state, event);
-      await this.write(event);
+      await this.write(event, current);
       return next.entries.find((entry) => entry.work.id === workId)!;
     });
   }
 
   async tryStartWorker(workId: string, key: string): Promise<ScheduledEntry | null> {
     return this.withLock(async () => {
-      const current = await this.read();
+      const current = await this.readChecked();
       reject(current.state !== null, "scheduler not configured");
       reject(!current.events.some(item => item.key === key), "worker claim key already used; inspect the existing dispatch");
       const entry = current.state.entries.find(item => item.work.id === workId);
@@ -429,14 +533,14 @@ export class FileScheduler {
       if (!schedulerWorkerEligible(current.state, entry!)) return null;
       const event: SchedulerEvent = { key, at: new Date().toISOString(), action: { type: "start_worker", workId } };
       const next = reduceScheduler(current.state, event);
-      await this.write(event);
+      await this.write(event, current);
       return next.entries.find(item => item.work.id === workId)!;
     });
   }
 
   async startNext(key: string = randomUUID()): Promise<ScheduledEntry | null> {
     return this.withLock(async () => {
-      const current = await this.read();
+      const current = await this.readChecked();
       reject(current.state !== null, "scheduler not configured");
       reject(!current.events.some((item) => item.key === key),
         "claim key already used; inspect the existing dispatch");
@@ -445,7 +549,7 @@ export class FileScheduler {
       const event: SchedulerEvent = { key, at: new Date().toISOString(),
         action: { type: "claim", workId: candidate.work.id } };
       reduceScheduler(current.state, event);
-      await this.write(event);
+      await this.write(event, current);
       return { ...candidate, status: "running", claimKey: key };
     });
   }
