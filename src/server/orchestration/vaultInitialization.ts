@@ -6,6 +6,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual, promisify } from "node:util";
 import { HumanReviewProofStore, isReviewRequestId } from "./humanReviewProof.ts";
+import { recoverWriter } from "./writerRecovery.ts";
 
 const exec=promisify(execFile),sha=(bytes:string|Buffer)=>createHash("sha256").update(bytes).digest("hex");
 const digest=(value:unknown)=>sha(JSON.stringify(value));
@@ -14,9 +15,11 @@ const DIRECTORIES=["00_System","10_Projects","20_Decisions","30_Patterns","40_Le
 const MARKER=".negi-vault-initialization.json";
 const READY=".negi-vault-ready.json";
 interface Identity { device:string;inode:string }
+interface StageClaim { schema:string;requestId:string;hash:string;parent:Identity;seed:string;stage:string;source:Identity }
 export interface VaultInitializationInput { target:string;repository:string;project:string;title:string;specification:string }
 export interface VaultInitializationPreview {
   schema:"negi-vault-initialization/1";requestId:string;updated:string;input:VaultInitializationInput;
+  stageProtocol?:"owned-seed/1";
   parent:Identity;repository:Identity;baseSha:string;directories:string[];
   files:Array<{path:string;content:string;sha256:string}>;payloadHash:string;marker:string;ready:string;hash:string;
 }
@@ -60,7 +63,7 @@ function input(raw:unknown):VaultInitializationInput{
   return {target,repository:resolve(String(p.repository)),project:String(p.project),title:String(p.title).trim(),
     specification:String(p.specification).replace(/\r\n?/g,"\n").trim()};
 }
-function preview(input:VaultInitializationInput,requestId:string,updated:string,parent:Identity,repository:Identity,baseSha:string):VaultInitializationPreview{
+function preview(input:VaultInitializationInput,requestId:string,updated:string,parent:Identity,repository:Identity,baseSha:string,stageProtocol?:"owned-seed/1"):VaultInitializationPreview{
   const projectId="NT-PROJECT-"+requestId.replace(/-/g,""),specId="NT-SPEC-"+requestId.replace(/-/g,"");
   const approval="user:http-vault-initialization:"+requestId;
   const metadata=(id:string,kind:string)=>["---","id: "+id,"kind: "+kind,"project: "+JSON.stringify(input.project),
@@ -72,7 +75,8 @@ function preview(input:VaultInitializationInput,requestId:string,updated:string,
     {path:"10_Projects/spec.md",content:[...metadata(specId,"Spec"),"required: true","depends_on:","  - "+projectId,"---","",
       "# "+input.title+"の必須仕様","",input.specification,""].join("\n")}
   ].map(f=>({...f,sha256:sha(f.content)}));
-  const payload={schema:"negi-vault-initialization/1" as const,requestId,updated,input,parent,repository,baseSha,directories:DIRECTORIES,files};
+  const payload={schema:"negi-vault-initialization/1" as const,requestId,updated,input,parent,repository,baseSha,directories:DIRECTORIES,files,
+    ...(stageProtocol?{stageProtocol}:{})};
   const payloadHash=digest(payload),marker=JSON.stringify({schema:"negi-vault-initialization-marker/1",requestId,payloadHash})+"\n";
   const ready=JSON.stringify({schema:"negi-vault-ready/1",requestId,payloadHash,inventoryHash:digest({directories:DIRECTORIES,files:files.map(({path,sha256})=>({path,sha256}))})})+"\n";
   const core={...payload,payloadHash,marker,ready};return {...core,hash:digest(core)};
@@ -91,7 +95,8 @@ export class LocalVaultInitialization {
     if(receipt.action!=="operation"||receipt.caseId!=="vault-initialization"||receipt.runId!==p.input?.project||
       receipt.artifactSha256!==p.hash||receipt.verificationRef!==null||
       !isDeepStrictEqual(receipt.data,{domain:"vault-initialization",preview:JSON.stringify(p)})||
-      p.requestId!==requestId.toLowerCase()||!isDeepStrictEqual(p,preview(input(p.input),p.requestId,p.updated,p.parent,p.repository,p.baseSha)))
+      p.stageProtocol!==undefined&&p.stageProtocol!=="owned-seed/1"||
+      p.requestId!==requestId.toLowerCase()||!isDeepStrictEqual(p,preview(input(p.input),p.requestId,p.updated,p.parent,p.repository,p.baseSha,p.stageProtocol)))
       throw Error("Vault initialization approval differs");
     return p;
   }
@@ -101,7 +106,7 @@ export class LocalVaultInitialization {
     const rows:VaultInitializationPreview[]=[];
     for(const name of names.filter(n=>n.endsWith(".json")).sort())rows.push((await this.approved(name.slice(0,-5)))!);
     const catalogs=await readdir(this.root);
-    if(catalogs.some(n=>![".writer.lock",".recovery.lock"].includes(n)&&!rows.some(p=>[".json",".pending.json",".intent.json"].some(s=>n===p.requestId+s))))throw Error("Vault publication has no approval");
+    if(catalogs.some(n=>![".writer.lock",".recovery.lock",".writer-recovery-flock-v2.lock"].includes(n)&&!rows.some(p=>[".json",".pending.json",".intent.json",".stage-intent.json"].some(s=>n===p.requestId+s))))throw Error("Vault publication has no approval");
     return rows;
   }
   private async catalog(p:VaultInitializationPreview){
@@ -113,11 +118,11 @@ export class LocalVaultInitialization {
   async history():Promise<VaultInitializationStatus[]>{
     const rows=await this.approvals();return Promise.all(rows.map(async p=>({preview:p,state:await this.catalog(p)?"created" as const:"approved" as const,error:null})));
   }
-  private async protect(p:VaultInitializationPreview,historicalRoots:string[]){
+  private async protect(p:VaultInitializationPreview,historicalRoots:string[],extra:string[]=[]){
     const rows=await this.approvals(),roots=[...this.protectedRoots,...historicalRoots,p.input.repository,
       ...rows.filter(r=>r.requestId!==p.requestId).map(r=>r.input.target)];
     const stage=join(dirname(p.input.target),".negi-vault-stage-"+p.requestId);
-    for(const root of roots)for(const candidate of [p.input.target,stage])
+    for(const root of roots)for(const candidate of [p.input.target,stage,...extra])
       if(inside(root,candidate)||inside(candidate,root))throw Error("Vault initialization overlaps protected source");
     if(!isDeepStrictEqual(await directory(dirname(p.input.target)),p.parent)||
       !isDeepStrictEqual(await directory(p.input.repository),p.repository))throw Error("Vault initialization roots changed");
@@ -134,7 +139,7 @@ export class LocalVaultInitialization {
     normalized.target=join(parent,basename(normalized.target));normalized.repository=repository;
     const baseSha=(await exec("git",["rev-parse","HEAD"],{cwd:repository,windowsHide:true,timeout:10000})).stdout.trim();
     if(!/^[0-9a-f]{40}$/.test(baseSha))throw Error("Vault initialization requires committed SHA1 baseline");
-    const p=preview(normalized,requestId.toLowerCase(),updated,await directory(parent),await directory(repository),baseSha);
+    const p=preview(normalized,requestId.toLowerCase(),updated,await directory(parent),await directory(repository),baseSha,"owned-seed/1");
     if(Buffer.byteLength(JSON.stringify(p))>70000)throw Error("Vault preview too large");
     await this.protect(p,historicalRoots);
     if(await exists(p.input.target))throw Error("New Vault target already exists");
@@ -149,17 +154,7 @@ export class LocalVaultInitialization {
     const p=await this.approved(requestId);if(!p||p.hash!==expectedHash)throw Error("Vault completion has no exact approval");return p;
   }
   private async releaseDeadWriter(requestId:string,hash:string){
-    const path=join(this.root,".writer.lock");if(!await exists(path))return;
-    const guardPath=join(this.root,".recovery.lock"),guard=await open(guardPath,"wx",0o600);
-    try{
-      if(!await exists(path))return;
-      const bytes=await boundedFile(path,2000),v=JSON.parse(bytes.toString("utf8"));
-      if(v.schema!=="negi-vault-writer/1"||!Number.isSafeInteger(v.pid)||v.pid<=0||!isReviewRequestId(v.owner)||
-        !Number.isFinite(Date.parse(v.createdAt))||Object.keys(v).length!==6||v.requestId!==requestId.toLowerCase()||v.hash!==hash)throw Error("Vault writer ownership unknown or belongs to another request");
-      try{process.kill(v.pid,0);throw Error("Vault writer is still live")}catch(e){if((e as NodeJS.ErrnoException).code!=="ESRCH")throw e}
-      if(!(await boundedFile(path,2000)).equals(bytes))throw Error("Vault writer changed during recovery");
-      await unlink(path);
-    }finally{await guard.close();await unlink(guardPath)}
+    return recoverWriter(this.root,"vault",{domain:"vault-initialization",requestId,hash});
   }
   async save(raw:unknown,expectedHash:string,requestId:string,updated:string,historicalRoots:string[]=[]){
     return this.locked(requestId,expectedHash,async()=>{
@@ -210,6 +205,57 @@ export class LocalVaultInitialization {
     if((!partial||found.has(READY))&&[...p.directories,...p.files.map(f=>f.path),MARKER].some(n=>!found.has(n)))throw Error("Vault publication incomplete");
     if(requireReady&&!found.has(READY))throw Error("Vault readiness not recorded");
   }
+  private async move(sourcePath:string,target:string,p:VaultInitializationPreview,source:Identity){
+    await exec("python",[await script("negi_publish_vault.py"),"--source",sourcePath,"--target",target,"--device",p.parent.device,"--inode",p.parent.inode,"--source-device",source.device,"--source-inode",source.inode],
+      {windowsHide:true,timeout:20000,maxBuffer:20000,env:{...process.env,PYTHONIOENCODING:"utf-8"}});
+  }
+  private stageRecord(p:VaultInitializationPreview,stage:string,seed:string,source:Identity):StageClaim{
+    return {schema:"negi-vault-stage-intent/1",requestId:p.requestId,hash:p.hash,parent:p.parent,seed,stage:basename(stage),source};
+  }
+  private async readStageClaim(p:VaultInitializationPreview,stage:string):Promise<StageClaim>{
+    const claim=JSON.parse((await boundedFile(join(this.root,p.requestId+".stage-intent.json"),4000)).toString("utf8")) as StageClaim;
+    const seedPrefix=".negi-vault-seed-"+p.requestId+"-";
+    if(typeof claim?.seed!=="string"||!claim.seed.startsWith(seedPrefix)||!isReviewRequestId(claim.seed.slice(seedPrefix.length))||
+      !claim.source||Object.keys(claim.source).length!==2||typeof claim.source.device!=="string"||typeof claim.source.inode!=="string"||
+      !/^\d+$/.test(claim.source.device)||!/^\d+$/.test(claim.source.inode)||!isDeepStrictEqual(claim,this.stageRecord(p,stage,claim.seed,claim.source)))throw Error("Vault stage claim differs");
+    return claim;
+  }
+  private async staging(p:VaultInitializationPreview,stage:string,historicalRoots:string[]):Promise<Identity>{
+    const claimPath=join(this.root,p.requestId+".stage-intent.json"),parent=dirname(p.input.target);
+    if(!p.stageProtocol){
+      // Original signed previews retain their original hashes and recovery rules.
+      if(await exists(claimPath))throw Error("Legacy Vault has an unexpected stage claim");
+      if(await exists(stage))await this.inspect(stage,p,true);
+      else{await mkdir(stage);await writeNew(join(stage,MARKER),p.marker)}
+      return directory(stage);
+    }
+    let claim:StageClaim;
+    if(await exists(claimPath)){
+      claim=await this.readStageClaim(p,stage);
+    }else{
+      if(await exists(stage))throw Error("Vault stage has no ownership claim");
+      // A crash before the trusted claim leaves an unclaimed random seed in
+      // place. A later explicit completion creates a fresh seed, never adopts
+      // or removes that unknown directory.
+      const seed=".negi-vault-seed-"+p.requestId+"-"+randomUUID(),path=join(parent,seed);
+      await this.protect(p,historicalRoots,[path]);
+      await mkdir(path);await writeNew(join(path,MARKER),p.marker);
+      claim=this.stageRecord(p,stage,seed,await directory(path));
+      await writeNew(claimPath,JSON.stringify(claim)+"\n");
+    }
+    const seedPath=join(parent,claim.seed);await this.protect(p,historicalRoots,[seedPath]);
+    const seedExists=await exists(seedPath),stageExists=await exists(stage);
+    if(seedExists===stageExists||await exists(p.input.target))throw Error("Vault stage claim does not name one source");
+    const path=seedExists?seedPath:stage;
+    if(!isDeepStrictEqual(await directory(path),claim.source))throw Error("Vault stage identity changed");
+    await this.inspect(path,p,true);
+    if(seedExists){
+      if(!isDeepStrictEqual(await readdir(seedPath),[MARKER]))throw Error("Vault seed has unexpected entries");
+      await this.move(seedPath,stage,p,claim.source);
+      if(!isDeepStrictEqual(await directory(stage),claim.source))throw Error("Vault stage identity changed after move");
+    }
+    return claim.source;
+  }
   private async completeOnce(p:VaultInitializationPreview,historicalRoots:string[]){
     if(await this.catalog(p))return {preview:p,state:"created" as const,error:null};
     await this.protect(p,historicalRoots);
@@ -219,12 +265,16 @@ export class LocalVaultInitialization {
     if(intent&&!isDeepStrictEqual(intent,publication(intent.source)))throw Error("Vault publication intent differs");
     if(await exists(p.input.target)){
       if(!intent||await exists(stage)||!isDeepStrictEqual(await directory(p.input.target),intent.source))throw Error("Existing Vault was not this publication");
+      if(p.stageProtocol){
+        const claim=await this.readStageClaim(p,stage),seedPath=join(dirname(p.input.target),claim.seed);
+        await this.protect(p,historicalRoots,[seedPath]);
+        if(!isDeepStrictEqual(claim.source,intent.source)||await exists(seedPath))throw Error("Published Vault stage evidence differs");
+      }
       await this.inspect(p.input.target,p,false,true);
     }
     else{
       if(intent&&(!await exists(stage)||!isDeepStrictEqual(await directory(stage),intent.source)))throw Error("Vault publication source changed");
-      if(await exists(stage))await this.inspect(stage,p,true);
-      else{await mkdir(stage);await writeNew(join(stage,MARKER),p.marker)}
+      const stagedSource=await this.staging(p,stage,historicalRoots);
       for(const dir of p.directories)if(!await exists(join(stage,dir)))await mkdir(join(stage,dir));
       for(const f of p.files)if(!await exists(join(stage,f.path)))await writeNew(join(stage,f.path),f.content);
       await this.inspect(stage,p);
@@ -236,10 +286,10 @@ export class LocalVaultInitialization {
       if(!await exists(join(stage,READY)))await writeNew(join(stage,READY),p.ready);
       await this.inspect(stage,p,false,true);
       const source=await directory(stage),record=publication(source);
+      if(!isDeepStrictEqual(source,stagedSource))throw Error("Vault staged source changed before publication");
       if(intent){if(!isDeepStrictEqual(intent,record))throw Error("Vault publication source changed")}
       else await writeNew(intentPath,JSON.stringify(record)+"\n");
-      await exec("python",[await script("negi_publish_vault.py"),"--source",stage,"--target",p.input.target,"--device",p.parent.device,"--inode",p.parent.inode,"--source-device",source.device,"--source-inode",source.inode],
-        {windowsHide:true,timeout:20000,maxBuffer:20000,env:{...process.env,PYTHONIOENCODING:"utf-8"}});
+      await this.move(stage,p.input.target,p,source);
       if(!isDeepStrictEqual(await directory(p.input.target),source))throw Error("Published Vault identity changed");
       await this.inspect(p.input.target,p,false,true);
     }

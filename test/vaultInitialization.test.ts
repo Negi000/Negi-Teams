@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
-import { execFileSync, spawnSync } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { cp, mkdir, readFile, readdir, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { join } from "node:path";
@@ -13,6 +13,21 @@ import { LocalTaskAuthoringService } from "../src/server/orchestration/taskAutho
 import { LocalReviewService } from "../src/server/orchestration/reviewService.ts";
 import { setup,origin,requestOrigin,git } from "./helpers/taskAuthoringFixture.ts";
 import { createProjectSetupHttp } from "../src/server/orchestration/projectSetupHttp.ts";
+import { HumanReviewProofStore } from "../src/server/orchestration/humanReviewProof.ts";
+import type { VaultInitializationPreview } from "../src/server/orchestration/vaultInitialization.ts";
+
+const native=fileURLToPath(new URL("../scripts/negi_publish_vault.py",import.meta.url));
+const identity=(path:string)=>JSON.parse(execFileSync("python",[native,"--identity",path],{encoding:"utf8",windowsHide:true}));
+async function claimStage(f:Awaited<ReturnType<typeof fixture>>,p:VaultInitializationPreview,stage:string){
+  await writeFile(join(f.service.vaults.root,p.requestId+".stage-intent.json"),JSON.stringify({schema:"negi-vault-stage-intent/1",
+    requestId:p.requestId,hash:p.hash,parent:p.parent,seed:".negi-vault-seed-"+p.requestId+"-"+randomUUID(),
+    stage:".negi-vault-stage-"+p.requestId,source:identity(stage)})+"\n");
+}
+async function signPreview(f:Awaited<ReturnType<typeof fixture>>,p:VaultInitializationPreview){
+  const proofs=await HumanReviewProofStore.open(join(f.service.root,"vault-initialization-approvals"),160000);
+  await proofs.create({id:p.requestId,action:"operation",caseId:"vault-initialization",runId:p.input.project,artifactSha256:p.hash,
+    verificationRef:null,data:{domain:"vault-initialization",preview:JSON.stringify(p)}});
+}
 
 async function fixture(){
   const f=await setup();await f.tasks.close();
@@ -96,8 +111,10 @@ test("signed incomplete staging can finish only matching inventory and survives 
     await assert.rejects(f.service.vaults.save(p.input,p.hash,id,p.updated));
     assert.equal((await f.service.vaults.history())[0].state,"approved");
     await assert.rejects(f.service.vaults.complete(id,p.hash));assert.deepEqual(await readdir(stage),[]);
-    // An exact signed owner marker permits filling missing expected files.
+    // New protocol requires the server's exact directory claim as well as the marker.
     await writeFile(join(stage,".negi-vault-initialization.json"),p.marker);
+    await assert.rejects(f.service.vaults.complete(id,p.hash),/no ownership claim/);
+    await claimStage(f,p,stage);
     await mkdir(join(stage,"10_Projects"));await writeFile(join(stage,p.files[0].path),p.files[0].content);
     await assert.rejects(f.service.vaults.save(p.input,p.hash,id,p.updated));
     assert.equal((await readdir(stage)).length,2); // repeated save must not fill pending content
@@ -141,6 +158,14 @@ test("exact copied destination and changed publication inode cannot be adopted",
     const q=await f.service.vaults.preview({...f.raw,target:join(f.root,"published-vault")},randomUUID());
     await f.service.vaults.save(q.input,q.hash,q.requestId,q.updated);
     await unlink(join(f.service.vaults.root,q.requestId+".json"));
+    const stageClaimPath=join(f.service.vaults.root,q.requestId+".stage-intent.json"),stageClaim=await readFile(stageClaimPath,"utf8");
+    await unlink(stageClaimPath);await assert.rejects(f.service.vaults.complete(q.requestId,q.hash));
+    await writeFile(stageClaimPath,"{");await assert.rejects(f.service.vaults.complete(q.requestId,q.hash));
+    const changedClaim=JSON.parse(stageClaim);changedClaim.source.inode="0";await writeFile(stageClaimPath,JSON.stringify(changedClaim));
+    await assert.rejects(f.service.vaults.complete(q.requestId,q.hash));
+    await writeFile(stageClaimPath,stageClaim);
+    const ghostSeed=join(f.root,JSON.parse(stageClaim).seed);await mkdir(ghostSeed);
+    await assert.rejects(f.service.vaults.complete(q.requestId,q.hash));await rename(ghostSeed,join(f.root,"ghost-seed-retained"));
     const original=join(f.root,"moved-original");await rename(q.input.target,original);await cp(original,q.input.target,{recursive:true});
     await assert.rejects(f.service.vaults.complete(q.requestId,q.hash));assert.equal(await readFile(join(q.input.target,q.files[1].path),"utf8"),q.files[1].content);
   }finally{await f.close()}
@@ -151,6 +176,7 @@ test("explicit signed completion recovers both known dead writers but preserves 
   try{
     const p=await f.service.vaults.preview(f.raw,randomUUID()),stage=join(f.root,".negi-vault-stage-"+p.requestId);await mkdir(stage);
     await assert.rejects(f.service.vaults.save(p.input,p.hash,p.requestId,p.updated));await writeFile(join(stage,".negi-vault-initialization.json"),p.marker);
+    await claimStage(f,p,stage);
     const dead=spawnSync(process.execPath,["-e",""],{windowsHide:true});assert.equal(dead.status,0);assert.ok(dead.pid);
     const outer=join(f.service.root,"configuration-writer.lock"),inner=join(f.service.vaults.root,".writer.lock");
     const value=(schema:string,pid:number)=>JSON.stringify({schema,pid,owner:randomUUID(),createdAt:new Date().toISOString(),
@@ -190,6 +216,7 @@ test("Vault HTTP authenticates exact explicit operations and exposes read-only p
     const stage=join(f.root,".negi-vault-stage-"+id);await mkdir(stage);
     assert.equal((await post("vault-save",{input:p.input,requestId:id,expectedHash:p.hash,updated:p.updated})).status,409);
     await writeFile(join(stage,".negi-vault-initialization.json"),p.marker);
+    await claimStage(f,p,stage);
     const dead=spawnSync(process.execPath,["-e",""],{windowsHide:true}),outer=join(f.service.root,"configuration-writer.lock");
     const lock=JSON.stringify({schema:"negi-configuration-writer/1",pid:dead.pid,owner:randomUUID(),createdAt:new Date().toISOString(),operation:{domain:"vault-initialization",requestId:id,hash:p.hash}})+"\n";await writeFile(outer,lock);
     const state=await(await fetch(base+"/api/setup",{headers})).json();assert.equal(state.vaultInitializations.length,1);assert.equal(state.canSave,false);
@@ -202,4 +229,67 @@ test("Vault HTTP authenticates exact explicit operations and exposes read-only p
     legacy=true;assert.equal((await post("vault-preview",{input:{...f.raw,target:join(f.root,"other")},requestId:randomUUID()})).status,409);
     assert.deepEqual(f.calls(),{astra:0,sol:0});
   }finally{await new Promise<void>(r=>server.close(()=>r()));await f.close()}
+});
+
+test("a process stopped after seed mkdir leaves an unclaimed directory and explicit completion uses a fresh seed",async()=>{
+  const f=await fixture();let child:ReturnType<typeof spawn>|undefined;
+  try{
+    const p=await f.service.vaults.preview(f.raw,randomUUID());assert.equal(p.stageProtocol,"owned-seed/1");await signPreview(f,p);
+    const seed=join(f.root,".negi-vault-seed-"+p.requestId+"-"+randomUUID());
+    // Real process cut at the pre-claim filesystem state; no production fault switch.
+    child=spawn(process.execPath,["-e","require('fs').mkdirSync(process.argv[1]);console.log('mkdir');setInterval(()=>{},1000)",seed],{windowsHide:true,stdio:["ignore","pipe","pipe"]});
+    await new Promise<void>((resolve,reject)=>{child!.stdout!.once("data",()=>resolve());child!.once("error",reject);child!.once("exit",()=>reject(Error("fixture exited before cut")))});
+    const ended=new Promise<void>(resolve=>child!.once("exit",()=>resolve()));child.kill("SIGKILL");await ended;
+    assert.deepEqual(await readdir(seed),[]);
+    const reopened=await LocalProjectSetup.open(f.service.root,[f.repo]);
+    assert.equal((await reopened.vaults.complete(p.requestId,p.hash)).state,"created");
+    assert.deepEqual(await readdir(seed),[]); // preserved; never adopted or cleaned up
+    const claim=JSON.parse(await readFile(join(reopened.vaults.root,p.requestId+".stage-intent.json"),"utf8"));
+    assert.notEqual(join(f.root,claim.seed),seed);assert.deepEqual(identity(p.input.target),claim.source);
+    assert.deepEqual(f.calls(),{astra:0,sol:0});
+  }finally{if(child&&child.exitCode===null&&child.signalCode===null)child.kill("SIGKILL");await f.close()}
+});
+
+test("stage claims bind one owned source; copied, ambiguous, absent and malformed sources are preserved",async()=>{
+  const f=await fixture();
+  try{
+    const p=await f.service.vaults.preview(f.raw,randomUUID());await signPreview(f,p);
+    const seedName=".negi-vault-seed-"+p.requestId+"-"+randomUUID(),seed=join(f.root,seedName),stage=join(f.root,".negi-vault-stage-"+p.requestId);
+    await mkdir(seed);await writeFile(join(seed,".negi-vault-initialization.json"),p.marker);
+    const path=join(f.service.vaults.root,p.requestId+".stage-intent.json"),claim={schema:"negi-vault-stage-intent/1",requestId:p.requestId,hash:p.hash,
+      parent:p.parent,seed:seedName,stage:".negi-vault-stage-"+p.requestId,source:identity(seed)};
+    for(const wrong of [{...claim,hash:"f".repeat(64)},{...claim,parent:{...claim.parent,inode:"0"}},
+      {...claim,seed:"../outside"},{...claim,stage:"other"},{...claim,extra:true}]){
+      await writeFile(path,JSON.stringify(wrong));await assert.rejects(f.service.vaults.complete(p.requestId,p.hash));
+      assert.deepEqual(await readdir(seed),[".negi-vault-initialization.json"]);
+    }
+    await writeFile(path,JSON.stringify(claim));await mkdir(stage);await assert.rejects(f.service.vaults.complete(p.requestId,p.hash),/one source/);
+    await rename(stage,join(f.root,"held-stage"));
+    await rename(seed,join(f.root,"original-seed"));await assert.rejects(f.service.vaults.complete(p.requestId,p.hash),/one source/);
+    await cp(join(f.root,"original-seed"),seed,{recursive:true});await assert.rejects(f.service.vaults.complete(p.requestId,p.hash),/identity changed/);
+    await rename(seed,join(f.root,"copied-seed"));await rename(join(f.root,"original-seed"),seed);
+    await writeFile(join(seed,"unexpected.txt"),"preserve");await assert.rejects(f.service.vaults.complete(p.requestId,p.hash));
+    assert.equal(await readFile(join(seed,"unexpected.txt"),"utf8"),"preserve");await unlink(join(seed,"unexpected.txt"));
+    assert.equal((await f.service.vaults.complete(p.requestId,p.hash)).state,"created");
+    assert.deepEqual(identity(p.input.target),claim.source);
+    assert.deepEqual(await readdir(join(f.root,"copied-seed")),[".negi-vault-initialization.json"]);
+  }finally{await f.close()}
+});
+
+test("original signed preview bytes keep their hashes and legacy staging contract",async()=>{
+  const f=await fixture();
+  try{
+    const current=await f.service.vaults.preview(f.raw,randomUUID());
+    const {stageProtocol,hash:unusedHash,payloadHash:unusedPayload,marker:unusedMarker,ready:unusedReady,...payload}=current;
+    const digest=(value:unknown)=>createHash("sha256").update(JSON.stringify(value)).digest("hex"),payloadHash=digest(payload);
+    const core={...payload,payloadHash,marker:JSON.stringify({schema:"negi-vault-initialization-marker/1",requestId:current.requestId,payloadHash})+"\n",
+      ready:JSON.stringify({schema:"negi-vault-ready/1",requestId:current.requestId,payloadHash,
+        inventoryHash:digest({directories:current.directories,files:current.files.map(({path,sha256})=>({path,sha256}))})})+"\n"};
+    const legacy={...core,hash:digest(core)};await signPreview(f,legacy);
+    const stage=join(f.root,".negi-vault-stage-"+legacy.requestId);await mkdir(stage);await writeFile(join(stage,".negi-vault-initialization.json"),legacy.marker);
+    const reopened=await LocalProjectSetup.open(f.service.root,[f.repo]);
+    assert.deepEqual((await reopened.vaults.history())[0].preview,legacy);
+    assert.equal((await reopened.vaults.complete(legacy.requestId,legacy.hash)).state,"created");
+    await assert.rejects(readFile(join(reopened.vaults.root,legacy.requestId+".stage-intent.json")));
+  }finally{await f.close()}
 });

@@ -80,13 +80,26 @@ test("partial or missing publication holds admission; only exact signed complete
     await rename(final,pending);await assert.rejects(f.manager.current());await assert.rejects(f.manager.admit(first.hash,async()=>true));
     assert.equal((await f.manager.recovery())!.preview.configuration.hash,saved.configuration.hash);
     await assert.rejects(f.manager.recover(request,"f".repeat(64)));
-    const writerPath=join(f.manager.setup.root,"configuration-writer.lock"),writer={schema:"negi-configuration-writer/1",pid:process.pid,owner:randomUUID(),createdAt:new Date().toISOString()};
+    const writerPath=join(f.manager.setup.root,"configuration-writer.lock"),writer={schema:"negi-configuration-writer/1",pid:process.pid,owner:randomUUID(),createdAt:new Date().toISOString(),
+      operation:{domain:"project-configuration",requestId:request,hash:saved.configuration.hash}};
     await writeFile(writerPath,JSON.stringify(writer));await assert.rejects(f.manager.recover(request,saved.configuration.hash),/still live/);
     assert.deepEqual(JSON.parse(await readFile(writerPath,"utf8")),writer);
     const child=spawn(process.execPath,["-e","process.exit(0)"],{windowsHide:true,stdio:"ignore"});await new Promise<void>((resolve,reject)=>{child.once("exit",()=>resolve());child.once("error",reject)});
-    assert.throws(()=>process.kill(child.pid!,0));await writeFile(writerPath,JSON.stringify({...writer,pid:child.pid}));
+    assert.throws(()=>process.kill(child.pid!,0));
+    for(const held of [{...writer,pid:child.pid,operation:{...writer.operation,domain:"vault-initialization"}},
+      {...writer,pid:child.pid,operation:{...writer.operation,requestId:randomUUID()}},
+      {schema:writer.schema,pid:child.pid,owner:writer.owner,createdAt:writer.createdAt}]){
+      const bytes=JSON.stringify(held);await writeFile(writerPath,bytes);await assert.rejects(f.manager.recover(request,saved.configuration.hash));
+      assert.equal(await readFile(writerPath,"utf8"),bytes);
+    }
+    await writeFile(writerPath,JSON.stringify({...writer,pid:child.pid}));
     assert.equal((await f.manager.recover(request,saved.configuration.hash)).hash,saved.configuration.hash);
     assert.equal((await f.manager.recover(request,saved.configuration.hash)).hash,saved.configuration.hash);
+    // Crash after removing pending, before final writer cleanup: signed final
+    // still authorizes only its own exact dead operation writer.
+    const finalizedWriter=JSON.stringify({...writer,pid:child.pid});await writeFile(writerPath,finalizedWriter);
+    await assert.rejects(f.manager.recover(randomUUID(),saved.configuration.hash));assert.equal(await readFile(writerPath,"utf8"),finalizedWriter);
+    assert.equal((await f.manager.recover(request,saved.configuration.hash)).hash,saved.configuration.hash);await assert.rejects(readFile(writerPath));
     // Crash after the final hardlink, before removing the pending name.
     await copyFile(final,pending);assert.equal((await f.manager.recovery())!.published,true);
     await f.manager.recover(request,saved.configuration.hash);

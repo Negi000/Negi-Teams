@@ -26,15 +26,19 @@
 
 プレビューは読み取りだけで、設定履歴を前後で照合する。作成と完了は設定・開始要求の共通writerを保持し、全履歴の保存先を保護する。署名した本文と場所、親とGitのdirectory identity、Git基準を再確認する。別要求や結果不明のTask/providerのwriterをVaultの再開から解除しない。
 
-同じ親の `.negi-vault-stage-<UUID>` に排他的に作成する。最初のowner markerが完全で、すべての既存entry・型・bytesが署名内容に一致するときだけ、明示の「このVault作成を完了」で不足している予定ファイルを追加できる。予定外や変更済みのentryは保持して保留する。ready markerは全inventory・実Vault parser・必須参照の検査後に最後に保存し、ready以後の欠落を補完しない。
+新しい確認内容には `stageProtocol: owned-seed/1` を含めて署名する。同じ親のランダムな `.negi-vault-seed-<承認UUID>-<seed UUID>` にowner markerを保存し、承認UUID/hash・親identity・seed名・source identity・stage名をtrusted保存領域のstage intentへ排他的に記録する。その後、create-onlyで `.negi-vault-stage-<承認UUID>` へ移動する。claim前の中断で残ったseedは取り込まず、削除せず、明示完了時に別の新しいseedを使う。
+
+stage intentがある場合は「同じidentityのseedのみ存在」または「同じidentityのstageのみ存在」のどちらか一方を照合する。seedは完全なowner markerのみ、stageはすべての既存entry・型・bytesが署名内容に一致するときだけ不足した予定entryを補完する。両方存在/不在、別identity、予定外entry、claimのない新形式stageは保持して保留する。stage intentは既存の最終保存先を取り込む許可にはならない。ready markerは全inventory・実Vault parser・必須参照の検査後に最後に保存し、ready以後の欠落を補完しない。旧署名済み確認はbytes/hashと旧stageの照合規則を維持し、新しいclaimへ暗黙に変換しない。
 
 公開前に、署名hashとstage directory identityをtrusted保存領域のpublication intentへ保存する。Windowsは[MoveFileW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefilew)、Linuxは[renameat2のRENAME_NOREPLACE](https://man7.org/linux/man-pages/man2/rename.2.html)で、既存の保存先へ置き換えずにdirectoryを公開する。Nodeのrename、copy、mergeへのfallbackはない。Linux対応は実装とAPI仕様の照合で、今回の実filesystem試験はWindowsである。
 
 公開からcatalog保存までの中断は、元のintent・移動前後で同じdirectory identity・stage不在・完全なready/inventoryがそろうときだけ完了できる。他者が同じ本文をコピーした既存Vault、異なるidentity、stageと保存先の同時存在は取り込まない。catalogの公開はcreate-only。完了後のcatalogは作成履歴なので、後の正当なSpec改訂やTask追加は保持する。
 
-GETと再読み込みは修復しない。途中の要求を一覧に表示し、本文とhashを確認してから「このVault作成を完了」を選ぶ。繰り返した「Vaultを作成」は未完了要求を自動で再開しない。解除できるwriterは、同じUUID/hashのVault操作、完全なowner/PID/date、終了済みPID、guard内の再照合を満たすものだけ。生存中・別domain/要求・所有不明・部分記録は保持する。Vaultの補助記録に不整合があっても、既存設定は表示し、Vault操作だけを保留する。
+GETと再読み込みは修復しない。途中の要求を一覧に表示し、本文とhashを確認してから「このVault作成を完了」を選ぶ。繰り返した「Vaultを作成」は未完了要求を自動で再開しない。解除できるwriterは、同じdomain/UUID/hash、完全なowner/PID/date、終了済みPID、native guard内のexact bytes/identity再照合を満たすものだけ。Vaultと設定改訂のwriterには異なるdomainを記録する。生存中・別domain/要求・所有不明・部分記録・domainのない旧writerは保持する。Vaultの補助記録に不整合があっても、既存設定は表示し、Vault操作だけを保留する。
 
-owner marker作成前の中断、markerの部分保存、復旧guard自体の残留、未署名記録、外部writerや停電・全強制終了の汎用復旧は未対応で、記録を保持して照合待ちにする。Windowsのdirectory fsync、hardlink未対応filesystem、Linux以外の非Windows環境にも制限がある。既存/dirtyな場所の初回採用、場所・契約版の移行、保存履歴の安全な削除は別の残る作業である。
+復旧の排他はWindowsではcanonical root/kindを束縛した[名前付きmutex](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createmutexw)、Linuxでは世代を分けた永続0 byte fileへの[flock](https://man7.org/linux/man-pages/man2/flock.2.html)を使う。保持processの終了でOSが排他を解放する。Windowsでは親とwriterのhandleを保持して置換を抑え、[SetFileInformationByHandle](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfileinformationbyhandle)で開いたwriterだけを削除する。Linuxでは親dirfdと固定名、exact bytes/dev/inoを照合して削除する。古い `.recovery.lock` / `configuration-recovery.lock` は新guardへ流用せず、その存在だけで保全holdにする。PIDのアクセス拒否・再利用による生存・識別不能は解除しない。Windowsでは[Python os.killの仕様](https://docs.python.org/3/library/os.html#os.kill)による終了操作を避け、process handleで終了を調べる。
+
+claim/markerの部分保存、旧stageのmarker前中断、旧復旧guardの残留、未署名記録、外部writerや停電・全強制終了の汎用復旧は未対応で、記録を保持して照合待ちにする。OS guardは協調する同版processの順序付けであり、同じhostの任意書込やモデルのfilesystemアクセスを隔離するsandboxではない。更新時は旧版processを停止してから同版へそろえる。Windowsのdirectory fsync、hardlink未対応filesystem、Linux以外の非Windows環境にも制限がある。Linuxは今回の実filesystem試験の対象外である。既存/dirtyな場所の初回採用、場所・契約版の移行、保存履歴の安全な削除は別の残る作業である。
 
 ## 確認と保存
 
@@ -77,7 +81,7 @@ owner marker作成前の中断、markerの部分保存、復旧guard自体の残
 
 完全な署名済み候補が残る場合、通常の `/setup` で条件と版を確認し「この保存を完了」を選ぶ。元のUUID・hashと一致する保存だけを完了し、再起動の確認を必要とする。Taskやproviderの再実行は伴わない。保存writerが残る場合も、所有記録が正確で、そのPIDの終了が確認できるときだけ、この明示操作で解除できる。生存中・所有不明・PID再利用・照合権限不明は解除しない。
 
-不完全・未署名・複数候補、候補のない残留writer、復旧処理自身の残留lockは保留し、記録を保持する。汎用の手動照合画面は残る作業である。保存先にはhardlink対応が必要。WindowsではNodeからdirectory fsyncが使えないため、欠落は次回の署名照合で検出して保留する。この試験は停電時の永続性や全filesystemへの対応を証明するものではない。
+不完全・未署名・複数候補、候補のない残留writer、domainのない旧writer、旧復旧処理の残留lockは保留し、記録を保持する。新しい復旧guardのprocess終了時の解放とdomainの照合は新規Vaultと共通のnative処理を使う。汎用の手動照合画面は残る作業である。保存先にはhardlink対応が必要。WindowsではNodeからdirectory fsyncが使えないため、欠落は次回の署名照合で検出して保留する。この試験は停電時の永続性や全filesystemへの対応を証明するものではない。
 
 ## 確認した範囲
 

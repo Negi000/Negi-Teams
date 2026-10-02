@@ -158,3 +158,15 @@ NT-003/009/016/018/073の進捗である。owner marker保存前の中断/部分
 最終の標準回帰は778件中775成功・3skip・失敗/未完了0（406299.3677ms、exit0）。最後の本文表示と既存palette tokenへの修正後に型検査・ビルドも成功した。全件試験中の最後の変更はCSS tokenのみで、ブラウザ操作の最後の記録後の色token修正を含む。先の失敗・未集計記録は保持し、複数実行を合算しない。CI成功の主張ではない。
 
 最後のpalette token修正後にも、ビルド済み画面で新規仕様のプレビューを再確認した。明暗両テーマの本文foreground/backgroundが既存tokenの実色に解決し、全文とスマホ幅を保持していた。作成操作は実行せず、最終のPC全体とスマホ本文の画面記録を保存した。独立した最終監査では追加のリリース阻害事項はなく、文書化した保全holdの残条件を継続する。
+
+## 2026-10-02追加: 新規Vaultの初期中断と復旧処理の排他
+
+新しい承認へ`owned-seed/1`を束縛し、ランダムseed→owner marker→trusted stage intent→同じidentityのstageへのcreate-only移動→inventory/ready→最終publication intent→公開→catalogの順にした。claim前の中断で残ったseedは保持し、明示完了時に新しいseedを使う。claim後はseedかstageの一方だけが存在し、identity/owner/inventoryが一致する場合だけ再開する。公開直後のcatalog作成にも、stage claimと最終intentの同じsource、seed/stage不在を要求する。旧署名済み確認のbytes/hashと旧stage規則は保持する。
+
+writer復旧は固定名のnative helperへ移し、Windowsの名前付きmutex、Linuxの世代を分けたflockを使う。process終了で新しいguardの排他が解放される。Windowsはcanonical rootをhandleで確認し、開いた正確なwriterだけをhandleで削除する。生存PIDを終了させる処理はない。設定改訂にも`project-configuration`/UUID/hashを記録し、Vault・別要求・旧generic writerは解除しない。設定の最終公開後・writer cleanup前の停止も、最新の署名済みfinal/request/hashを照合してから同じwriterだけを復旧する。
+
+独立監査で、設定finalのみがある停止点、UNC/long pathのWindows native回復、Vault移動後/catalog前のstage証拠chainを修正した。最後の再監査で追加の具体的なauthority/deletion/data-integrity指摘はなかった。ビルド済みMaterial 3画面、実Git/Vault/HTTP、合成停止状態で、作成→2参照の通常設定→store再読込→同じ承認のdead writerを伴う明示完了を確認した。1440/320/375px、明暗両テーマ、48px操作、キーボード、全文と横幅、320/375pxでの下部ナビより上の承認ボタンを確認した。fixtureのログインfavicon404は別記録で保持し、product console全体のerror0とは扱わない。実モデルturn・実Codexの新規起動・Jev・native端末確認ではない。
+
+NT-003/009/016/018/073の追加進捗である。部分claim/marker・旧guard/旧generic writer・旧stageの既知停止点、汎用の手動照合GUI、Windows directory fsync/停電・外部writer・旧新版同時稼働の回復は残る。Linuxの実filesystemと実UNC shareは未検証で、OS guardは同一hostの任意書込を隔離するsandboxではない。dirty初回採用/場所と契約版移行、実Taskのbroker対応終了と成果救済、旧MCP/PTY/workerの全契約と共通枠、作成元会話リンク、Jev全gate/校正/上限、Knowledgeの複数事例/矛盾/寿命/派生失効/削除、Policyの利益/承認/active/rollback、変化中履歴とimmutable snapshot検証、実機と全利用者導線など、先行記録の全条件を保持する。全73要件とPhase0–8のゴールはACTIVE。
+
+標準回帰784件中781成功・3skip・失敗/未完了0（472277.6101ms、exit0）。この実行中に最後のUNC/stage chain修正が入ったため、最後の差分はその後の関連21件全成功（111248.9946ms、exit0）と型検査・ビルドで確認した。Windowsではguardを保持した実子processを強制終了→再取得、seed mkdir時点の実子process停止→元seed保全/別seedで完了、長いcanonical rootのnative回復を確認した。UNCはnamespace変換だけを検査し、実共有を使った成功とは扱わない。GUI確認は最後のUNC/chain修正前のビルド、変更後のruntimeは最終関連試験で確認した。前の18件/2件・単独1件の実行を合算せず、CI成功や停電/全process crash耐性の主張にはしない。

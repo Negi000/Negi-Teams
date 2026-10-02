@@ -6,6 +6,7 @@ import { isAbsolute, join, relative } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { HumanReviewProofStore, isReviewRequestId } from "./humanReviewProof.ts";
 import { LocalProjectSetup, type ProjectSettings, type ProjectSetupPreview } from "./projectSetup.ts";
+import { recoverWriter, type WriterOperation } from "./writerRecovery.ts";
 
 const hash=(v:unknown)=>createHash("sha256").update(JSON.stringify(v)).digest("hex");
 export type ConfigurationChange={kind:"upsert";settings:ProjectSettings}|{kind:"archive";id:string}|{kind:"restore";version:number};
@@ -45,9 +46,9 @@ export class LocalProjectConfiguration {
       // history before releasing a known dead shared writer. Partial/live/unknown
       // ownership is retained by releaseDeadWriter; reads never repair it.
       await this.setup.vaults.authorizeCompletion(writer.requestId,writer.hash);
-      await this.history();await this.releaseDeadWriter(writer);
+      await this.history();await this.releaseDeadWriter({domain:"vault-initialization",requestId:writer.requestId,hash:writer.hash});
     }
-    return this.locked(async()=>operation(await this.history()),writer);
+    return this.locked(async()=>operation(await this.history()),writer?{domain:"vault-initialization",requestId:writer.requestId,hash:writer.hash}:undefined);
   }
   private async readHistory(pendingRequestId?:string):Promise<ProjectConfiguration[]>{
     const first=await this.setup.current(),names=(await readdir(this.root)).sort();
@@ -128,11 +129,11 @@ export class LocalProjectConfiguration {
     if(!affected.length)throw Error("Configuration has no changes");
     return {configuration:revision(current.version+1,current.hash,projects),change,affected:affected.sort()};
   }
-  private async locked<T>(operation:()=>Promise<T>,vault?:VaultWriter):Promise<T>{
+  private async locked<T>(operation:()=>Promise<T>,writer?:WriterOperation):Promise<T>{
     const path=join(this.setup.root,"configuration-writer.lock"),lock=await open(path,"wx",0o600);
     try{
       await lock.writeFile(JSON.stringify({schema:"negi-configuration-writer/1",pid:process.pid,owner:randomUUID(),createdAt:new Date().toISOString(),
-        ...(vault?{operation:{domain:"vault-initialization",requestId:vault.requestId.toLowerCase(),hash:vault.hash}}:{})})+"\n");await lock.sync();
+        ...(writer?{operation:{domain:writer.domain,requestId:writer.requestId.toLowerCase(),hash:writer.hash}}:{})})+"\n");await lock.sync();
       return await operation();
     }finally{await lock.close();await unlink(path)}
   }
@@ -157,7 +158,7 @@ export class LocalProjectConfiguration {
       await link(pending,this.path(preview.configuration.version));await this.syncDirectory();
       await unlink(pending);await this.syncDirectory();
       return preview;
-    });
+    },{domain:"project-configuration",requestId,hash:expectedHash});
   }
   private async syncDirectory(){
     // Windows does not expose directory fsync through Node. Missing final entries
@@ -183,31 +184,24 @@ export class LocalProjectConfiguration {
     // already signed pending publication. Never guess, steal a live lock or kill.
     const candidate=await this.recovery();
     if(candidate&&(candidate.requestId!==requestId.toLowerCase()||candidate.preview.configuration.hash!==expectedHash))throw Error("Recovery target differs");
-    if(candidate)await this.releaseDeadWriter();
+    if(!candidate){
+      // Publication may have finished before the owner's final writer cleanup.
+      // Verify the signed latest final as strictly as a pending publication.
+      const current=await this.current();
+      if(!current||current.version<2||current.hash!==expectedHash||
+        (await json<Publication>(this.path(current.version))).requestId!==requestId.toLowerCase())throw Error("Recovery already changed");
+    }
+    const writer:WriterOperation={domain:"project-configuration",requestId:requestId.toLowerCase(),hash:expectedHash};
+    await this.releaseDeadWriter(writer);
     return this.locked(async()=>{
       const pending=await this.recovery();if(!pending){const c=await this.current();if(!c||c.hash!==expectedHash||
         (await json<Publication>(this.path(c.version))).requestId!==requestId.toLowerCase())throw Error("Recovery already changed");return c;}
       const c=pending.preview.configuration;if(pending.requestId!==requestId.toLowerCase()||c.hash!==expectedHash)throw Error("Recovery target differs");
       if(!pending.published){await link(this.pendingPath(c.version),this.path(c.version));await this.syncDirectory();}
       await unlink(this.pendingPath(c.version));await this.syncDirectory();return (await this.current())!;
-    });
+    },writer);
   }
-  private async releaseDeadWriter(vault?:VaultWriter){
-    const path=join(this.setup.root,"configuration-writer.lock");
-    try{await lstat(path)}catch(e){if((e as NodeJS.ErrnoException).code==="ENOENT")return;throw e}
-    const guardPath=join(this.setup.root,"configuration-recovery.lock"),guard=await open(guardPath,"wx",0o600);
-    try{
-      let value:{schema:string;pid:number;owner:string;createdAt:string;operation?:unknown};
-      try{value=await json(path)}catch(e){if((e as NodeJS.ErrnoException).code==="ENOENT")return;throw e}
-      if(value.schema!=="negi-configuration-writer/1"||!Number.isSafeInteger(value.pid)||value.pid<=0||!isReviewRequestId(value.owner)||
-        !Number.isFinite(Date.parse(value.createdAt))||Object.keys(value).length!==(vault?5:4)||
-        vault&&!isDeepStrictEqual(value.operation,{domain:"vault-initialization",requestId:vault.requestId.toLowerCase(),hash:vault.hash}))throw Error("Writer ownership is unknown or belongs to another operation; preserve it");
-      try{process.kill(value.pid,0);throw Error("Configuration writer is still live");}
-      catch(e){if((e as NodeJS.ErrnoException).code!=="ESRCH")throw e;}
-      if(!isDeepStrictEqual(await json(path),value))throw Error("Configuration writer changed during reconciliation");
-      await unlink(path);
-    }finally{await guard.close();await unlink(guardPath)}
-  }
+  private async releaseDeadWriter(writer:WriterOperation){return recoverWriter(this.setup.root,"configuration",writer);}
   /** Shares the settings writer with every new durable intent; existing work and stop/read stay available. */
   async admit<T>(bootHash:string,operation:()=>Promise<T>):Promise<T>{
     return this.locked(async()=>{if((await this.current())?.hash!==bootHash)throw new ConfigurationPendingError();return operation()});
