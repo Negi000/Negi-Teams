@@ -5,6 +5,7 @@ import { lstat, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { setTimeout as wait } from "node:timers/promises";
 import { verifyMasterTurnDirectory } from "./masterTurnRecords.ts";
+import { runtimeStoragePaths } from "./runtimeStoragePaths.ts";
 
 export type ScheduledRole = "astra" | "sol" | "luna";
 export type ScheduledStatus = "queued" | "running" | "needs_reconciliation" |
@@ -335,8 +336,38 @@ export class FileScheduler {
     reject(this.path === this.registeredPath, "registered scheduler path changed");
   }
 
+  /** Default writers must not bypass an explicit runtime index, even if its DB
+   * is missing or bootstrap was interrupted. Does not open SQLite or repair. */
+  async assertStorageCompatible(): Promise<void> {
+    this.assertPath();
+    if (this.journal) return;
+    await this.assertRuntimeUnregistered();
+  }
+
+  private async assertRuntimeUnregistered(): Promise<void> {
+    this.assertPath();
+    const paths = runtimeStoragePaths(this.registeredPath);
+    for (const path of [paths.registration, paths.database, ...["-journal", "-wal", "-shm"].map(suffix => paths.database + suffix)]) {
+      try { await lstat(path); throw new Error("Scheduler rejected: registered runtime index requires its journal writer"); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    }
+    this.assertPath();
+  }
+
+  /** Serialize unindexed turn artifacts with explicit runtime adoption. No
+   * scheduler method may be called inside this trusted publication callback. */
+  async withUnindexedArtifacts<T>(run: () => Promise<T>): Promise<T> {
+    return this.withLock(async () => {
+      await this.assertRuntimeUnregistered();
+      const result = await run();
+      await this.assertRuntimeUnregistered();
+      return result;
+    });
+  }
+
   private async capture(): Promise<SchedulerRead> {
     this.assertPath();
+    await this.assertStorageCompatible();
     let data: string;
     let stamp: SchedulerFileStamp | null = null;
     let parentIdentity: string | null = null;
@@ -393,6 +424,7 @@ export class FileScheduler {
 
   private async withFileLock<T>(fn: () => Promise<T>): Promise<T> {
     this.assertPath();
+    await this.assertStorageCompatible();
     if (this.journal) {
       await verifyMasterTurnDirectory(dirname(this.registeredPath));
     }
@@ -418,6 +450,7 @@ export class FileScheduler {
 
   private async write(event: SchedulerEvent, current: SchedulerRead): Promise<void> {
     this.assertPath();
+    await this.assertStorageCompatible();
     const bytes = JSON.stringify(event) + "\n";
     if (this.journal) {
       await this.journal.appendIntent(structuredClone({ path: this.registeredPath, previousBytes: current.bytes, bytes, event }));

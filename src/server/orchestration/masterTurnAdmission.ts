@@ -100,6 +100,7 @@ export function scheduledMasterTurns(options: { root: string; masterId: string;
   };
   const operation = async <T>(run: () => Promise<T>): Promise<T> => {
     checkRegistration();
+    await registered.scheduler.assertStorageCompatible();
     await journal?.audit();
     checkRegistration();
     try { return await run(); } finally {
@@ -128,7 +129,7 @@ export function scheduledMasterTurns(options: { root: string; masterId: string;
       if (journal) throw new Error("Master registered evidence root missing; preserve its journal");
     }
     if (journal && rootPath !== registered.root) throw new Error("Master registered evidence root alias");
-    if (!journal) await mkdir(rootPath, { recursive: true });
+    if (!journal) await registered.scheduler.withUnindexedArtifacts(() => mkdir(rootPath, { recursive: true }));
     const root = await realpath(rootPath);
     if (inside(cwd, root)) throw new MasterInputNotSentError("統括の実行記録は作業場所の外に設定してください。未送信です。");
     checkRegistration();
@@ -140,14 +141,17 @@ export function scheduledMasterTurns(options: { root: string; masterId: string;
       const bytes = JSON.stringify(value) + "\n";
       const limit = relativePath === "request.json" ? 1_000_000 : relativePath === "outcome.json" ? 2_000_000 : 8000;
       if (Buffer.byteLength(bytes) > limit) throw new Error("Master turn artifact exceeds its read bound");
-      checkRegistration();
-      if (journal) await journal.appendIntent(structuredClone({ workId, relativePath, bytes }));
-      checkRegistration();
-      if (initial) await mkdir(out);
-      checkRegistration();
-      const reference = await writeNew(join(out, relativePath), bytes);
-      checkRegistration();
-      return reference;
+      const write = async () => {
+        checkRegistration();
+        if (journal) await journal.appendIntent(structuredClone({ workId, relativePath, bytes }));
+        checkRegistration();
+        if (initial) await mkdir(out);
+        checkRegistration();
+        const reference = await writeNew(join(out, relativePath), bytes);
+        checkRegistration();
+        return reference;
+      };
+      return journal ? write() : registered.scheduler.withUnindexedArtifacts(write);
     };
     const requestRef = await publish("request.json", { schemaVersion: "negi-master-turn/1", workId,
       masterId: registered.masterId, ...request, cwd, inputSha256: sha256(request.text), at: registered.requestedAt ?? new Date().toISOString() }, true);

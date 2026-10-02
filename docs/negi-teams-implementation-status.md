@@ -398,3 +398,15 @@ dispatch ACK消失・部分記録は未送信取消へ変換しない。既存di
 最終関連9 test filesは**196件中196成功・失敗/取消/スキップ0（108785.4547ms、actual exit0）**。新規19ケースを含み、Windows nativeの共通scope/最後の枠競合と既定turn/起動/会話/Task互換を確認した。実行中tracked runtime/test307 files hash不変、client/server型検査・build・差分検査が成功した。独立read-only再レビューでP2閉鎖・追加material regressionなし。監査側の変更/試験重複はない。開始した試験childの終了を待った。修正前193/193と途中focused30/30を最終suiteへ合算しない。client assetsは`index-CvLJ6iRB.css`/`index-C-cjKz75.js`を維持する。fixture callbackは製品の署名DB/baseline/repairの実証ではなく、今回新GUI/実model/provider/Jev/実機/人の受入/CI成功を確認した結果ではない。
 
 これは通常の保存経路へ差し込むinterfaceと排他/公開の実装であり、署名付きturn/scheduler索引の保存実装、明示baseline・参加version fence・production caller/起動/providerへの全面接続・認証済み確認UIは次の工程である。Codex新規会話は未有効化。Material 3 Expressiveの既存画面を維持し、初回thread/returned identity/旧runtime静止、repair/保持/性能、旧dispatch/Jev/知識/Policy/履歴、実機safe-area/keyboardと人の受入を含む全73要件・Phase0–8を保持する。ゴールはACTIVE。
+
+## 2026-10-03追加: 通常turnと共有schedulerの実署名索引
+
+[登録・baseline・保存方式](negi-teams-runtime-inventory.md)。既存signing authority/native root scopeを使い、固定schedulerとturnRootを独立のglobal signed SQLite台帳へ保存する実装を追加した。共有TaskのeventをMasterごとのstage headへ帰属させず、既存stage/owner/recoveryの形式を維持する。実callbackを通常FileScheduler/scheduledMasterTurnsへ登録できる。
+
+原文・file stamp/contextを含むpreview proofと明示decisionを照合し、scheduler lockの内側でpersistent registration marker→create-only DB baselineを保存する。同じdecisionはreadonly ACK。全appendは元snapshot/head CAS付きsigned intentを先にcommitし、原文公開は既存保存境界に渡す。欠落/先行prefixはpending、改変/部分/未索引/HMAC/schema不一致は保留する。DB欠損・部分bootstrap・hot journalを自動修復せず、既定writerはmarker/DB/sidecarsを開かず拒否する。
+
+独立レビューの3指摘を修正し、全baseline artifactのworkIdをmarker/DB作成前に照合、既定Masterのroot作成/全artifact公開とadoptionを同じscheduler lockで直列化、SQLite page上限・COMMIT前後のDBサイズ・新規requestのturn directory上限をintent前に検査する。空schedulerの存在も署名し、その消失や未索引出現を保留する。追加6回帰でheadと物理副作用を確認した。独立再レビューで4点閉鎖・追加material regressionなし。監査側の独立focusedは1成功/18名前filter skip・失敗/取消0、15214.8865ms、actual exit0（stdoutのみ、log fileなし）で、親の最終suiteとは別集合である。
+
+最終関連10 test filesは**215件中215成功・失敗/取消/スキップ0（176428.22ms、actual exit0）**。新規19ケースと既存196ケースを含む。実行中tracked runtime/test311 files hash不変、client/server型検査・build・Python AST・差分検査が成功した。ビルド済みserver moduleから固定helper fallbackを使い、実native guard/signing authorityでbaseline→scheduler append→clean audit/seq2を確認した。開始した試験childは実終了を待った。修正前209/209、途中focused6/6、監査側focused1/1を最終suiteへ合算しない。client assetsは`index-CvLJ6iRB.css`/`index-C-cjKz75.js`を維持する。
+
+production/HTTP/認証済み確認UIと全Task/Master/旧dispatchへの登録、owner/4の取得headと後続行のruntime統合、起動/returned identity/旧runtime静止・root-wide参加version条件、bootstrap/journal repair・retention/版移行/性能、外部anchor/同時喪失/非参加ABA・実停電/UNC/Linuxは残る。Material 3 ExpressiveのPC/スマホ別導線は維持し、今回実機safe-area/keyboard・人の全導線受入は確認していない。Codex新規会話は未有効化。全73要件・Phase0–8を保持し、ゴールはACTIVE。
