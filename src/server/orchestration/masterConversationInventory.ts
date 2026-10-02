@@ -20,6 +20,11 @@ export interface MasterInventoryMigrationPreview {
   proofSha256: string; masterCount: number; stageCount: number; receiptCount: number;
 }
 export interface MasterInventoryMigrationResult extends MasterInventoryMigrationPreview { decisionId: string }
+export interface MasterInventoryDatabaseRecoveryPreview {
+  proofSha256: string; databaseSha256: string; journalSha256: string; recoveredSha256: string;
+  masterCount: number; artifactCount: number; missingCount: number;
+}
+export interface MasterInventoryDatabaseRecoveryResult extends MasterInventoryDatabaseRecoveryPreview { decisionId: string; recovered: true }
 const sha = /^[0-9a-f]{64}$/;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const path = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/0[0-4]-(requested|old_idle|start_dispatched|bound|completed|cancelled|needs_reconciliation)|recoveries\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.json$/;
@@ -50,7 +55,7 @@ async function script() {
 async function invoke(request: Record<string, unknown>): Promise<Record<string, unknown>> {
   const frozen = structuredClone(request);
   return frozen.action === "processIdentity" ? invokeHeld(frozen) : withMasterStorageGuard(String(frozen.root), () => invokeHeld(frozen),
-    { createIfMissing: !["audit", "lookup", "previewMigration"].includes(String(frozen.action)) });
+    { createIfMissing: !["audit", "lookup", "previewMigration", "previewDatabaseRecovery", "recoverDatabase"].includes(String(frozen.action)) });
 }
 
 async function invokeHeld(request: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -65,8 +70,10 @@ async function invokeHeld(request: Record<string, unknown>): Promise<Record<stri
     let stdout = "", stderr = "", size = 0, failure: Error | null = null;
     // Do not terminate an explicit adoption on an elapsed-time deadline: it may
     // already have created its one permitted DB. Wait for its actual exit. The
-    // read-only full preview has a larger budget than ordinary artifact APIs.
-    const timeout = request.action === "migrate" ? null : request.action === "previewMigration" ? 15 * 60_000 : 30_000;
+    // Database preview also owns disposable full-history clones: an elapsed-time
+    // kill would bypass their cleanup. Wait for actual exit and release the guard.
+    const timeout = ["migrate", "recoverDatabase", "previewDatabaseRecovery"].includes(String(request.action)) ? null :
+      request.action === "previewMigration" ? 15 * 60_000 : 30_000;
     const timer = timeout === null ? null : setTimeout(() => { failure = Error("Master inventory: helper timeout; operation outcome needs inspection"); child.kill(); }, timeout);
     child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
@@ -139,6 +146,30 @@ export class MasterConversationInventory {
     check(value.pid === process.pid && typeof value.startToken === "string" &&
       (value.platform === "windows" && /^[0-9]{1,30}$/.test(value.startToken) || value.platform === "linux" && /^[0-9a-f-]{36}:[0-9]{1,30}$/.test(value.startToken)), "parent process identity invalid");
     return value as unknown as MasterInventoryProcessIdentity;
+  }
+  private databaseRecoveryPreview(row: Record<string, unknown>): MasterInventoryDatabaseRecoveryPreview {
+    check([row.proofSha256, row.databaseSha256, row.journalSha256, row.recoveredSha256].every(value => typeof value === "string" && sha.test(value)) &&
+      Number.isSafeInteger(row.masterCount) && Number(row.masterCount) > 0 && Number(row.masterCount) <= 10_000 &&
+      Number.isSafeInteger(row.artifactCount) && Number(row.artifactCount) >= 0 && Number(row.artifactCount) <= 100_000 &&
+      Number.isSafeInteger(row.missingCount) && Number(row.missingCount) >= 0 && Number(row.missingCount) <= Number(row.artifactCount), "database recovery result invalid");
+    return { proofSha256: String(row.proofSha256), databaseSha256: String(row.databaseSha256), journalSha256: String(row.journalSha256), recoveredSha256: String(row.recoveredSha256),
+      masterCount: Number(row.masterCount), artifactCount: Number(row.artifactCount), missingCount: Number(row.missingCount) };
+  }
+  /** Copies and audits a disposable rollback result; original files stay intact. */
+  async previewDatabaseRecovery(): Promise<MasterInventoryDatabaseRecoveryPreview> {
+    const row = await invoke(this.request("previewDatabaseRecovery"));
+    fields(row, ["schema", "action", "masterId", "proofSha256", "databaseSha256", "journalSha256", "recoveredSha256", "masterCount", "artifactCount", "missingCount"]);
+    return this.databaseRecoveryPreview(row);
+  }
+  /** Explicit exact-decision SQLite rollback; no elapsed-time kill or auto retry. */
+  async recoverDatabase(input: { decisionId: string; expectedProofSha256: string }): Promise<MasterInventoryDatabaseRecoveryResult> {
+    const frozen = { decisionId: input.decisionId, expectedProofSha256: input.expectedProofSha256 };
+    check(uuid.test(frozen.decisionId) && sha.test(frozen.expectedProofSha256), "database recovery decision/proof required");
+    const row = await invoke(this.request("recoverDatabase", frozen));
+    fields(row, ["schema", "action", "masterId", "proofSha256", "databaseSha256", "journalSha256", "recoveredSha256", "masterCount", "artifactCount", "missingCount", "decisionId", "recovered"]);
+    const preview = this.databaseRecoveryPreview(row);
+    check(row.decisionId === frozen.decisionId && preview.proofSha256 === frozen.expectedProofSha256 && row.recovered === true, "database recovery differs from decision");
+    return { ...preview, decisionId: frozen.decisionId, recovered: true };
   }
   private auditResult(row: Record<string, unknown>): MasterInventoryAudit {
     const checkpoint = head(row.head);

@@ -80,7 +80,7 @@ export class MasterConversationAuthority {
 
   private async legacyInventoryAbsent(): Promise<boolean> {
     const database = this.root + ".inventory.sqlite3";
-    const present = await Promise.all(["", "-journal", "-wal", "-shm"].map(async suffix => {
+    const present = await Promise.all(["", "-journal", "-wal", "-shm", ".recoveries", ".recoveries.pending"].map(async suffix => {
       try { await lstat(database + suffix); return true; }
       catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
     }));

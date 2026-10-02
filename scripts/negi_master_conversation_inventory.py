@@ -249,7 +249,16 @@ def read_file(path, limit):
     return raw
 
 
-def absent(path):return not os.path.lexists(path)
+def absent(path):
+    # Permission, invalid-name and other stat failures are ambiguity, not absence.
+    try:os.lstat(path)
+    except FileNotFoundError:return True
+    return False
+
+
+def recovery_namespace_absent(db):
+    for suffix in (".recoveries", ".recoveries.pending"):
+        require(absent(Path(str(db) + suffix)), "recovery ledger survives; never recreate database")
 
 
 def catalog(path, limit=MAX_MASTERS):
@@ -319,7 +328,7 @@ def process_identity():
 def storage_action(function):
     @wraps(function)
     def guarded(self, *args, **kwargs):
-        with storage_guard(self.root, create=function.__name__ not in ("audit", "lookup", "preview_migration")):return function(self, *args, **kwargs)
+        with storage_guard(self.root, create=function.__name__ not in ("audit", "lookup", "preview_migration", "preview", "recover")):return function(self, *args, **kwargs)
     return guarded
 
 
@@ -335,6 +344,7 @@ class Inventory:
         self.key_path = self.root / "signing-key.json"
         self.retained = None
         self.adoption = None
+        self.recovery_access = False
 
     def authority(self):
         normal(self.root.parent, True)
@@ -368,6 +378,10 @@ class Inventory:
     def guarded(self, initialize=False):
         with ExitStack() as stack:
             meta = stack.enter_context(self.authority_guard())
+            if initialize:recovery_namespace_absent(self.db)
+            if not self.recovery_access:
+                from negi_master_inventory_recovery import DatabaseRecovery
+                DatabaseRecovery(self).assert_idle(meta)
             no_sidecars(self.db)
             if initialize:
                 require(absent(self.db), "existing database must never be replaced")
@@ -427,6 +441,7 @@ class Inventory:
 
     @storage_action
     def initialize(self):
+        recovery_namespace_absent(self.db)
         # Validate every master BEFORE creating the sibling DB; populated old records
         # need an explicit migration, never a silent adoption from current files.
         self.authority()
@@ -477,6 +492,7 @@ class Inventory:
         if check_database:
             no_sidecars(self.db)
             require(absent(self.db), "existing database must never be replaced or silently upgraded")
+            recovery_namespace_absent(self.db)
         meta = self.authority();self.absent_owners()
         master_names = catalog(self.masters)
         require(self.master_id in master_names, "migration target master missing")
@@ -977,7 +993,7 @@ def main():
         require(set(request) == {"action", "root", "masterId"}, "input fields")
         result = {"schema": "negi-master-inventory-result/1", "action": action, "masterId": inventory.master_id, "processIdentity": process_identity()}
     else:
-        with storage_guard(inventory.root, ticket, create=action not in ("audit", "lookup", "previewMigration")):
+        with storage_guard(inventory.root, ticket, create=action not in ("audit", "lookup", "previewMigration", "previewDatabaseRecovery", "recoverDatabase")):
             if action in ("initialize", "register", "audit"):
                 require(set(request) == {"action", "root", "masterId"}, "input fields")
                 result = getattr(inventory, action)()
@@ -987,6 +1003,13 @@ def main():
                 require(set(request) == {"action", "root", "masterId"}, "migration preview fields")
                 result = inventory.preview_migration()
             elif action == "migrate":result = inventory.migrate(request)
+            elif action in ("previewDatabaseRecovery", "recoverDatabase"):
+                from negi_master_inventory_recovery import DatabaseRecovery
+                recovery = DatabaseRecovery(inventory)
+                if action == "previewDatabaseRecovery":
+                    require(set(request) == {"action", "root", "masterId"}, "database recovery preview fields")
+                    result = recovery.preview()
+                else:result = recovery.recover(request)
             else:raise ValueError("Master inventory: unsupported action")
     sys.stdout.buffer.write(encoded(result) + b"\n")
 

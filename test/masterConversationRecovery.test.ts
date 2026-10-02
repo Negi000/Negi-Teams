@@ -45,7 +45,7 @@ async function resign(f:F,value:Record<string,unknown>){
 }
 
 test("a surviving independent database or sidecar disables native owner release and preserves its evidence",async()=>{
- for(const suffix of ["","-journal","-wal","-shm"] as const)await fixture(async f=>{
+ for(const suffix of ["","-journal","-wal","-shm",".recoveries",".recoveries.pending"] as const)await fixture(async f=>{
   const ownerBytes=await stoppedOwner(f),authority=f.reopen(),before=await authority.ownerRecovery(f.cwd);
   assert.equal(before?.canRelease,true);const sibling=f.root+".inventory.sqlite3"+suffix;
   await writeFile(sibling,"retained independent evidence");

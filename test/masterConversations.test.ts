@@ -33,6 +33,8 @@ const operationPath=(root:string,request:MasterConversationRequest)=>join(root,"
 for (const [label,suffix,bytes] of [
  ["empty database","",""], ["partial database","","SQLite format 3\0partial"],
  ["rollback journal only","-journal","interrupted rollback"], ["WAL only","-wal","pending WAL"], ["SHM only","-shm","pending SHM"],
+ ["recovery ledger only",".recoveries","retained recovery evidence"],
+ ["staged recovery ledger only",".recoveries.pending","retained staged recovery evidence"],
 ] as const) test("surviving "+label+" holds startup and legacy writers before creating an authority",async()=>fixture(async f=>{
  const sibling=f.root+".inventory.sqlite3"+suffix;await writeFile(sibling,bytes);let calls=0,launches=0;
  await assert.rejects(f.authority.assertIdle(f.cwd),MasterConversationHeldError);

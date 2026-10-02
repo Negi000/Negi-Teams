@@ -1,6 +1,6 @@
 # Master会話の独立索引と明示移行候補
 
-NT-067/073の追加部品。`MasterConversationInventory`と固定Python helperに、既存stageと復旧receiptを全Masterから取り込む明示移行を追加した。通常読取や起動で自動移行しない。既存処理は独立DBが残る場合に未接続writerを保留する。索引intentを使う会話authority、起動検査、通常入力、provider RPC、新規復旧receiptの公開/解除、認証済み確認UIの全面接続は次の工程である。全73要件・Phase0–8のゴールは継続中。
+NT-067/073の追加部品。`MasterConversationInventory`と固定Python helperに、既存stageと復旧receiptの明示移行、および署名済みDBのstandalone hot journalをSQLite自身でrollbackする明示復旧を追加した。通常読取や起動で自動移行・復旧しない。既存処理は独立DBが残る場合に未接続writerを保留する。索引intentを使う会話authority、起動検査、通常入力、provider RPC、新規復旧receiptの公開/解除、認証済み確認UIの全面接続は次の工程である。全73要件・Phase0–8のゴールは継続中。
 
 ## 保存するもの
 
@@ -36,14 +36,14 @@ DBとauthorityを同時に過去snapshotへ戻す攻撃、同じOS userによる
 
 候補版は従来のstage予算をMaster別・DB全体とも50,000のまま保持し、移行済みreceiptにはMaster別10,000・DB全体50,000の独立した予算を適用する。aggregateはMaster別60,000・DB全体100,000、Master catalogは10,000、DB sizeは約1.5GBを上限として保留する。複数Masterの合計にもそれぞれの全体予算を適用する。receipt追加でstage予算を減らさない。移行中もSQLite page数×page sizeをcommit前に確認し、上限を理由に履歴を切り捨てない。保持/archivalと既存DBの版移行は未実装である。
 
-`-journal/-wal/-shm`がある場合はGET/append/registerを保留する。実transaction途中のexitで残ったjournalも読取から回復しない。**正規DB/journal、期待するproof、全owner不在とOS排他を照合し、SQLite自身へrollbackを委ねる明示DB復旧の実装が残る。** 手動でjournalを削除する実装は提供しない。
+`-journal/-wal/-shm`がある場合はGET/append/registerを保留する。実transaction途中のexitで残ったjournalも通常読取から回復しない。[明示DB復旧候補](#2026-10-03-署名済みdbの明示hot-journal復旧)は正規DB/journal、期待するproof、全owner不在とOS排他を照合し、SQLite自身へrollbackを委ねる。WAL/SHM、cold/partial/super-journal等の復旧と確認UIは未対応。手動でjournalを削除する実装は提供しない。
 
 既存復旧receiptは明示移行で索引へ原文のまま取り込める。未登録receiptや`.pending-*`は保留する。新規receipt intentをnativeの同じ解除境界で照合し、同じ確認の固定bytesを再利用すること、owner baselineのheadを対象要求/自分のreceiptだけ正規化する接続は未実装である。一般stage repairでreceiptを作成しない。
 
 ## 接続前に残る工程
 
 1. 既存stage/receiptの明示移行は候補APIへ追加済み。旧binary/version fence、turn/schedulerのbaseline索引、retention/既存DB版移行と通常authorityへの全面接続を進める。root/鍵作成前の独立DB検査は保持する。
-2. 明示DB rollback復旧、欠落stageだけの認証済みpreview/repair、native receipt intent/解除の照合、owner baseline正規化。
+2. 明示DB rollback候補の人間確認と通常経路への接続、未対応journal/部分bootstrapの復旧、欠落stageだけの認証済みpreview/repair、native receipt intent/解除の照合、owner baseline正規化。
 3. 複数Masterの並行appendと大規模履歴の実測、turn/scheduler全履歴の索引/照合、初回基盤とtarget-bearing admissionの復旧。
 4. 同じ常駐App Serverでの初回空thread/rotation、戻り値cwd/model/provider/settings、旧runtimeのtool/approval/server request/waiter静止、通常入力との共通排他。
 5. 認証済み利用者の確認と完了後だけのUI境界、再接続の同じID照会、実機safe-area/keyboardと人の受入。
@@ -177,3 +177,25 @@ stage/receiptの容量は前記の独立した予算を用い、物理DB容量�
 独立read-onlyレビューの移行helperを30秒でkillする問題と、他Masterの未署名path列で容量を分類する問題を修正し、最後のレビューに追加の具体的指摘はなかった。初回11/11、途中66/66、修正前の150件中149成功/1スキップ・152件中151成功/1スキップ、focused runsは別logとして保持し、最終suiteへ合算しない。追加容量試験の初期1失敗は、baseline容量で先に保留したfixtureを、移行後の通常追記を含むものへ修正した。最後のfocused6件と前記153件suiteは修正後の結果である。実Codex/model/Jev、今回の新GUI/実機/人の受入、CI成功の確認ではない。最終buildのMaterial 3 Expressive assetsは`index-CvLJ6iRB.css`/`index-C-cjKz75.js`で一致した。
 
 turn/scheduler baseline、旧binary/version fence、索引intentと通常authority/startup/予約/providerの全面接続、新規receipt intentとnative解除/owner baseline正規化、初回threadとreturned identity/旧runtime静止、明示SQLite復旧・認証済みstage repair・保持/版移行・大規模性能を継続する。移行済みDBでも未接続の通常writerは保留し、移行成功からproviderを起動しない。Material 3 Expressiveは既存の各画面に実装済みで、認証と保存APIが整った後にPC/スマホ別の確認導線へ接続する。実機safe-area/keyboardと人の受入を含む先行の全条件、全73要件・Phase0–8と全体ゴールはACTIVE。
+
+### 2026-10-03: 署名済みDBの明示hot journal復旧
+
+`previewDatabaseRecovery`は元のDB/journalを変更せず、同じvolumeの一時cloneでSQLiteのrollback結果を検査する。standalone hot rollback headerだけを対象にし、WAL/SHM、cold/zero/partial journal、super-journal footer、hardlink/reparse、不明なowner/recovery writerを保留する。参加するwriterの共通root guard、authority/key/Master directoryのidentityを保持し、original DB leafも削除共有しないnative handleで固定する。外部writerの排除やABAの完全な防止を意味しない。
+
+cloneのschema・authority HMAC・全登録Masterの署名head・全entry鎖・stage/receipt原文・遷移・filesystem全本文/一覧を検査する。全体検証はcloneごとに前後2回行い、その間にMaster別の全鎖と二度のfilesystem走査を行う。最後に全headとadoptionを同じsnapshotへ照合する。Masterごとに全DBを再検証する方式を除いた。本文を一括cacheせず、固定path/hash/sizeとfilesystem証拠を集める。元のDB/journalとauthorityを再読取し、同じ候補を二度得た場合だけ固定proof、source/復旧後SHA、Master/artifact/欠落件数を返す。
+
+`recoverDatabase`は呼出前に固定したUUID decisionと正確なproofを要求する。authority hash、元DB/journalのhash/identity/stamp、全filesystem proofと復旧結果をHMAC署名したintentへ結合する。最初は`*.recoveries.pending` directory内でcreate-onlyのstaged fileを書き、`FlushFileBuffers`後にfileとdirectoryを同volumeの`MoveFileExW(..., MOVEFILE_WRITE_THROUGH)`で上書きなしに公開する。既存ledgerへの次のintent/doneもstaged fileと同じ公開手順を使う。**intentの公開に成功する前にoriginalのSQLite rollbackを開始しない。** [MicrosoftのMoveFileExW仕様](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw)に沿うnative公開であり、実電源断やdevice cacheの保証は未検証である。
+
+originalは置換せず、`mode=rw`の既存SQLite接続の最初のschema読取へ[SQLiteのhot journal回復](https://www.sqlite.org/lockingv3.html)を委ねる。独自のjournal削除・page書戻しは行わない。SQLiteがjournalを処理した後、accepted targetと同じDB SHA/identity、全Master/本文/filesystem、owner不在を再照合して署名doneを公開する。欠落artifactは件数として保持し、復旧してもstage/receipt fileは作成しない。
+
+intent後、rollback後、done後に返答が消えても同じdecision/proofで照会する。途中までpageが戻ったDBは、同じDB identityと完全に同じjournalのcloneが元と同じ署名済みtargetへ到達する場合だけ再開できる。done済み照会は後のowner/journalへ触れず過去の署名結果だけを返す。別確認や別proof、partial/未知/HMAC不一致のrecordは保留する。staged directory/fileは消さず手動照合の対象にする。ledgerまたはstaged siblingだけが残ってもbootstrap・legacy TS/native writerを保留する。
+
+absenceは`lstat`の`FileNotFoundError`だけで判定し、アクセス拒否・invalid path・他のOS errorを不在へ変換しない。ledger、journal/WAL/SHM、ownerの全判定に適用する。[Pythonのexists系APIは権限不足でfalseを返し得る](https://docs.python.org/3/library/os.path.html#os.path.exists)ため、そのboolを復旧の認可条件には使わない。
+
+DBの約1.5GB予算とjournalの予算を分ける。[journal形式](https://sqlite.org/fileformat.html#the_rollback_journal)のpage bytes、8-byte record、sector header/境界paddingに基づき、headerの元page数・page size・sector sizeから上限を検査する。native sizeも64-bitで比較し、streaming read/copyとclone用の空き容量検査を行う。正常journalはDB容量を超え得る。DB/journal原文を切り詰めない。復旧記録はdecision最大10,000、record最大16KBで、満杯なら保留する。
+
+復旧とDB previewのhelperは経過時間だけではkillせず、実際のcloseとclone cleanupを待ってroot guardを解放する。通常APIは30秒、legacy migration previewは15分を維持する。helperの不終了、protocol異常による停止、OS crash後に残る私的cloneの照合/安全な掃除、進捗/取消UIは残る条件である。
+
+最終関連6 test filesは**171件中170成功・1スキップ・失敗/取消0（155,907.6142ms、actual exit0）**。OS条件の1スキップを含む。実SQLite 3.45.3のhot journal、2 Master/10署名stageのrollback、実process exitのintent/rollback/done前後、構成した途中page状態、別Master改変/欠落、stale proof/競合/入力固定、unknown/partial record、危険なpath、staged namespace公開途中のexit、アクセス拒否/invalid statを確認した。2/66 Masterでもcloneごとに全体検証2回、縮小したDB予算より大きい正常journal、実35秒遅延の書込み終了待ち、遅延previewのdeadline未設定/cleanupも確認した。最大容量/件数・実停電・native pager途中の強制停止を検証した意味ではない。
+
+独立read-onlyレビューで指摘された名前空間公開、journal予算、preview強制停止、Master別の反復全DB検証、曖昧な不在判定を修正した。途中11/11やfocused runsは別logで保持し、最終171件へ合算しない。Python AST、client/server型検査、buildが成功。新APIはtrusted-server候補であり、認証済み人間確認UI/HTTP、通常authority/provider起動、新規receipt intent/解除とowner baseline、turn/scheduler/初回thread、repair/保持/版移行は継続中。全73要件・Phase0–8とゴールはACTIVE。

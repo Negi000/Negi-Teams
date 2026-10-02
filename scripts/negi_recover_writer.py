@@ -36,7 +36,7 @@ def master_inventory_absent(root):
     # index yet. A TS-only fence would leave this direct native entry unprotected.
     if root.parent.name != "masters":raise ValueError("Canonical Master authority layout required")
     database = str(root.parent.parent) + ".inventory.sqlite3"
-    for suffix in ("", "-journal", "-wal", "-shm"):
+    for suffix in ("", "-journal", "-wal", "-shm", ".recoveries", ".recoveries.pending"):
         try:Path(database + suffix).lstat()
         except FileNotFoundError:continue
         else:raise ValueError("Independent Master inventory requires migration; preserve owner and receipt")
@@ -141,7 +141,7 @@ def win_info(kernel, handle, directory=False, limit=2000):
         raise ctypes.WinError(ctypes.get_last_error())
     if info.attributes & 0x400 or bool(info.attributes & 0x10) != directory:
         raise ValueError("Recovery handle is a reparse point or wrong type")
-    if not directory and (info.links != 1 or info.size_high or info.size_low > limit):
+    if not directory and (info.links != 1 or (info.size_high << 32 | info.size_low) > limit):
         raise ValueError("Writer size or link count invalid")
     return info
 

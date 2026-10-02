@@ -128,3 +128,18 @@ Chromium1440/375/320pxの両テーマ、48px、reduced motion、ログイン後�
 [会話のライフサイクル](../negi-teams-conversation-lifecycle.md)へ既存Claude/Geminiの確認操作を接続した。準備中に二重操作や入力を開始せず、新しい統括の準備完了後だけ表示と使用量を切り替える。失敗時は入力・元の表示・使用量を保ち、終了済みの質問を回答不可にする。サーバ終了後に再起動しない。Codexは準備中の説明と無効状態を維持する。
 
 最終の関連194件、型検査・ビルドと、実MasterSession＋合成brainのGUIを確認した。Chromium1440/375/320px・明暗両テーマで確認ダイアログ、48px操作、focus、reduced motion、横幅、下部ナビとの非重複、再接続、切替失敗と明示再試行、終了競合を確認した。最終GUIのconsole/page error0、UIの追加送信0、明示切替3回のうち成功した表示境界は1回だった。実モデルと実機の受入ではない。Codexの永続切替要求・active/unknown claimと起動時照合など全残条件は継続する。
+
+## 2026-10-03: 現在のbuildでPC・スマホ表示を再確認
+
+保存/復旧部品の追加後もclient assets `index-CvLJ6iRB.css`/`index-C-cjKz75.js`は一致した。現在のbuilt clientをprovider processなしの合成Cookie/WS server `http://127.0.0.1:8866`へ接続し、Playwright CLIのChromiumでログイン→作業一覧→チーム、明暗テーマ切替を確認した。Browser plugin not availableのため既存CLIを使用した。
+
+| 確認 | 結果 |
+| --- | --- |
+| URL/title | 作業一覧・チームが指定URLと一致 |
+| 空画面・framework overlay | 意味のある本文を表示し、overlayなし |
+| console | 対象error/warning0。ログイン時のusername補助欄についてのDOM verbose通知は別記録 |
+| PC | 1440×900の作業一覧、左railと判断を先に置く配置を画像で確認 |
+| スマホ | 375×812 light・320×812 dark、document client/scroll幅が375/320pxで一致 |
+| 操作 | チーム移動・テーマ切替後のtitle/表示を確認。320pxの操作48px以上、入力/送信bottom712px < 下部nav top740px |
+
+画像3枚はローカルvisualizationsに保存し、公開差分へ含めない。私有browser/serverを終了した。今回Task実行、成果受入、実provider/model送信、Codex新規会話、実機safe-area/仮想キーボード、人の使いやすさの受入を検証したものではない。今後の保存確認画面も同じtokensとPC/スマホ別導線へ接続する。

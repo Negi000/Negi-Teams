@@ -322,3 +322,15 @@ commit前の実exitで残るDB/journalを保存し、commit後の返答消失は
 Material 3 Expressiveの作業一覧・Task・レビュー・初回設定・知識・チーム・会話・端末は実装済みで、最終buildのassets `index-CvLJ6iRB.css`/`index-C-cjKz75.js`は一致する。今回は新GUI/実機/人の受入/実Codex/model/Jev/CI成功の確認ではない。認証と保存APIを整えてからPC/スマホ別の移行/確認導線へ接続する。
 
 受入前に既に失われた履歴の完全性はUnknown。旧binary/version fence、turn/scheduler baseline、通常stage/receipt intentの全面接続、native解除/owner baseline正規化、初回thread/returned identity/旧runtime静止、明示SQLite rollback/repair、保持/版移行/大規模性能、実機safe-area/keyboardなど先行の全残条件を維持する。移行済みDBでも未接続の通常writer/provider起動を保留し、Codex「新しい会話」は未有効化。全73要件・Phase0–8と全体ゴールはACTIVE。
+
+## 2026-10-03追加: 署名済みDBの明示hot journal復旧
+
+[方式・検証・残条件](negi-teams-master-conversation-inventory.md#2026-10-03-署名済みdbの明示hot-journal復旧)。original不変のclone preview、全Masterの署名/鎖/本文・filesystem照合、固定proofとUUID確認、署名intent/doneを追加した。nativeでstaged fileと最初のledger directoryをflush/write-through・上書きなしに公開し、intent公開後だけSQLite自身にoriginal rollbackを委ねる。途中page状態は同じjournalと同じ署名済みtargetへ戻れる同じdecisionだけ再開し、完了済み照会は後のowner/journalを変更しない。欠落stageを復元せず、unknown/部分記録を保持する。
+
+DB/journalの容量を分け、streamingと空き容量検査を使う。全体検証をcloneごとに前後2回とし、Masterごとの反復全DB走査を除いた。経過時間だけでpreview/復旧helperをkillせず、actual closeとclone cleanupを待つ。アクセス拒否/invalid statを不在と扱わず、staged ledgerだけでもbootstrap・legacy TS/nativeの開始と解除を保留する。
+
+最終関連6 files **171件中170成功・OS条件1スキップ・失敗/取消0（155,907.6142ms、actual exit0）**、Python AST・型検査・build成功。実Node/Python exit、SQLite 3.45.3のhot journal、構成した途中page、縮小容量と2/66 Master、35秒遅延、preview cleanup等の一時fixtureで確認した。独立レビューの5指摘を修正した。最大容量・実停電・native pager内の停止・実provider/model/Jev/CI成功を意味しない。
+
+Material 3 Expressiveの作業一覧・Task・レビュー・初回設定・知識・チーム・会話・端末は実装済み。今回のbuildもassets `index-CvLJ6iRB.css`/`index-C-cjKz75.js`で一致した。合成Cookie/WSだけのUIでChromium1440×900/375×812/320×812、作業一覧→チーム、明暗テーマ切替、横幅一致、48px以上の操作と入力欄bottom712px < 下部ナビtop740pxを再確認した。対象console error/warning0、provider/model/Jev0、所有するbrowser/serverを終了した。Browser plugin not availableのため既存Playwright CLIを利用し、画像は公開差分の外へ保存した。実機safe-area/仮想キーボードと人の使いやすさの受入は残る。
+
+明示復旧はtrusted-server候補で、人間確認UI/HTTP・通常の索引authority/providerには未接続。WAL/SHM/cold/super-journal/部分bootstrapの復旧、staged recordの手動照合、OS crash後の私的clone掃除、旧binary/version fence、新規receipt/native解除/baseline、turn/scheduler/初回thread、保持/版移行等の先行条件を継続する。Codex「新しい会話」は未有効化。NT-067/073の進捗で、全73要件・Phase0–8と全体ゴールはACTIVE。
