@@ -5,7 +5,7 @@ import type {
   MasterChatState,
   UsageMessage,
 } from "../shared/protocol.ts";
-import { taskResultDeliveryLabels } from "../shared/taskResults.ts";
+import { taskResultDeliveryLabels, taskResultUpdateLabel } from "../shared/taskResults.ts";
 import { taskStatusLabels } from "../shared/workspace.ts";
 import {
   ChatTranscript,
@@ -1071,13 +1071,13 @@ function buildItem(
     }
     case "taskResult": {
       const result = item.result, row = div("chat-system task-result-card md-surface"), heading = document.createElement("strong");
-      heading.textContent = result.title;
+      heading.textContent = result.title + " · " + taskResultUpdateLabel(result);
       const state = div("md-chip"); state.textContent = taskStatusLabels[result.status] ?? result.status;
       const copy = document.createElement("p");
       copy.textContent = taskResultDeliveryLabels[result.delivery.state];
       if (["unknown", "prepared", "dispatching", "failed"].includes(result.delivery.state)) copy.className = "task-result-attention";
       const note = document.createElement("small");
-      note.textContent = ["pending", "not_sent"].includes(result.delivery.state)
+      note.textContent = result.supersededBy ? "この通知より新しい結果があります。Taskで現在の成果と受入を確認してください。" : ["pending", "not_sent"].includes(result.delivery.state)
         ? "通知時点の結果です。委任元と同じ会話の次の依頼で現在を照合し、有効な結果を添付します。現在のTaskと人間受入は詳細で確認できます。"
         : result.delivery.state === "completed"
         ? "通知時点の結果への統括の応答を記録しました。成果の人間受入は別に確認してください。"

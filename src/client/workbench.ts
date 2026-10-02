@@ -2,7 +2,7 @@ import { materialIcon } from "../shared/material3.ts";
 import { taskNeedsAttention, taskStatusLabels, type TaskOverview, type ReviewOverview } from "../shared/workspace.ts";
 import type { AgentRecord, MasterChatState } from "../shared/protocol.ts";
 import { stateLabel } from "./chatModel.ts";
-import { taskResultDeliveryLabel, type TaskResultSummary } from "../shared/taskResults.ts";
+import { taskResultDeliveryLabel, taskResultUpdateLabel, type TaskResultSummary } from "../shared/taskResults.ts";
 
 export class Workbench {
   private capabilities: { tasks: boolean; reviews: boolean; taskAuthoring?: boolean;projectSetup?:boolean } | null = null;
@@ -129,8 +129,8 @@ export class Workbench {
     this.fingerprint = signature;
     this.text("wb-result-error", this.resultError ?? "");
     const resultList = this.node("wb-results"); resultList.replaceChildren();
-    for (const result of this.results?.slice(0, 8) ?? []) {
-      resultList.append(this.row(result.title, [result.project, taskResultDeliveryLabel(result)].join(" · "),
+    for (const result of this.results?.filter(n=>!n.supersededBy).slice(0, 8) ?? []) {
+      resultList.append(this.row(result.title, [result.project,taskResultUpdateLabel(result),taskResultDeliveryLabel(result)].join(" · "),
         `/tasks?run=${encodeURIComponent(result.runId)}`, "task", taskStatusLabels[result.status] ?? result.status,
         ["unknown", "dispatching", "prepared", "failed"].includes(result.delivery.state)));
     }
@@ -141,7 +141,7 @@ export class Workbench {
       attention.append(this.row(r.title, r.integrityError ?? (r.qualityIssue ? "内容の訂正が必要です。" : r.status === "revoked" ? "受入が取り消されています。" : "成果と検証結果をレビューできます。"), `/reviews?case=${encodeURIComponent(r.id)}`, "review", warning ? "確認が必要" : "レビュー待ち", warning));
     }
     for (const t of this.tasks?.filter(taskNeedsAttention) ?? []) {
-      attention.append(this.row(t.title, t.approvalCount ? `${t.approvalCount}件の操作確認` : t.error ?? t.project ?? "状態を確認してください。", `/tasks?run=${encodeURIComponent(t.id)}`, "task", taskStatusLabels[t.status] ?? t.status, true));
+      attention.append(this.row(t.title, t.approvalCount ? `${t.approvalCount}件の操作確認` : t.status === "review_revoked" ? "受入が取り消されています。成果を確認してください。" : t.error ?? t.project ?? "状態を確認してください。", `/tasks?run=${encodeURIComponent(t.id)}`, "task", taskStatusLabels[t.status] ?? t.status, true));
     }
     const awaitingData = this.capabilities && ((this.capabilities.tasks && !this.tasks && !this.taskError) || (this.capabilities.reviews && !this.reviews && !this.reviewError));
     if (!attention.children.length) this.empty(attention, this.taskError || this.reviewError ? "状態を確認できません" : !this.capabilities ? "接続待ち" : awaitingData ? "状態を確認しています" : "今すぐ必要な判断はありません", this.taskError || this.reviewError ? "ログインや接続を確認し、作業一覧を更新してください。" : awaitingData ? "取得が完了すると、必要な判断を表示します。" : "新しい成果や操作確認はここに表示されます。");

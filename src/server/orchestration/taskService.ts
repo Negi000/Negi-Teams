@@ -9,7 +9,7 @@ import { FileTaskLedger, type TaskEvent, type TaskSnapshot } from "./singleTask.
 import { HumanReviewProofStore, isReviewRequestId } from "./humanReviewProof.ts";
 import { assertVaultRunOutputPaths, canonicalVaultRunRegistration, parseVaultRunConfig, type VaultRunConfig } from "./vaultRunConfig.ts";
 import { executeVaultRun, prepareVaultRun, submitVaultRun, verifyVaultRun, type PreparedVaultRun, type TaskOperationApproval } from "./vaultTaskExecution.ts";
-import { captureTaskReview, verifyTaskReviewCheckout, type TaskReviewManifest } from "./taskReviewArtifact.ts";
+import { captureTaskReview, taskReviewCheckoutFingerprint, verifyTaskReviewCheckout, type TaskReviewManifest } from "./taskReviewArtifact.ts";
 import { ReviewDecisionBusyError, type LocalReviewService } from "./reviewService.ts";
 import { setTimeout as wait } from "node:timers/promises";
 import type { TaskAdmissionGuard } from "./scheduledVaultRun.ts";
@@ -18,7 +18,7 @@ import { assertVerificationCoverage } from "./vaultRunConfig.ts";
 import type { IntegrationSource } from "./taskIntegration.ts";
 import { readTaskRevision, replayRevisionReview, revisionMatchesTask, taskManifestName,
   taskRevisionHash, writeTaskRevisionPointer, type PinnedTaskRevision, type TaskRevisionJournal } from "./taskRevision.ts";
-import { TaskResultStore, type TaskResultContext } from "./taskResults.ts";
+import { TaskResultStore, TaskResultSourceChangedError, type TaskResultContext } from "./taskResults.ts";
 import type { TaskResultNotice, TaskResultSummary } from "../../shared/taskResults.ts";
 import { TaskExecutionOwner } from "./taskExecutionOwner.ts";
 import { LocalTaskReconciliation, type InspectTaskProvider, type TaskReconciliationView } from "./taskReconciliation.ts";
@@ -85,6 +85,7 @@ export interface TaskRunView {
   approvals: Array<TaskOperationApproval & { approvalSha256: string; canDecide: boolean }>;
   resultRevisionCount: number;
   requestedBy?: TaskRequestOrigin;
+  resultNotificationError?: string;
 }
 interface Runtime {
   prepare: typeof prepareVaultRun;
@@ -115,7 +116,9 @@ export class LocalTaskService {
   private readonly approvals = new Map<string, Map<string, { approval: TaskOperationApproval;
     decide: (allow: boolean, approvalRef: string, at: string, requestId: string) => Promise<void> }>>();
   private resultListener: ((results: TaskResultSummary[]) => void) | null = null;
+  private detachReviewResults: (()=>void) | null = null;
   private readonly settlements = new Set<Promise<void>>();
+  private resultRecovery:Promise<void>|null=null;
   private constructor(private readonly root: string, private readonly runs: CatalogRun[],
     private readonly scheduler: FileScheduler, private readonly runtime: Runtime,
     private readonly operationProofs: HumanReviewProofStore, private readonly resultStore: TaskResultStore,
@@ -176,38 +179,61 @@ export class LocalTaskService {
   list(): Array<{ id: string; title: string }> { return this.runs.map((run) => ({ id: run.config.runId, title: run.title })); }
   subscribeResults(listener: (results: TaskResultSummary[]) => void): void { this.resultListener = listener; }
   async resultNotifications(): Promise<TaskResultSummary[]> {
+    await this.recoverResultNotifications();
     return (await this.resultStore.list()).filter(n => this.runs.some(run =>
       run.config.runId === n.runId && run.configSha256 === n.configSha256)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
   private async resultSource(id: string) {
     const run = this.registered(id), request = await this.request(run), view = await this.snapshot(id);
-    if (!request || ["not_started", "queued", "planning", "ready_for_worker", "working", "verifying"].includes(view.status)) return null;
+    if (!request || view.live || ["not_started", "queued", "planning", "ready_for_worker", "working", "verifying"].includes(view.status)) return null;
     const ledger = (await this.ledger(run).read()).state;
     const entry = (await this.scheduler.read()).state?.entries.find(e => e.work.id === id) ?? null;
     const core = { runId: view.id, title: view.title.replace(/[\r\n\0]/g, " "), project: view.project,
       taskId: view.taskId, version: view.version, configSha256: view.configSha256,
       status: view.status, verificationOutcome: view.verificationOutcome, acceptedBy: view.acceptedBy,
       reviewId: view.reviewId, reason: view.error ? "詳細な状態をTask画面で確認してください。" : null, origin: request.requestedBy ?? { kind: "browser" as const } };
-    return { core, sourceSha256: hash(JSON.stringify({ core, requestId: request.requestId, ledger, entry })) };
+    return { core, sourceSha256: hash(JSON.stringify({ core, requestId: request.requestId, ledger, entry })),
+      facts:{resultRevision:view.resultRevisionCount,artifactSha256:this.manifests.get(id)?.review.verifiedArtifactSha256??null} };
   }
   private async publishResult(id: string): Promise<void> {
-    const source = await this.resultSource(id); if (!source) return;
-    const notice: TaskResultNotice = { ...source.core, sourceSha256: source.sourceSha256,
-      id: hash("negi-task-result/1\n" + id + "\n" + source.core.configSha256), createdAt: new Date().toISOString() };
-    await this.resultStore.publish(notice);
+    return this.withResultSource(()=>this.publishResultOnce(id));
+  }
+  private withResultSource<T>(operation:()=>Promise<T>):Promise<T> {
+    return this.reviews ? this.reviews.withResultSource(operation) : operation();
+  }
+  private async publishResultOnce(id: string): Promise<void> {
+    for(let attempt=0;attempt<2;attempt++){
+      const source = await this.resultSource(id); if (!source) return;
+      const notice: TaskResultNotice = { ...source.core, sourceSha256: source.sourceSha256,
+        id: hash("negi-task-result/1\n" + id + "\n" + source.core.configSha256), createdAt: new Date().toISOString() };
+      try{await this.resultStore.publish(notice,source.facts,async()=>{
+        const fresh=await this.resultSource(id);return Boolean(fresh&&fresh.sourceSha256===source.sourceSha256&&
+          JSON.stringify(fresh.facts)===JSON.stringify(source.facts));
+      });return}catch(error){if(!(error instanceof TaskResultSourceChangedError)||attempt===1)throw error}
+    }
   }
   /** Restores notices from durable Task facts; never resumes a model or Task. */
   async recoverResultNotifications(): Promise<void> {
+    if(this.resultRecovery)return this.resultRecovery;
+    const operation=this.recoverResultNotificationsOnce();this.resultRecovery=operation;
+    try{await operation}finally{this.resultRecovery=null}
+  }
+  private async recoverResultNotificationsOnce():Promise<void>{
     const failures: unknown[] = [];
     for (const run of this.runs) try { await this.publishResult(run.config.runId); } catch (error) { failures.push(error); }
     if (failures.length) throw new AggregateError(failures, "Task result recovery requires inspection");
   }
-  prepareResultContext(masterId: string, threadId: string, input: string): Promise<TaskResultContext | null> {
+  async prepareResultContext(masterId: string, threadId: string, input: string): Promise<TaskResultContext | null> {
+    // Refresh originating runs before selecting a version. This repairs a saved
+    // review/revision whose notification append was interrupted, without a turn.
+    for(const run of this.runs){const origin=(await this.request(run))?.requestedBy;
+      if(origin?.kind==="master"&&origin.masterId===masterId&&origin.threadId===threadId)await this.publishResult(run.config.runId);
+    }
     return this.resultStore.prepareContext(masterId, threadId, input, async notice => {
       if (!this.runs.some(run => run.config.runId === notice.runId && run.configSha256 === notice.configSha256)) return false;
       const source = await this.resultSource(notice.runId);
       return Boolean(source && source.sourceSha256 === notice.sourceSha256 && source.core.configSha256 === notice.configSha256);
-    });
+    },operation=>this.withResultSource(operation));
   }
   async capacitySnapshot() {
     const state = (await this.scheduler.read()).state;
@@ -316,7 +342,7 @@ export class LocalTaskService {
     const readState = async () => {
       const manifest = await this.ensureReview(run);
       if (!manifest || !this.reviews) throw new Error("Integration requires a registered review result");
-      const review = await this.reviews.snapshot(manifest.review.id);
+      const review = await this.reviews.snapshot(manifest.review.id,{includeRelations:false});
       if (review.integrityError || review.status === "revoked") throw new Error("Integration source review requires correction or reconciliation");
       await verifyTaskReviewCheckout(run.config, manifest);
       const state = (await this.ledger(run).read()).state;
@@ -331,8 +357,19 @@ export class LocalTaskService {
     await service.registerWritableRoots(this.runs.map((run) => run.config.checkout));
     this.reviews = service;
     for (const run of this.runs) await this.ensureReview(run);
+    this.detachReviewResults?.();
+    this.detachReviewResults=service.subscribeResultChanges(async caseId=>{
+      for(const [id,manifest] of this.manifests)if(manifest.review.id===caseId)await this.publishResult(id);
+    });
   }
   private async ensureReview(run: CatalogRun): Promise<TaskReviewManifest | null> {
+    if(!this.reviews)return null;
+    const cached=this.manifests.get(run.config.runId);if(cached)return cached;
+    if(!await readJson(join(run.config.outputDir,"review-manifest.json"))&&
+      !await readJson(join(run.config.outputDir,"review-current.json")))return null;
+    return this.withResultSource(()=>this.ensureReviewLocked(run));
+  }
+  private async ensureReviewLocked(run: CatalogRun): Promise<TaskReviewManifest | null> {
     const pending = this.manifestLoads.get(run.config.runId);
     if (pending) return pending;
     const operation = this.ensureReviewOnce(run);
@@ -407,6 +444,9 @@ export class LocalTaskService {
     return this.reconciliation.inspect(this.reconciliationSource(run),requestId);
   }
   async closeReconciliation(id:string,configSha256:string,requestId:string,inspectionId:string,dossierSha256:string):Promise<TaskRunView>{
+    return this.withResultSource(()=>this.closeReconciliationLocked(id,configSha256,requestId,inspectionId,dossierSha256));
+  }
+  private async closeReconciliationLocked(id:string,configSha256:string,requestId:string,inspectionId:string,dossierSha256:string):Promise<TaskRunView>{
     const run=this.registered(id);if(configSha256!==run.configSha256)throw Error("Task reconciliation target changed");
     await this.reconciliation.close(this.reconciliationSource(run),requestId,inspectionId,dossierSha256);
     try{await this.publishResult(id)}catch{/* Task facts remain authoritative; notification revision is separate. */}
@@ -471,20 +511,30 @@ export class LocalTaskService {
       if (pending.fingerprint !== fingerprint) throw new Error("Another Task revision is in progress");
       return pending.promise;
     }
-    const operation = this.registerResultRevisionOnce(run, ids);
+    const operation = (async()=>{const view=await this.registerResultRevisionOnce(run, ids);
+      try{await this.publishResult(id);return view}catch{return{...view,resultNotificationError:
+        "修正版は保存済みです。Taskの通知を更新できません。再読み込みして現在の状態を確認してください。"}}})();
     this.revisions.set(id, { fingerprint, promise: operation });
     try { return await operation; } finally { this.revisions.delete(id); }
   }
   private async registerResultRevisionOnce(run: CatalogRun, feedbackIds: string[]): Promise<TaskRunView> {
+    const {previous,state,reviewStateSha256}=await this.withResultSource(async()=>{
     const previous = await this.ensureReview(run);
     const state = (await this.ledger(run).read()).state;
     if (!previous || !state || state.status !== "ready_for_review" || state.acceptedBy !== null ||
         state.stopReason?.startsWith("Human acceptance revoked:")) throw new Error("Task revision requires an unaccepted verified result");
-    const review = await this.reviews!.snapshot(previous.review.id);
+    const review = await this.reviews!.snapshot(previous.review.id,{includeRelations:false});
     if (review.status !== "awaiting_review" || !feedbackIds.every((id) => review.feedback.some((item) =>
       item.id === id && item.kind === "correction" && item.targetSha256 === previous.review.verifiedArtifactSha256 &&
       (item.authenticated || (item.source === "agent" && item.text !== null)))))
       throw new Error("Task revision requires authenticated or pinned agent corrections targeting the current artifact");
+    const outstanding=review.feedback.filter(item=>item.kind==="correction"&&item.targetSha256===previous.review.verifiedArtifactSha256);
+    if(outstanding.some(item=>!feedbackIds.includes(item.id)))throw Error("Task revision must address every current correction");
+    if(review.feedback.some(item=>item.kind==="new_requirement"&&item.scope==="current_task"&&
+      item.targetSha256===previous.review.verifiedArtifactSha256))throw Error("New Task requirements need a new fixed contract");
+    const reviewStateSha256=hash(JSON.stringify(await this.reviews!.readState(previous.review.id)));
+    return{previous,state,reviewStateSha256};
+    });
     let changed = false;
     try { await verifyTaskReviewCheckout(run.config, previous); } catch { changed = true; }
     if (!changed) throw new Error("Task result has not changed; do not repeat verification");
@@ -511,14 +561,26 @@ export class LocalTaskService {
       throw error;
     }
     try {
+    const checkoutBeforeChecks=await taskReviewCheckoutFingerprint(run.config);
     const verification = await verifyVaultRun(prepared, undefined, `verification-r${number}.json`);
     if (verification.outcome !== "passed") {
       await this.scheduler.append({ key: `${validationWorkId}:failed`, at: new Date().toISOString(), action: {
         type: "settle", workId: validationWorkId, outcome: "failed", evidenceRef: verification.evidenceRef, actualCostUsd: null } });
       throw new Error("Task revision verification failed; preserve and inspect its evidence");
     }
+    return await this.withResultSource(async()=>{
+    const current=(await this.ledger(run).read()).state, currentReview=await this.reviews!.snapshot(previous.review.id,{includeRelations:false});
+    if(JSON.stringify(current)!==JSON.stringify(state)||currentReview.status!=="awaiting_review"||
+      currentReview.artifactSha256!==previous.review.verifiedArtifactSha256||
+      hash(JSON.stringify(await this.reviews!.readState(previous.review.id)))!==reviewStateSha256||
+      await taskReviewCheckoutFingerprint(run.config)!==checkoutBeforeChecks){
+      await this.scheduler.append({key:`${validationWorkId}:source-changed`,at:new Date().toISOString(),action:{
+        type:"settle",workId:validationWorkId,outcome:"failed",evidenceRef:verification.evidenceRef,actualCostUsd:null}});
+      throw Error("Task result or review changed during revision verification; no revision was adopted");
+    }
     const revised = structuredClone(state); revised.verification = verification;
     const manifest = await captureTaskReview(run.config, run.configSha256, run.title, revised, { revision: number, deferLedger: true });
+    if(await taskReviewCheckoutFingerprint(run.config)!==checkoutBeforeChecks)throw Error("Task checkout changed during revision capture; inspect partial evidence");
     const journal: TaskRevisionJournal = { schema: "negi-task-revision/1", number, runId: run.config.runId,
       configSha256: run.configSha256, contractSha256: state.contract.sha256, contractVersion: state.contract.version,
       baseSha: state.contract.baseSha, fromManifestSha256: taskRevisionHash(await readFile(join(run.config.outputDir, taskManifestName(number - 1)))),
@@ -533,6 +595,7 @@ export class LocalTaskService {
     this.manifests.delete(run.config.runId);
     await this.ensureReview(run);
     return this.snapshot(run.config.runId);
+    });
     } catch (error) {
       // A complete journal can be replayed on reload. Earlier failures keep the
       // lease reserved for inspection, since partially saved evidence is uncertain.
@@ -579,6 +642,12 @@ export class LocalTaskService {
         state.verification?.evidenceRef === `${manifest.review.evidencePath}#sha256=${manifest.review.evidenceSha256}`)));
   }
   private async syncReview(run: CatalogRun, manifest: TaskReviewManifest): Promise<void> {
+    const review=await this.reviews!.readState(manifest.review.id),state=(await this.ledger(run).read()).state;
+    if(state&&!((review.acceptance&&state.status==="ready_for_review"&&!state.stopReason?.startsWith("Human acceptance revoked:"))||
+      (review.revoked&&state.status==="accepted")))return;
+    return this.withResultSource(()=>this.syncReviewLocked(run,manifest));
+  }
+  private async syncReviewLocked(run: CatalogRun, manifest: TaskReviewManifest): Promise<void> {
     const pending = this.reviewSyncs.get(run.config.runId);
     if (pending) return pending;
     const operation = this.syncReviewOnce(run, manifest);
@@ -619,19 +688,22 @@ export class LocalTaskService {
   }
   async snapshot(id: string): Promise<TaskRunView> {
     const run = this.registered(id);
-    const manifest = await this.ensureReview(run);
-    if (manifest) await this.syncReview(run, manifest);
     const request = await this.request(run);
-    const state = (await this.ledger(run).read()).state;
+    let state = (await this.ledger(run).read()).state;
     const entry = (await this.scheduler.read()).state?.entries.find((item) => item.work.id === id);
     const active = this.active.get(id);
+    // A running/queued Task has no result adoption to perform. Its status read
+    // must remain available while another accepted baseline holds the gate.
+    const executing=Boolean(active||entry?.status==="queued");
+    const manifest = executing ? this.manifests.get(id)??null : await this.ensureReview(run);
+    if (manifest&&!executing) { await this.syncReview(run, manifest); state=(await this.ledger(run).read()).state; }
     const error = await readJson(join(this.root, `${id}.error.json`)) as { error?: string } | null;
     const interrupted = !active && entry && ["running", "needs_reconciliation"].includes(entry.status);
     let status = interrupted ? "needs_reconciliation" : state?.status ?? entry?.status ??
       (request ? error ? "preflight_failed" : "needs_reconciliation" : "not_started");
     let reviewError: string | null = null;
     if (manifest) {
-      const review = await this.reviews!.snapshot(manifest.review.id);
+      const review = await this.reviews!.snapshot(manifest.review.id,{includeRelations:false});
       if (review.status === "revoked") status = "review_revoked";
       if (review.integrityError) { status = review.qualityIssue ? "quality_issue" : "artifact_changed"; reviewError = review.integrityError; }
     } else if (state?.status === "ready_for_review" && this.reviews)
@@ -745,10 +817,10 @@ export class LocalTaskService {
             if (current?.status === "running") await this.scheduler.append({ key: `${id}:ui-unknown`, at: new Date().toISOString(),
               action: { type: "unknown", workId: id, reason: "UI runner stopped without a confirmed terminal outcome" } });
           }).finally(async () => {
-            try { await this.publishResult(id); } catch { /* durable Task facts remain available for recovery */ }
             try { await owner?.finish(); } finally {
               this.active.delete(id); this.prepared.delete(id); this.approvals.delete(id);
             }
+            try { await this.publishResult(id); } catch { /* durable Task facts remain available for recovery */ }
             void this.pump().catch(() => {});
           }).catch(() => {});
         this.active.set(id, { controller, promise });
@@ -807,5 +879,6 @@ export class LocalTaskService {
     this.closing = true;
     for (const entry of this.active.values()) entry.controller.abort();
     await Promise.allSettled([...this.settlements]);
+    this.detachReviewResults?.();this.detachReviewResults=null;
   }
 }

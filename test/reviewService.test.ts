@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
-import { access, appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, appendFile, mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { FileReviewChain } from "../src/server/orchestration/reviewChain.ts";
 import { createReviewHttp } from "../src/server/orchestration/reviewHttp.ts";
-import { LocalReviewService } from "../src/server/orchestration/reviewService.ts";
+import { LocalReviewService, ReviewDecisionBusyError } from "../src/server/orchestration/reviewService.ts";
+import { TaskResultStore } from "../src/server/orchestration/taskResults.ts";
 import { appServerChildEnv } from "../src/server/master/appServerProcess.ts";
 
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -73,6 +74,109 @@ test("explicit signed acceptance survives reload and can be revoked with a reaso
     assert.equal((await reloaded.snapshot("synthetic")).status, "accepted");
     assert.equal((await reloaded.revoke("synthetic", artifactSha256, randomUUID(),
       "Synthetic withdrawal")).status, "revoked");
+  });
+});
+
+test("notification claim and concurrent acceptance use the same stable source lock across service instances",async()=>{
+  await fixture(async({service,artifactSha256,config,dir})=>{
+    const other=await LocalReviewService.open(config),store=await TaskResultStore.open(join(dir,"results"));
+    await store.publish({id:sha("notice"),sourceSha256:sha("source"),configSha256:sha("config"),createdAt:new Date().toISOString(),
+      runId:"synthetic-run",title:"Synthetic notice",project:"Synthetic",taskId:"TASK",version:1,status:"awaiting_review",
+      verificationOutcome:"passed",acceptedBy:null,reviewId:"synthetic",reason:null,
+      origin:{kind:"master",masterId:"master",threadId:"thread",turnId:"origin",callId:"call"}});
+    let checks=0,acceptance:Promise<unknown>|undefined;
+    const context=(await store.prepareContext("master","thread","input",async()=>{
+      const current=(await service.snapshot("synthetic")).status==="awaiting_review";
+      if(++checks===2)queueMicrotask(()=>{acceptance=other.accept("synthetic",artifactSha256,randomUUID())});
+      return current;
+    },operation=>service.withResultSource(operation)))!;
+    await context.dispatching();
+    assert.equal((await store.list())[0].delivery.state,"dispatching");
+    await acceptance;assert.equal((await other.snapshot("synthetic")).status,"accepted");
+    // The claimed input is immutable; a subsequent decision is a separate result.
+    assert.equal((await store.list())[0].acceptedBy,null);
+    await context.unknown();assert.equal(await store.prepareContext("master","thread","repeat",async()=>true),null);
+  });
+});
+
+test("result source owner evidence is durable and an orphaned lock fails closed without deletion",async()=>{
+  await fixture(async({service,artifactSha256,dir})=>{
+    const path=join(dir,"human-review","result-source.lock");
+    await service.withResultSource(async()=>{
+      const owner=JSON.parse(await readFile(path,"utf8"));
+      assert.equal(owner.schema,"negi-result-source-owner/1");assert.equal(owner.pid,process.pid);
+      assert.equal(Number.isFinite(Date.parse(owner.acquiredAt)),true);
+      await service.withResultSource(async()=>assert.equal(JSON.parse(await readFile(path,"utf8")).id,owner.id));
+    });
+    const orphan=JSON.stringify({schema:"negi-result-source-owner/1",pid:0,id:randomUUID(),acquiredAt:new Date().toISOString()})+"\n";
+    await writeFile(path,orphan,{flag:"wx"});
+    try{
+      await assert.rejects(service.accept("synthetic",artifactSha256,randomUUID()),ReviewDecisionBusyError);
+      assert.equal(await readFile(path,"utf8"),orphan);assert.equal((await service.snapshot("synthetic")).status,"awaiting_review");
+    }finally{await unlink(path)} // This fixture owns the synthetic orphan file.
+    assert.equal((await service.accept("synthetic",artifactSha256,randomUUID())).status,"accepted");
+  });
+});
+
+test("long accepted-baseline work preserves its case while leaving the shared result source available",async()=>{
+  await fixture(async({service,config,artifactSha256})=>{
+    await service.accept("synthetic",artifactSha256,randomUUID());
+    const other=await LocalReviewService.open(config);
+    let release!:()=>void,entered!:()=>void;
+    const ready=new Promise<void>(resolve=>{entered=resolve}),held=new Promise<void>(resolve=>{release=resolve});
+    const work=service.withCurrentAcceptance("synthetic",artifactSha256,async()=>{entered();await held;return "saved"});
+    await ready;
+    try{
+      assert.equal(await other.withResultSource(async()=>"available"),"available");
+      await assert.rejects(other.revoke("synthetic",artifactSha256,randomUUID(),"Concurrent withdrawal"),ReviewDecisionBusyError);
+      assert.equal((await other.snapshot("synthetic")).status,"accepted");
+    }finally{release();await work}
+    assert.equal((await other.revoke("synthetic",artifactSha256,randomUUID(),"After completion")).status,"revoked");
+  });
+});
+
+for(const action of ["accept","feedback"] as const)
+test(`slow Knowledge ${action} details run after releasing result locks and preserve normalized receipts`,async()=>{
+  await fixture(async({service,config,artifactSha256})=>{
+    const other=await LocalReviewService.open(config),requestId=randomUUID().toUpperCase();
+    let release!:()=>void,entered!:()=>void,captured:string|null=null;
+    const ready=new Promise<void>(r=>{entered=r}),hold=new Promise<void>(r=>{release=r});
+    service.connectKnowledge({links:async()=>{if(action==="accept"){entered();await hold}return{candidates:[],error:null}},
+      capture:async(view,id)=>{captured=id;assert.equal(id,`http-feedback:${requestId.toLowerCase()}`);
+        assert.equal(view.feedback.some(f=>f.id===id),true);entered();await hold}});
+    const work=action==="accept"?service.accept("synthetic",artifactSha256,requestId):service.feedback("synthetic",{
+      artifactSha256,requestId,text:"Preserve uppercase request identity",kind:"praise",scope:"current_task"});
+    await ready;
+    try{
+      assert.equal(await other.withResultSource(async()=>"available"),"available");
+      const view=await service.snapshot("synthetic",{includeRelations:false});
+      assert.equal(view.status,action==="accept"?"accepted":"awaiting_review");
+    }finally{release();await work}
+    if(action==="feedback")assert.equal(captured,`http-feedback:${requestId.toLowerCase()}`);
+  });
+});
+
+test("concurrent services preserve acceptance and revocation notices before releasing each decision's source gate",async()=>{
+  await fixture(async({service,config,artifactSha256,dir})=>{
+    const other=await LocalReviewService.open(config),store=await TaskResultStore.open(join(dir,"results"));
+    const notice={id:sha("notice"),sourceSha256:sha("initial"),configSha256:sha("config"),createdAt:new Date().toISOString(),
+      runId:"synthetic-run",title:"Synthetic notice",project:"Synthetic",taskId:"TASK",version:1,status:"awaiting_review",
+      verificationOutcome:"passed",acceptedBy:null,reviewId:"synthetic",reason:null,origin:{kind:"browser" as const}};
+    await store.publish(notice,{resultRevision:0,artifactSha256});
+    let entered!:()=>void,release!:()=>void;
+    const ready=new Promise<void>(r=>{entered=r}),hold=new Promise<void>(r=>{release=r});
+    const publish=async(reader:LocalReviewService)=>{
+      const state=await reader.readState("synthetic");
+      if(state.acceptance&&!state.revoked){entered();await hold}
+      await store.publish({...notice,sourceSha256:sha(JSON.stringify(state)),status:state.revoked?"review_revoked":"accepted",
+        acceptedBy:state.revoked?null:state.acceptance!.approvalRef},{resultRevision:0,artifactSha256});
+    };
+    service.subscribeResultChanges(()=>publish(service));other.subscribeResultChanges(()=>publish(other));
+    const accepted=service.accept("synthetic",artifactSha256,randomUUID());await ready;
+    const revoked=other.revoke("synthetic",artifactSha256,randomUUID(),"Concurrent withdrawal");release();
+    await Promise.all([accepted,revoked]);
+    assert.deepEqual((await store.list()).map(n=>n.update?.kind),["initial","accepted","revoked"]);
+    assert.equal((await store.list())[1].acceptedBy!==null,true);assert.equal((await store.list())[2].acceptedBy,null);
   });
 });
 

@@ -156,3 +156,77 @@ test("result cards update in place without ending assistant streaming or alterin
   assert.equal(transcript.items[1].kind, "taskResult");
   assert.equal(transcript.summary.totalCostUsd, null); assert.equal(transcript.summary.contextUsedPct, null);
 });
+
+test("successive result, acceptance and revocation notices preserve immutable history and deliver only the latest version",async()=>{
+  await fixture(async(store,root)=>{
+    const initial=resultNotice();await store.publish(initial); // Existing v1 log.
+    const original=await readFile(join(root,"results.jsonl"),"utf8");
+    const revision={...initial,sourceSha256:sha("revision"),reviewId:"review-1"};
+    const facts={resultRevision:1,artifactSha256:sha("artifact-1")};
+    await store.publish(revision,facts);await store.publish(revision,facts);
+    const archive=JSON.parse(await readFile(join(root,"pre-v2-log.json"),"utf8"));
+    assert.equal(archive.legacyLog,original);assert.equal(archive.sha256,sha(original));
+    const revised=(await store.list()).at(-1)!;assert.equal(revised.update?.kind,"revision");
+    assert.equal(revised.update?.sequence,1);assert.equal(revised.update?.previousId,initial.id);
+    const accepted={...revision,sourceSha256:sha("accept"),status:"accepted",acceptedBy:"user:proof-1"};
+    await store.publish(accepted,facts);
+    const revoked={...accepted,sourceSha256:sha("revoke"),status:"review_revoked",acceptedBy:null};
+    await store.publish(revoked,facts);
+    const history=await store.list();assert.equal(history.length,4);
+    assert.deepEqual(history.map(n=>n.update?.kind??"initial"),["initial","revision","accepted","revoked"]);
+    assert.equal(history[0].acceptedBy,null);assert.equal(history[2].acceptedBy,"user:proof-1");
+    assert.equal(history[0].supersededBy,history[1].id);assert.equal(history[3].supersededBy,null);
+    assert.equal((await readFile(join(root,"results.jsonl"),"utf8")).startsWith(original),true);
+    assert.deepEqual(JSON.parse(await readFile(join(root,"pre-v2-log.json"),"utf8")),archive);
+    const context=(await store.prepareContext("master","thread","read current",current))!;
+    assert.deepEqual(JSON.parse(context.text.split("\n").at(-1)!).map(n=>n.id),[history[3].id]);
+    await context.dispatching();await context.bind(terminal.turnId);await context.terminal(terminal);
+    const reopened=await TaskResultStore.open(root);assert.equal((await reopened.list()).length,4);
+    assert.equal(await reopened.prepareContext("master","thread","repeat",current),null);
+    await assert.rejects(store.publish({...revoked,origin:{kind:"browser"}},facts),/origin changed/);
+  });
+});
+
+test("prepared outdated results fail before dispatch, while unknown older deliveries are never replayed",async()=>{
+  await fixture(async(store)=>{
+    const initial=resultNotice(),facts={resultRevision:0,artifactSha256:sha("artifact")};await store.publish(initial,facts);
+    const old=(await store.prepareContext("master","thread","old",current))!;
+    await store.publish({...initial,sourceSha256:sha("accepted"),status:"accepted",acceptedBy:"user:proof"},facts);
+    await assert.rejects(old.dispatching(),/superseded/);await old.notSent();
+    const newer=(await store.prepareContext("master","thread","new",current))!;
+    assert.equal(JSON.parse(newer.text.split("\n").at(-1)!)[0].status,"accepted");
+    await newer.dispatching();await newer.unknown();
+    assert.equal(await store.prepareContext("master","thread","repeat",current),null);
+    await store.publish({...initial,sourceSha256:sha("revoked"),status:"review_revoked"},facts);
+    const latest=(await store.prepareContext("master","thread","revocation",current))!;
+    const notices=JSON.parse(latest.text.split("\n").at(-1)!);
+    assert.equal(notices.length,1);assert.equal(notices[0].status,"review_revoked");
+    assert.equal((await store.list())[1].delivery.state,"unknown");
+  });
+});
+
+test("external source changes reject publication and dispatch without erasing saved evidence",async()=>{
+  await fixture(async(store)=>{
+    const notice=resultNotice(),facts={resultRevision:0,artifactSha256:null};
+    await assert.rejects(store.publish(notice,facts,async()=>false),/source changed/);assert.equal((await store.list()).length,0);
+    await store.publish(notice,facts);let valid=true;
+    const context=(await store.prepareContext("master","thread","input",async()=>valid))!;valid=false;
+    await assert.rejects(context.dispatching(),/source changed/);assert.equal((await store.list())[0].delivery.state,"prepared");
+    await context.notSent();assert.equal((await store.list())[0].delivery.state,"not_sent");
+  });
+});
+
+test("legacy unknown delivery remains non-replayable on upgrade and damaged upgrade archives fail closed",async()=>{
+  await fixture(async(store,root)=>{
+    const original=resultNotice();await store.publish(original);
+    const delivery=(await store.prepareContext("master","thread","old input",current))!;
+    await delivery.dispatching();await delivery.unknown();
+    const facts={resultRevision:1,artifactSha256:sha("artifact")},next={...original,sourceSha256:sha("revision")};
+    await store.publish(next,facts);assert.equal((await store.list())[0].delivery.state,"unknown");
+    const revised=(await store.prepareContext("master","thread","new input",current))!;
+    assert.equal(JSON.parse(revised.text.split("\n").at(-1)!)[0].update.kind,"revision");await revised.notSent();
+    await writeFile(join(root,"pre-v2-log.json"),"partial upgrade archive");
+    await assert.rejects(store.publish({...next,sourceSha256:sha("acceptance"),status:"accepted",acceptedBy:"user:proof"},facts));
+    assert.equal((await store.list()).length,2);assert.equal((await store.list())[0].delivery.state,"unknown");
+  });
+});

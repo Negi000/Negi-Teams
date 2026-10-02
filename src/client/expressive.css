@@ -129,6 +129,10 @@
   .wb-content { gap:0 }
   .wb-filters { grid-template-columns:1fr; gap:10px }
   .wb-team .md-list { display:flex }
+  .negi-workspace :is(#wb-attention,#wb-results,#wb-tasks) .md-list-item { display:grid; grid-template-columns:44px minmax(0,1fr) 24px; align-items:start }
+  .negi-workspace :is(#wb-attention,#wb-results,#wb-tasks) .md-list-copy { grid-column:2; grid-row:1 }
+  .negi-workspace :is(#wb-attention,#wb-results,#wb-tasks) .md-chip { grid-column:2; grid-row:2; justify-self:start; max-width:100% }
+  .negi-workspace :is(#wb-attention,#wb-results,#wb-tasks) .md-list-arrow { grid-column:3; grid-row:1; align-self:center }
   .negi-workspace .chat,.negi-workspace .pane,.negi-workspace .viewer { border-radius:24px }
   .negi-workspace .chat-foot { padding:12px }
   .negi-workspace .task-result-card { padding:16px; gap:10px }

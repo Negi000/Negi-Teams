@@ -47,6 +47,12 @@ async function fileHash(checkout: string, path: string): Promise<string | null> 
   if (rel.startsWith("..") || isAbsolute(rel)) throw new Error("Task result path escaped checkout");
   return hash(await readFile(actual));
 }
+export async function taskReviewCheckoutFingerprint(config: VaultRunConfig): Promise<string> {
+  const paths=changedGitPaths(config.checkout),files=[];
+  for(const path of paths)files.push({path,sha256:await fileHash(config.checkout,path)});
+  return hash(JSON.stringify({baseSha:git(config.checkout,["rev-parse","HEAD"]).trim(),
+    diffSha256:hash(diff(config.checkout)),files}));
+}
 async function writePinned(path: string, bytes: Buffer): Promise<void> {
   try {
     const file = await open(path, "wx", 0o600);

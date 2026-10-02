@@ -98,6 +98,8 @@ test("native planner uses the UI scheduler once and persists its origin without 
     const runtime = { prepare, submit: submitVaultRun, execute: async (...args: Parameters<typeof completed>) => {
       count++; return completed(...args); } };
     const service = await LocalTaskService.open(catalog, runtime);
+    const pushed: import("../src/shared/taskResults.ts").TaskResultSummary[][]=[];
+    service.subscribeResults(results=>pushed.push(results));
     const tools = registeredTaskTools(service, "planner");
     const context = { threadId: "thread-native", turnId: "turn-native", callId: "dispatch-1" };
     try {
@@ -117,7 +119,8 @@ test("native planner uses the UI scheduler once and persists its origin without 
       const view = await service.snapshot(row.id);
       assert.deepEqual(view.requestedBy, { kind: "master", masterId: "planner", ...context });
       assert.equal(view.acceptedBy, null); assert.equal(view.verificationOutcome, "passed");
-      await until(async () => (await service.resultNotifications()).length === 1);
+      await until(async () => pushed.some(results=>results.length===1));
+      assert.equal(pushed[0][0].update?.kind,"initial");
       const notices = await tools.invoke({ ...context, tool: "negi_list_task_results", arguments: {} });
       const notice = JSON.parse(notices.text).notifications[0];
       assert.equal(notices.success, true); assert.equal(notice.status, "ready_for_review");
@@ -482,6 +485,7 @@ test("a frozen Git review binds signed acceptance and revocation to the correspo
     await until(async () => (await service.snapshot(view.id)).reviewId !== null, 30_000);
     try {
       await until(async () => (await service.resultNotifications()).length === 1);
+      const initialNotification=(await service.resultNotifications())[0];
       const result = await service.snapshot(view.id);
       assert.equal(result.status, "ready_for_review"); assert.ok(result.reviewId);
       const review = await reviews.snapshot(result.reviewId);
@@ -489,17 +493,26 @@ test("a frozen Git review binds signed acceptance and revocation to the correspo
       assert.equal(review.canAccept, true);
       await writeFile(join(config.checkout, "docs", "result.md"), "Changed after verification\n");
       assert.equal((await service.snapshot(view.id)).status, "artifact_changed");
-      assert.equal(await service.prepareResultContext("master", "review-thread", "Read the result"), null);
+      const invalidated=await service.prepareResultContext("master", "review-thread", "Read the result");assert.ok(invalidated);
+      assert.equal(JSON.parse(invalidated.text.split("\n").at(-1)!)[0].status,"artifact_changed");await invalidated.notSent();
       await assert.rejects(reviews.accept(review.id, review.artifactSha256, randomUUID()), /changed/);
       await writeFile(join(config.checkout, "docs", "result.md"), "# Synthetic result\nVerified fixture only.\n");
       const restoredContext = await service.prepareResultContext("master", "review-thread", "Read the restored result");
       assert.ok(restoredContext); await restoredContext.notSent();
       const id = randomUUID();
-      await reviews.accept(review.id, review.artifactSha256, id);
+      const notificationLock=join(dir,"task-state","task-results","results.jsonl.lock");
+      await writeFile(notificationLock,"owned notification contention fixture",{flag:"wx"});
+      try{
+        const decision=await reviews.accept(review.id, review.artifactSha256, id);
+        assert.equal(decision.status,"accepted");assert.match(decision.resultNotificationError??"",/操作は保存済み/);
+      }finally{await unlink(notificationLock)}
       assert.equal((await service.snapshot(view.id)).status, "accepted");
       assert.equal((await service.snapshot(view.id)).acceptedBy, `user:http-review:${id}`);
-      assert.equal((await service.resultNotifications())[0].acceptedBy, null);
-      assert.equal(await service.prepareResultContext("master", "review-thread", "Read the accepted result"), null);
+      const acceptedNotices=await service.resultNotifications();
+      assert.equal(acceptedNotices[0].acceptedBy,`user:http-review:${id}`);assert.equal(acceptedNotices[0].update?.kind,"accepted");
+      assert.equal(acceptedNotices.find(n=>n.id===initialNotification.id)?.acceptedBy,null);
+      const acceptedContext=await service.prepareResultContext("master","review-thread","Read the accepted result");assert.ok(acceptedContext);
+      assert.equal(JSON.parse(acceptedContext.text.split("\n").at(-1)!)[0].status,"accepted");await acceptedContext.notSent();
       // Forward slashes from a Windows CLI identify the same physical output root.
       const manifestPath = join(config.outputDir, "review-manifest.json");
       const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
@@ -512,6 +525,12 @@ test("a frozen Git review binds signed acceptance and revocation to the correspo
       await reloadedReviews.revoke(review.id, review.artifactSha256, randomUUID(), "Synthetic withdrawal");
       assert.equal((await reloaded.snapshot(view.id)).status, "review_revoked");
       assert.equal((await reloaded.snapshot(view.id)).acceptedBy, null);
+      const revokedNotices=await reloaded.resultNotifications();assert.equal(revokedNotices[0].update?.kind,"revoked");
+      assert.equal(revokedNotices[0].status,"review_revoked");assert.equal(revokedNotices[0].acceptedBy,null);
+      const beforeReload=revokedNotices.map(n=>n.id);await reloaded.recoverResultNotifications();
+      assert.deepEqual((await reloaded.resultNotifications()).map(n=>n.id),beforeReload);
+      const revokeContext=await reloaded.prepareResultContext("master","review-thread","Read the withdrawal");assert.ok(revokeContext);
+      assert.equal(JSON.parse(revokeContext.text.split("\n").at(-1)!)[0].status,"review_revoked");await revokeContext.notSent();
       await reloaded.close();
     } finally { await service.close(); }
   });
@@ -574,7 +593,7 @@ test("live operation approvals bind the full target, expire, and require signed 
   });
 });
 
-for (const revisionMode of ["success", "partial-evidence", "outside-scope"] as const)
+for (const revisionMode of ["success", "partial-evidence", "outside-scope", "concurrent-feedback", "verification-mutates-result", "omitted-correction"] as const)
 test(`local revision ${revisionMode}: immutable evidence, recovery and no model redispatch`, async () => {
   await fixture(async ({ dir, config, contract, catalog, prepare }) => {
     const git = (args: string[]) => execFileSync("git", args, { cwd: config.checkout, encoding: "utf8", windowsHide: true }).trim();
@@ -583,6 +602,10 @@ test(`local revision ${revisionMode}: immutable evidence, recovery and no model 
     await mkdir(join(config.checkout, "docs")); await writeFile(join(config.checkout, "docs/base.md"), "Synthetic baseline\n");
     git(["add", "."]); git(["commit", "--quiet", "-m", "synthetic revision baseline"]);
     contract.baseSha = git(["rev-parse", "HEAD"]); await writeFile(config.snapshot, JSON.stringify(contract));
+    if(revisionMode==="concurrent-feedback")config.verification[0]={...config.verification[0],program:process.execPath,
+      args:["-e",`const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(join(dir,"checks-started"))},'ready');const t=setInterval(()=>{if(fs.existsSync(${JSON.stringify(join(dir,"feedback-saved"))})){clearInterval(t);process.exit(0)}},20);`],timeoutMs:10000};
+    if(revisionMode==="verification-mutates-result")config.verification[0]={...config.verification[0],program:process.execPath,
+      args:["-e","require('node:fs').appendFileSync('docs/result.md','Changed by checks\\n')"]};
     let dispatches = 0;
     const runtime = { prepare, submit: submitVaultRun, prepareRevision: async (config: VaultRunConfig) => ({ config, contract }),
       execute: async (prepared: PreparedVaultRun, scheduler: FileScheduler) => {
@@ -612,6 +635,30 @@ test(`local revision ${revisionMode}: immutable evidence, recovery and no model 
       type: "invalidate", workId: config.runId, evidenceRef: "synthetic:content-audit", reason: "Synthetic correction required" } });
     assert.equal((await service.snapshot(before.id)).status, "quality_issue");
     await writeFile(join(config.checkout, "docs/result.md"), "# Synthetic B\nCorrected locally.\n");
+    if(revisionMode==="omitted-correction"){
+      await reviews.feedback(reviewA.id,{artifactSha256:reviewA.artifactSha256,requestId:randomUUID(),text:"Another current correction",
+        kind:"correction",scope:"current_task"});
+      await assert.rejects(service.registerResultRevision(before.id,before.configSha256,["agent-correction"]),/every current correction/);
+      assert.equal((await new FileScheduler(config.schedulerPath).read()).state!.entries.some(e=>e.work.id.endsWith(":local-revision-1")),false);
+      assert.equal((await service.snapshot(before.id)).resultRevisionCount,0);assert.equal((await reviews.snapshot(reviewA.id)).feedback.length,2);
+      assert.deepEqual(await readFile(join(config.outputDir,"review-result.md")),previewA);await service.close();return;
+    }
+    if(revisionMode==="concurrent-feedback"||revisionMode==="verification-mutates-result"){
+      const revision=service.registerResultRevision(before.id,before.configSha256,["agent-correction"]);
+      const rejected=assert.rejects(revision,/changed during revision verification/);
+      if(revisionMode==="concurrent-feedback"){
+        await until(async()=>Boolean(await readFile(join(dir,"checks-started"),"utf8").catch(()=>null)),30_000);
+        await reviews.feedback(reviewA.id,{artifactSha256:reviewA.artifactSha256,requestId:randomUUID(),text:"Concurrent new correction",
+          kind:"correction",scope:"current_task"});await writeFile(join(dir,"feedback-saved"),"saved");
+      }
+      await rejected;
+      const scheduler=(await new FileScheduler(config.schedulerPath).read()).state!;
+      assert.equal(scheduler.entries.find(e=>e.work.id.endsWith(":local-revision-1"))!.status,"failed");
+      assert.equal((await service.snapshot(before.id)).resultRevisionCount,0);assert.equal(dispatches,1);
+      assert.deepEqual(await readFile(join(config.outputDir,"review-result.md")),previewA);
+      if(revisionMode==="concurrent-feedback")assert.equal((await reviews.snapshot(reviewA.id)).feedback.length,2);
+      await service.close();return;
+    }
     if (revisionMode !== "success") {
       if (revisionMode === "partial-evidence") await writeFile(join(config.outputDir, "verification-r1.json"), "partial evidence\n");
       else await writeFile(join(config.checkout, "outside.md"), "Outside the contract\n");
@@ -634,6 +681,11 @@ test(`local revision ${revisionMode}: immutable evidence, recovery and no model 
     const results = await Promise.all([service.registerResultRevision(before.id, before.configSha256, ["agent-correction"]),
       service.registerResultRevision(before.id, before.configSha256, ["agent-correction"])]);
     assert.equal(results[0].resultRevisionCount, 1); assert.equal(results[0].acceptedBy, null); assert.equal(dispatches, 1);
+    const revisionNotices=await service.resultNotifications();
+    assert.equal(revisionNotices[0].update?.kind,"revision");assert.equal(revisionNotices[0].update?.resultRevision,1);
+    assert.equal(revisionNotices.filter(n=>!n.supersededBy).length,1);
+    const noticeIds=revisionNotices.map(n=>n.id);await service.recoverResultNotifications();
+    assert.deepEqual((await service.resultNotifications()).map(n=>n.id),noticeIds);
     assert.deepEqual(await readFile(join(config.outputDir, "review-result.md")), previewA);
     await assert.rejects(new FileTaskLedger(join(config.outputDir, "run.jsonl")).read(), /trusted result revision unavailable/);
     await service.close();

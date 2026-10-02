@@ -112,7 +112,7 @@ export function registeredTaskTools(service: LocalTaskService, masterId: string,
         }
       } else if (call.tool === "negi_list_task_results") {
         argumentsObject(call.arguments, []);
-        value = { notifications: (await service.resultNotifications()).filter(n => n.origin.kind === "master" &&
+        value = { notifications: (await service.resultNotifications()).filter(n => !n.supersededBy && n.origin.kind === "master" &&
           n.origin.masterId === masterId && n.origin.threadId === call.threadId).slice(0, 8), frozenAtNotification: true };
       } else if (call.tool === "negi_list_tasks") {
         const args = argumentsObject(call.arguments, ["project", "offset"]), offset = args.offset ?? 0;
