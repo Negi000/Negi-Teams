@@ -1,9 +1,8 @@
 import { createHash } from "node:crypto";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
-import { LocalTaskService } from "./taskService.ts";
+import { LocalTaskService, type TaskServiceStorageOptions } from "./taskService.ts";
 import { LocalReviewService } from "./reviewService.ts";
-import { FileScheduler } from "./scheduler.ts";
 import type { LocalTaskAuthoringService } from "./taskAuthoring.ts";
 import { captureIntegrationReview, verifyIntegrationReview,
   type IntegrationReviewOptions, type IntegrationReviewManifest } from "./integrationReview.ts";
@@ -21,7 +20,9 @@ async function json(path: unknown): Promise<Record<string, unknown>> {
 /** Startup-only registry; the browser never supplies checkouts, commands or source catalogs. */
 export class LocalIntegrationReviewService {
   private constructor(private readonly contexts: LocalTaskService[]) {}
-  static async open(raw: unknown, reviews: LocalReviewService, authoring?:LocalTaskAuthoringService|null): Promise<LocalIntegrationReviewService> {
+  static async open(raw: unknown, reviews: LocalReviewService, authoring?:LocalTaskAuthoringService|null,
+    storageOptions: TaskServiceStorageOptions = {}): Promise<LocalIntegrationReviewService> {
+    const storage = structuredClone(storageOptions);
     const row = raw as { integrations?: unknown } | null;
     if (!row || !Array.isArray(row.integrations) || !row.integrations.length || row.integrations.length > 20)
       throw new Error("Integration review registry invalid");
@@ -44,7 +45,7 @@ export class LocalIntegrationReviewService {
         const contextKey = taskCatalog + "\0" + reviewCatalog;
         let context = contexts.get(contextKey);
         if (!context) {
-          context = await LocalTaskService.open(await json(taskCatalog));
+          context = await LocalTaskService.open(await json(taskCatalog), undefined, storage);
           contexts.set(contextKey, context);
           await context.connectReviews(await LocalReviewService.open(await json(reviewCatalog)));
         }
@@ -55,7 +56,7 @@ export class LocalIntegrationReviewService {
         await reviews.registerWritableRoots([checkout, ...context.knowledgeRegistrations().flatMap(source => [source.checkout, source.vault])]);
         options.push({ id: item.id as string, title: item.title as string, baseSha: item.baseSha as string,
           evidenceSha256: item.evidenceSha256 as string, limits: item.limits as string,
-          checkout, outputDir, sources, scheduler: new FileScheduler(sources[0].config.schedulerPath) });
+          checkout, outputDir, sources, scheduler: context.registeredScheduler(sources[0].config.schedulerPath) });
       }
       await this.register(options, reviews,authoring);
       return new LocalIntegrationReviewService([...contexts.values()]);

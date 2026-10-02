@@ -6,7 +6,7 @@ import { lstat, mkdir, open, readFile, readdir, realpath, unlink } from "node:fs
 import { isAbsolute, join, relative } from "node:path";
 import { promisify, isDeepStrictEqual } from "node:util";
 import { HumanReviewProofStore, isReviewRequestId } from "./humanReviewProof.ts";
-import { FileScheduler, schedulerWorkEligible } from "./scheduler.ts";
+import { schedulerWorkEligible } from "./scheduler.ts";
 import { integrateVerifiedTasks, type IntegrationSource } from "./taskIntegration.ts";
 import { LocalIntegrationReviewService } from "./integrationReviewService.ts";
 import { verifyConfiguredCheckout } from "./checkoutVerification.ts";
@@ -107,7 +107,7 @@ export class LocalIntegrationExecutionService {
       this.profile(setup.selection.profileId).hash !== setup.selection.profileHash) throw Error("Integration authorization changed");
     return setup;
   }
-  private scheduler(setup: Setup) { return new FileScheduler(this.profile(setup.selection.profileId).config.schedulerPath); }
+  private scheduler(setup: Setup) { return this.tasks.registeredScheduler(this.profile(setup.selection.profileId).config.schedulerPath); }
   private checkout(setup: Setup) { return join(this.profile(setup.selection.profileId).worktreeRoot, setup.id); }
   private async selected(profileId: string, ids: string[]) {
     if (!Array.isArray(ids) || ids.length < 2 || ids.length > 8 || new Set(ids).size !== ids.length ||
@@ -115,7 +115,7 @@ export class LocalIntegrationExecutionService {
     const p = this.profile(profileId), sources: IntegrationSource[] = [], pins: SourcePin[] = [], paths: string[] = [];
     const rows: IntegrationPreview["sources"] = [], commands: VerificationCommand[] = [...p.config.verification];
     let baseSha: string | null = null;
-    const scheduler = (await new FileScheduler(p.config.schedulerPath).read()).state;
+    const scheduler = (await this.tasks.registeredScheduler(p.config.schedulerPath).read()).state;
     if (!scheduler) throw Error("Integration scheduler unavailable");
     for (const id of [...ids].sort()) {
       const source = await this.tasks.integrationSource(id), state = await source.readState(), manifest = await source.readManifest!();

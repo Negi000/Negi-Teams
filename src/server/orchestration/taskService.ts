@@ -1,5 +1,5 @@
 // A trusted local catalog connects Task Contract execution to the web UI.
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readFile, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { FileScheduler, parseSchedulerCapacity, schedulerCapacityUsage, schedulerWorkEligible, type ScheduledPhase } from "./scheduler.ts";
@@ -25,6 +25,7 @@ import type { MasterOrigin } from "../../shared/conversations.ts";
 import { readMasterTurnOrigin } from "./masterTurnRecords.ts";
 import { TaskExecutionOwner } from "./taskExecutionOwner.ts";
 import { LocalTaskReconciliation, type InspectTaskProvider, type TaskReconciliationView } from "./taskReconciliation.ts";
+import { RuntimeJournalInventory } from "./runtimeJournalInventory.ts";
 
 const hash = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
 function inside(root: string, path: string): boolean {
@@ -97,6 +98,8 @@ interface Runtime {
   prepareRevision?: (config: VaultRunConfig, state: TaskSnapshot) => Promise<PreparedVaultRun>;
   inspectProvider?: InspectTaskProvider;
 }
+/** Fixed server registration after explicit baseline; never read from a Task or browser payload. */
+export interface TaskServiceStorageOptions { storage?: "indexed" }
 
 export class LocalTaskService {
   private configurationAdmission:ConfigurationAdmission=operation=>operation();
@@ -125,13 +128,15 @@ export class LocalTaskService {
   private constructor(private readonly root: string, private readonly runs: CatalogRun[],
     private readonly scheduler: FileScheduler, private readonly runtime: Runtime,
     private readonly operationProofs: HumanReviewProofStore, private readonly resultStore: TaskResultStore,
-    private readonly reconciliation: LocalTaskReconciliation) {
+    private readonly reconciliation: LocalTaskReconciliation, private readonly indexedRuntime: boolean) {
     resultStore.subscribe(results => this.resultListener?.(results.filter(n =>
       runs.some(run => run.config.runId === n.runId && run.configSha256 === n.configSha256))));
   }
 
   static async open(raw: unknown, runtime: Runtime = { prepare: prepareVaultRun,
-    submit: submitVaultRun, execute: executeVaultRun }): Promise<LocalTaskService> {
+    submit: submitVaultRun, execute: executeVaultRun }, options: TaskServiceStorageOptions = {}): Promise<LocalTaskService> {
+    const storage = options.storage;
+    if (storage !== undefined && storage !== "indexed") throw new Error("Task storage registration invalid");
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Task catalog invalid");
     const row = raw as Record<string, unknown>;
     const capacity = row.capacity === undefined ? undefined : parseSchedulerCapacity(row.capacity);
@@ -171,13 +176,25 @@ export class LocalTaskService {
         throw new Error("Task catalog state must be outside every checkout and Vault, with distinct run outputs");
     }
     if (!schedulerPath) throw new Error("Task catalog requires a shared scheduler path");
+    const inventory = storage === "indexed" ? new RuntimeJournalInventory({ root: join(root, "master-conversations"),
+      turnRoot: join(root, "master-turns"), schedulerPath }) : null;
+    const scheduler = new FileScheduler(schedulerPath, inventory ? { journal: inventory.schedulerJournal() } : {});
+    // Check the fixed registration before creating any Task proof/result state.
+    // Missing/partial indexed storage is a hold, never an implicit bootstrap.
+    if (inventory) {
+      if ((await inventory.audit()).state !== "clean") throw new Error("Task runtime storage requires reconciliation");
+    } else await scheduler.assertStorageCompatible();
     await mkdir(root, { recursive: true });
     const operationProofs = await HumanReviewProofStore.open(join(root, "operation-proofs"));
-    const scheduler = new FileScheduler(schedulerPath!);
     await scheduler.ensureSubscriptionConfiguration(capacity);
     const results = await TaskResultStore.open(join(root, "task-results"));
     const reconciliation=await LocalTaskReconciliation.open(join(root,"reconciliation-proofs"),runtime.inspectProvider);
-    return new LocalTaskService(root, runs, scheduler, runtime, operationProofs, results,reconciliation);
+    return new LocalTaskService(root, runs, scheduler, runtime, operationProofs, results,reconciliation,inventory !== null);
+  }
+  /** Internal services share this exact writer, including its fixed runtime journal. */
+  registeredScheduler(path: string): FileScheduler {
+    if (!isAbsolute(path) || resolve(path) !== this.scheduler.path) throw new Error("Service scheduler differs from the Task registration");
+    return this.scheduler;
   }
   list(): Array<{ id: string; title: string }> { return this.runs.map((run) => ({ id: run.config.runId, title: run.title })); }
   async requestOrigin(id: string): Promise<TaskRequestOrigin | null> {
@@ -254,9 +271,18 @@ export class LocalTaskService {
   }
   /** A resident planner uses the exact scheduler and a server-owned evidence directory. */
   masterTurnAdmission(masterId: string): MasterTurnAdmission {
+    const conversations = this.masterConversationAuthority(masterId);
+    if (this.indexedRuntime) return {
+      reserve: raw => {
+        const request = structuredClone(raw), requestId = randomUUID();
+        return this.configurationAdmission(() => conversations.admitTurn({ ...request, requestId }));
+      },
+      assertIdle: cwd => conversations.assertStartupSafe(cwd),
+      assertStorageCompatible: () => conversations.assertStorageCompatible(),
+      withStorage: run => conversations.withStorage(run),
+    };
     const admission=scheduledMasterTurns({ root: join(this.root, "master-turns"), masterId,
       scheduler: this.scheduler, onReleased: () => this.pump() });
-    const conversations = this.masterConversationAuthority(masterId);
     // Startup does not create conversation owners. The shared native guard has
     // its own persistent empty sibling; indexed reset still needs migration gates.
     return guardMasterAdmission({ reserve: request => this.configurationAdmission(() => admission.reserve(request)),
@@ -265,7 +291,8 @@ export class LocalTaskService {
   /** Shared server-owned exclusion and signed empty-thread journal. No provider/UI dispatch here. */
   masterConversationAuthority(masterId: string): MasterConversationAuthority {
     return new MasterConversationAuthority({ root: join(this.root, "master-conversations"),
-      turnRoot: join(this.root, "master-turns"), masterId, scheduler: this.scheduler,onReleased:()=>this.pump() });
+      turnRoot: join(this.root, "master-turns"), masterId, scheduler: this.scheduler,onReleased:()=>this.pump(),
+      ...(this.indexedRuntime ? { stageStorage: "indexed", runtimeStorage: "indexed" } as const : {}) });
   }
   /** Fixed catalog metadata for the planner. Does not disclose local paths or run commands. */
   dispatchCatalog(): Array<{ id: string; title: string; project: string; taskId: string; version: number; configSha256: string }> {

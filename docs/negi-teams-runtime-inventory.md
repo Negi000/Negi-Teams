@@ -51,3 +51,19 @@ native解除のparent helperはroot guardを既に保持する。固定Node検�
 過去owner/5 receiptを検査するごとに共有runtime全体の監査と取得head以降の行を走査する。receipt件数×runtime履歴が大きいときの処理時間、stage helperの30秒制限への影響は未計測であり、production有効化前の性能条件として保持する。
 
 全Task/Master/統合/旧dispatchの参加登録、root-wide version条件と旧runtime静止、初回root/indexの明示設定、production caller、認証済みMaterial 3 Expressiveの確認ID/復旧画面、停止/transport/実provider、保持/版移行/長期性能と実機・人の受入は引き続き必要である。Codex「新しい会話」は未有効化。全73要件・Phase0–8のゴールはACTIVE。
+
+## 2026-10-03追加: Task・Master・統合サービスの共通登録
+
+`LocalTaskService.open(catalog, runtime, { storage: "indexed" })`の第三引数は信頼するserver専用であり、Task/model/HTTP本文やcatalogの同名fieldから選ばない。canonical Task stateRootの`master-conversations`・`master-turns`と共有schedulerを固定登録し、既存runtime索引のclean auditを確認してからTaskのproof/result stateを準備する。root/key/stage/runtime indexの初回作成やbaseline採用はこの入口で行わない。既定経路でもruntime registrationの不存在をproof store作成前に確認する。
+
+Task submit/claim/worker移行/settle/停止/照合/成果版の再検査は、この登録で作った同じschedulerを使う。indexed Master受付はconfiguration admissionの前に入力をsnapshotし、serverのrequest UUIDを割り当て、通常Authorityの`admitTurn`へ渡す。owner/5・返ったlease・startup監査と共通scopeを引き続き使う。`registeredScheduler(path)`は固定登録のresolved pathだけを許可して同じinstanceを返す。統合のpreview/受付/実行/停止/成果照合はそのinstanceを使い、別の既定FileSchedulerを生成しない。
+
+静的な統合レビューの再起動registryも、信頼するserverの別引数から同じstorage modeをTask contextへ渡し、各contextの固定schedulerを使う。runtimeの署名context/root identityを照合するため、別stateRootへの読み替えは採用済み索引に一致しなければ保留する。復元のsource順序は実manifestに固定された順序を使い、graph作成順から推測しない。
+
+最終関連15 test filesは**139件中139成功・失敗/取消/スキップ0（702620.7437ms、actual exit0）**。実行中runtime/test313 files SHA不変。新規native4ケースで、未登録root/proofを作らない入口、実owner/5のMaster枠→契約済みTask2件→実Git/worktree/機械検証による統合→静的レビュー復元、DB欠損時のlease/読取/既定reopen拒否、configuration待機前の入力snapshotと単一server request identityを確認した。Taskのclientはfixture Sol2/Astra0であり、実model/providerではない。復元後のruntime headと呼出回数は不変で、固定成果のcanAcceptを前後とも確認した。別scheduler pathも拒否する。
+
+型検査・client/server build・差分/秘密情報pattern検査が成功。ビルド済み実TaskServiceから固定helper fallbackと実native署名authorityを使い、indexed登録→通常Master受付→未送信取消→startup読取→runtime clean/artifacts2、同じscheduler instanceを確認した。開始した試験childは実終了済み。独立read-onlyレビューで追加medium以上の問題を確認せず、レビュー側の変更/試験実行なし。途中focused2の3/3（253517.6393ms）を最終suiteへ合算しない。修正前focused1の2成功/1失敗は、復元fixtureのgraph順と実manifest順の不一致によるもので、fixtureを実際に固定された順序へ直した。sourceの順序照合は維持した。
+
+focused2のE2E全体233837.2414msはGit/worktree・Task・統合・レビュー復元とその照合を含む測定であり、個別操作の応答時間や最大履歴の性能を証明しない。Windows以外、実provider/停止・transport、複数process競合、全履歴監査の大規模処理時間は未検証。client assetsは`index-CvLJ6iRB.css`/`index-C-cjKz75.js`を維持し、今回新GUI/実機/人間受入/CI成功の確認ではない。
+
+server index/HTTPからの有効化はまだ行っていない。旧CLI/MCP/PTY・過去binaryを含む参加versionと静止確認、全Masterの明示stage初期設定、初回root/key/runtime登録の操作、認証済みMaterial 3 Expressive確認・同じID照会・復旧、停止/transport/実provider・性能/保持/移行・実機/人間受入は引き続き必要であり、全体ゴールをこのサービス接続へ縮めない。

@@ -422,3 +422,13 @@ production/HTTP/認証済み確認UIと全Task/Master/旧dispatchへの登録、
 過去owner/5 receipt件数×共有runtime全履歴scan/tail照合の大規模時間とstage helperの30秒制限への影響は未計測であり、有効化前の性能条件として保持する。今回のWindows native/DB確認は新GUI・実model/provider/Jev・実機・人間受入・CI成功の確認ではない。Material 3 Expressive client assetsは`index-CvLJ6iRB.css`/`index-C-cjKz75.js`を維持。
 
 production TaskService/HTTP/M3はまだ新しいindexed登録を有効にしていない。全writer参加/version条件・旧runtime静止、初回index設定、認証済み確認ID/復旧画面、実provider/停止/transport・長期性能・実機safe-area/keyboard・人の全導線受入を含む残る全工程を維持する。Codex新規会話は未有効化、全73要件・Phase0–8と全体ゴールはACTIVE。
+
+## 2026-10-03追加: Task・Master・統合の共通保存登録
+
+信頼するserverの別引数から、Task stateRootに固定したstage/runtime登録をLocalTaskServiceへ渡せるようにした。clean audit/既定writer fenceをproof/result store作成前に確認する。Taskの全scheduler操作を同じjournal writerに接続し、indexed Master受付は入力snapshot/server UUID→configuration admission→通常Authority owner/5/lease経路を使う。統合preview/実行/停止/成果照合と静的統合レビューの復元も、Task contextの固定schedulerを使い、別pathは拒否する。[登録方法と範囲](negi-teams-runtime-inventory.md#2026-10-03追加-taskmaster統合サービスの共通登録)。catalog/HTTP/modelからindexed modeを自動選択しない。
+
+最終関連15 test filesは**139件中139成功・失敗/取消/スキップ0（702620.7437ms、actual exit0）**。実行中runtime/test313 files SHA不変。新規native4ケースは、未登録の初回状態、実owner/5 Master枠→Task2件→実Git/worktree/機械検証による統合→静的レビュー復元、DB欠損でのlease/読取/既定reopen拒否、configuration待機前の入力snapshotを含む。fixture Sol2/Astra0、復元head/呼出回数不変、canAccept前後一致、別scheduler拒否を確認した。途中focused2の3/3・253517.6393msを合算しない。修正前focused1の2成功/1失敗は復元fixtureのgraph順と実manifest順の不一致であり、fixtureを実manifest順へ直した。sourceの照合条件は維持した。
+
+型検査/build・差分/秘密情報pattern検査が成功。compiled実TaskService→固定helper fallback/native署名→indexed通常Master受付/未送信取消/startup読取→runtime clean/artifacts2・同じscheduler instanceを確認し、開始childは実終了済み。独立read-onlyレビューで追加medium以上の問題は確認されず、レビュー側変更/試験実行なし。focused2のE2E全体233837.2414msにはGit/worktree/Task/統合/復元と照合を含み、個別応答時間や大規模性能の証明ではない。Windows以外、実provider/停止・transport、複数process競合・長期性能は未検証。Material 3 Expressive client assetsは`index-CvLJ6iRB.css`/`index-C-cjKz75.js`を維持する。
+
+server index/HTTP/M3での有効化、旧CLI/MCP/PTY/過去binaryの参加version・静止、全Masterのstage設定、初回root/key/indexの明示操作、停止/transport/実provider・性能/保持/移行・実機/人の受入は残る。全73要件・Phase0–8の全体ゴールはACTIVE。Material 3 Expressiveの既存画面資産とPC/スマホ別導線を維持し、今回画面/実機/人間受入の完了を主張しない。
