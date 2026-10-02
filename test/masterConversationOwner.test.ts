@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { test } from "node:test";
 import { signedMasterOwner, validatedMasterOwner, type MasterOwnerPayload } from "../src/server/orchestration/masterConversationOwner.ts";
@@ -45,6 +45,27 @@ test("owner/4 signs the acquisition head/context and rejects invalid anchors wit
     ...[-1,1.5,60001].map(seq=>({...modern.indexed,head:{seq,sha256:"0".repeat(64)}})),{...modern.indexed,head:{seq:0,sha256:"f".repeat(64)}}]){
     const invalid=signedMasterOwner({...modern,indexed} as MasterOwnerPayload,key);
     assert.throws(()=>validatedMasterOwner(JSON.parse(invalid),"master",key),/owner shape/);
+  }
+});
+
+test("every owner version rejects a correctly signed foreign Master and malformed common fields", () => {
+  const modern = payload() as Extract<MasterOwnerPayload, { schema: "negi-master-conversation-owner/3" }>;
+  const { processIdentity: _identity, ...old } = modern;
+  const indexed = { head: { seq: 0, sha256: "0".repeat(64) }, contextSha256: "d".repeat(64) };
+  const context = { turnRoot: resolve("turns"), schedulerPath: resolve("scheduler.jsonl") };
+  const versions: MasterOwnerPayload[] = [{ ...old, schema: "negi-master-conversation-owner/2" }, modern,
+    { ...modern, schema: "negi-master-conversation-owner/4", indexed },
+    { ...modern, schema: "negi-master-conversation-owner/5", indexed: { ...indexed,
+      contextSha256: createHash("sha256").update(JSON.stringify(context)).digest("hex") }, runtime: { context, head: { seq: 1, sha256: "e".repeat(64) } } }];
+  for (const version of versions) {
+    const raw = signedMasterOwner(version, key);assert.equal(validatedMasterOwner(JSON.parse(raw), "master", key).schema, version.schema);
+    assert.throws(() => validatedMasterOwner(JSON.parse(raw), "another-master", key), /owner shape/);
+    for (const change of [{ kind: "invalid" }, { owner: "not-an-id" }, { createdAt: "invalid-date" }, { cwdSha256: "wrong" },
+      { evidenceSha256: "wrong" }, { operation: { ...version.operation, domain: "another-domain" } },
+      { operation: { ...version.operation, hash: "wrong" } }]) {
+      const malformed = signedMasterOwner({ ...version, ...change } as MasterOwnerPayload, key);
+      assert.throws(() => validatedMasterOwner(JSON.parse(malformed), "master", key), /owner shape/);
+    }
   }
 });
 

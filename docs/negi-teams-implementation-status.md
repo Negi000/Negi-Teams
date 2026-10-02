@@ -410,3 +410,15 @@ dispatch ACK消失・部分記録は未送信取消へ変換しない。既存di
 最終関連10 test filesは**215件中215成功・失敗/取消/スキップ0（176428.22ms、actual exit0）**。新規19ケースと既存196ケースを含む。実行中tracked runtime/test311 files hash不変、client/server型検査・build・Python AST・差分検査が成功した。ビルド済みserver moduleから固定helper fallbackを使い、実native guard/signing authorityでbaseline→scheduler append→clean audit/seq2を確認した。開始した試験childは実終了を待った。修正前209/209、途中focused6/6、監査側focused1/1を最終suiteへ合算しない。client assetsは`index-CvLJ6iRB.css`/`index-C-cjKz75.js`を維持する。
 
 production/HTTP/認証済み確認UIと全Task/Master/旧dispatchへの登録、owner/4の取得headと後続行のruntime統合、起動/returned identity/旧runtime静止・root-wide参加version条件、bootstrap/journal repair・retention/版移行/性能、外部anchor/同時喪失/非参加ABA・実停電/UNC/Linuxは残る。Material 3 ExpressiveのPC/スマホ別導線は維持し、今回実機safe-area/keyboard・人の全導線受入は確認していない。Codex新規会話は未有効化。全73要件・Phase0–8を保持し、ゴールはACTIVE。
+
+## 2026-10-03追加: Authorityの実署名runtime受付と起動監査
+
+[接続と所有記録の方式](negi-teams-runtime-inventory.md#2026-10-03追加-authorityの通常受付起動owner5)。固定server登録のstage/runtime索引を組にしてAuthorityがscheduler/turn両journalを構築し、通常admitTurn/lease・起動監査・status・復旧へ接続した。owner/5がstage/runtime両取得headと固定contextを署名し、原文requestとschedulerのMaster/request hashを照合する。共有Task/別Masterの進捗と過去receiptに別ownerの作業を帰属させない。pending/変更prefix/将来head/別contextを保留し、既存owner2/3/4とそのreceiptを保持する。
+
+新形式のnative dead-owner解除もexact decision/proofを使い、provider/実turnの再送・実行済み扱いはしない。DB欠損からlegacy解除へ降格しない。既にguardを持つparentがruntime監査済みscheduler digestを固定Node helperへstdinで渡し、childは原文照合のみ・append拒否でguardの再取得を避ける。初回root/key/indexを自動生成しない。
+
+最終関連16 test filesは**343件中342成功・失敗/取消0・スキップ1（636046.6886ms、actual exit0）**。スキップはWindows以外向けの診断。実行中runtime/test312 files SHA不変。新規native7ケース（通常受付/lease/startup、共有Task進捗、runtime prefix/context、ACK消失保留、別local受付の拒否、native owner解除/再照会、DB欠損のlegacy降格/鍵再作成拒否）と、owner2/3/4/5共通fieldの回帰1ケースを含む。focused7/7・3成功/4名前filter skip・1成功/4名前filter skipを合算しない。型検査/build・Python AST4・固定mjs構文・差分/秘密情報pattern検査が成功し、compiled実Authority→固定helper fallback→実native/signing authorityで通常受付→未送信取消→startup read-only→runtime clean/artifacts2を確認した。開始childは実終了済み。独立read-onlyレビューで追加のmedium以上の問題は確認されず、レビュー側の変更/試験実行なし。
+
+過去owner/5 receipt件数×共有runtime全履歴scan/tail照合の大規模時間とstage helperの30秒制限への影響は未計測であり、有効化前の性能条件として保持する。今回のWindows native/DB確認は新GUI・実model/provider/Jev・実機・人間受入・CI成功の確認ではない。Material 3 Expressive client assetsは`index-CvLJ6iRB.css`/`index-C-cjKz75.js`を維持。
+
+production TaskService/HTTP/M3はまだ新しいindexed登録を有効にしていない。全writer参加/version条件・旧runtime静止、初回index設定、認証済み確認ID/復旧画面、実provider/停止/transport・長期性能・実機safe-area/keyboard・人の全導線受入を含む残る全工程を維持する。Codex新規会話は未有効化、全73要件・Phase0–8と全体ゴールはACTIVE。

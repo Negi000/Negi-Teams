@@ -40,6 +40,16 @@ def verify_authority(root, master_id, context, owner_bytes, proof, cwd, present)
     args = ["node"] + (["--import", "tsx"] if (script.parent.parent / "src/server/orchestration/masterConversations.ts").is_file() else []) + [str(script)]
     request = {"root": str(root), "masterId": master_id, "turnRoot": context["turnRoot"], "schedulerPath": context["schedulerPath"],
                "cwd": cwd, "ownerBytes": owner_bytes, "expectedProofSha256": proof, "ownerPresent": present}
+    if json.loads(owner_bytes)["schema"] == "negi-master-conversation-owner/5":
+        # The invoking inventory already owns the native root/scheduler scope.
+        # Supply a freshly authenticated digest to the read-only Node verifier;
+        # it must not reacquire this process guard or admit any writer.
+        from negi_runtime_inventory import RuntimeInventory
+        runtime = RuntimeInventory({"root": str(root), "context": context})
+        with runtime.scope(), runtime.connection() as conn:
+            _, audit = runtime.audited(conn)
+            if audit["state"] != "clean":raise ValueError("Runtime recovery snapshot is pending")
+            request["runtimeSnapshot"] = {"sha256": audit["schedulerSha256"], "bytes": audit["schedulerBytes"], "present": audit["schedulerPresent"]}
     result = subprocess.run(args, input=json.dumps(request, ensure_ascii=False).encode("utf-8"), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     if result.returncode != 0 or result.stdout.strip() != b'{"verified":true}':

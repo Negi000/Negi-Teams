@@ -33,3 +33,21 @@ helperは固定scriptへstdinで呼び、鍵・本文をargv/envへ入れない�
 新規19ケースは実署名DB・実native scopeを使うnormal turn、既存原文のbaseline、変化proof/異decision、削除/rollback/部分/未索引/署名改変、欠けたDBのpersistent fence、foreign lock、全scheduler writer・同じkey ACK・別instanceの最後の枠、実process exit83によるbootstrap途中終了を確認する。独立レビューの3指摘（baseline identityの検証時点、既定Master公開とadoptionの競合、DB/turn容量の検証時点）を修正した。追加の空scheduler存在問題も修正し、6回帰でhead・marker・directory・原文への副作用を照合した。独立再レビューでこれら4点の閉鎖と追加material regressionなしを確認した。監査側の独立focused実行は1成功/18名前filter skip・失敗/取消0、15214.8865ms、actual exit0で、最終suiteとは別集合である（標準出力のファイル保存なし）。試験での原文復元・直接SQL改変・容量/crash hookはfixture操作であり、製品のrepair APIではない。実model/provider/Jev・認証済み新GUI・人間受入・実機・CI成功の証拠として扱わない。
 
 通常Authorityのowner/4とruntime indexの取得head/後続行の統合、起動監査、全Task/Master/旧dispatchの参加登録、旧runtime静止、認証済みMaterial 3 Expressiveのpreview/明示登録/同じ確認ID照会/復旧と、実機safe-area/仮想キーボードの確認を継続する。全73要件・Phase0–8のゴールはACTIVE。
+
+## 2026-10-03追加: Authorityの通常受付・起動・owner/5
+
+信頼するserverが既存の`stageStorage: "indexed"`と`runtimeStorage: "indexed"`を一緒に登録すると、`MasterConversationAuthority`が固定root/turnRoot/schedulerPathから同じruntime inventoryのscheduler/turn journalを自分で構築する。callerが異なるrootのcallbackを組み合わせる余地を減らし、欠けたroot/key/DBのbootstrapは行わない。通常`admitTurn`と返ったlease、読取専用startup監査、会話status、復旧の照合へ接続した。stage索引だけの登録では通常turnを許可しない既存条件を維持する。production TaskService/HTTPはまだこの新登録を使わない。
+
+新しい`owner/5`はowner/4のstage取得head/contextに加え、共有runtimeの取得headと固定contextをHMACで束縛する。stage audit・ownerBaseline・stage/receipt intent・native owner readerが両方を照合する。runtime全chain/headと取得prefixを検査し、対象turnのrequest原文hash・Master・checkout、scheduler submitのrequest hashを一致させる。共有Taskや別Masterの正当な後続行をこのownerへ帰属させない。稼働中のinspection/thread ownerによる同じMasterの別turn受付は保留する。過去receiptはそのownerのstage保存前までを照合し、runtimeでも後の別ownerを過去ownerの作業として扱わない。
+
+旧owner/2・3・4の原文/署名と過去receiptを保持する。owner/5が残る場合はstage/runtime DB欠損からlegacy解除へ降格しない。新形式でも、記録がない受付前のdead ownerだけを明示decisionと正確なproofで解除し、同じdecisionの再照会を提供する。実turn/request/claimがある場合は既存の別照合を必要とし、解除をprovider完了や再送へ変換しない。
+
+native解除のparent helperはroot guardを既に保持する。固定Node検証helperには、そのscopeで実runtime索引を監査したscheduler hash/長さ/存在をstdinで渡す。childはこれと原文を前後照合する読取専用journalを使い、書込みを拒否する。guardを再取得しないため同じprocess境界のdeadlockを避ける。署名・runtime prefix・原文・receiptをparentの各解除boundaryでも再確認する。この内部snapshotはHTTP/model指定で選べない。
+
+最終関連16 test filesは**343件中342成功・失敗/取消0・スキップ1（636046.6886ms、actual exit0）**。スキップはWindows以外向けのauthority preview診断である。実行中runtime/test312 filesのSHAは不変。今回の新規7 nativeケースでは、通常Authorityからの受付→dispatch/bind/complete・起動監査、共有Task進捗を伴うthread開始、将来head/変更prefix/別context、request intentのACK消失、同じMasterの別受付、dead ownerのnative解除/同じdecision照会、DB欠損時のlegacy解除と鍵再作成の拒否を実DBで確認した。全owner2/3/4/5に共通するMaster/field検証の回帰1ケースも含む。途中focused7/7、3成功/4名前filter skip、1成功/4名前filter skipは最終suiteへ合算しない。
+
+型検査・client/server build、Python AST4・固定mjs構文・差分/秘密情報pattern検査が成功。ビルド済み実Authorityと固定helper fallbackから、実native guard/signing authorityの通常受付→未送信取消→読取専用startup→runtime clean/artifacts2を確認した。開始した試験childは実終了を待った。独立read-onlyレビューでは追加のmedium以上の問題を確認せず、レビュー側の変更/試験実行はない。Windowsでの確認であり、新GUI/実model/provider/Jev/実機/人間受入/CI成功を示すものではない。client assetsは`index-CvLJ6iRB.css`/`index-C-cjKz75.js`のまま。
+
+過去owner/5 receiptを検査するごとに共有runtime全体の監査と取得head以降の行を走査する。receipt件数×runtime履歴が大きいときの処理時間、stage helperの30秒制限への影響は未計測であり、production有効化前の性能条件として保持する。
+
+全Task/Master/統合/旧dispatchの参加登録、root-wide version条件と旧runtime静止、初回root/indexの明示設定、production caller、認証済みMaterial 3 Expressiveの確認ID/復旧画面、停止/transport/実provider、保持/版移行/長期性能と実機・人の受入は引き続き必要である。Codex「新しい会話」は未有効化。全73要件・Phase0–8のゴールはACTIVE。

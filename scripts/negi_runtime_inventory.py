@@ -249,6 +249,47 @@ class RuntimeInventory:
         conn.execute("UPDATE meta SET seq=?,last_sha=?,head_signature=? WHERE id=1", (seq + 1, digest, self.signed_head(raw, seq + 1, digest)))
         return seq + 1, digest
 
+    def assert_owner_baseline(self, owner, active=True):
+        """Read-only binding for an already HMAC-validated owner/5.
+
+        The global tail may include other Tasks/Masters. Only the target turn is
+        attributed to this owner. Historical receipts never claim later owners'
+        work; active inspection/thread owners cannot admit another local turn.
+        """
+        require(owner["schema"] == "negi-master-conversation-owner/5" and owner["runtime"]["context"] == self.context and
+                owner["indexed"]["contextSha256"] == sha(encoded(self.context)), "runtime owner registered context changed")
+        head = owner["runtime"]["head"]
+        with self.connection() as conn:
+            state, result = self.audited(conn)
+            require(result["state"] == "clean" and head["seq"] <= result["head"]["seq"], "runtime owner pending/future baseline")
+            row = conn.execute("SELECT entry_sha FROM events WHERE seq=?", (head["seq"],)).fetchone()
+            require(row is not None and row[0] == head["sha256"], "runtime owner baseline prefix changed")
+            work = "master-" + owner["operation"]["requestId"]
+            target = state[5].get(work + "/request.json") if owner["kind"] == "turn-admission" else None
+            request = canonical(target, FILES["request.json"]) if target is not None else None
+            if request is not None:
+                require(sha(target) == owner["operation"]["hash"] and request.get("masterId") == owner["masterId"] and
+                        request.get("schemaVersion") == "negi-master-turn/1" and type(request.get("cwd")) is str and
+                        sha(request["cwd"].encode("utf-8")) == owner["cwdSha256"], "runtime owner target request differs")
+            for seq, raw, data in conn.execute("SELECT seq,body,data FROM events WHERE seq>? ORDER BY seq", (head["seq"],)):
+                event = json.loads(raw, object_pairs_hook=unique)
+                if event["kind"] == "turn" and event["path"].endswith("/request.json"):
+                    incoming = canonical(data, FILES["request.json"])
+                    require(type(incoming.get("masterId")) is str, "runtime owner tail request identity")
+                    if active and incoming["masterId"] == owner["masterId"]:
+                        require(owner["kind"] == "turn-admission" and event["path"] == work + "/request.json" and request == incoming,
+                                "runtime owner tail contains another local admission")
+                if event["kind"] == "scheduler":
+                    action = canonical(data, 1000000).get("action", {})
+                    identifier = action.get("workId", action.get("work", {}).get("id")) if type(action) is dict else None
+                    if owner["kind"] == "turn-admission" and identifier == work:
+                        require(request is not None and action.get("type") in ("submit", "claim", "settle", "cancel_queued"), "runtime owner scheduler target/kind")
+                        if action["type"] == "submit":
+                            submitted = action["work"]
+                            require(submitted.get("checkout") == request["cwd"] and submitted.get("masterOwner") ==
+                                    {"masterId": owner["masterId"], "requestSha256": sha(target)},
+                                    "runtime owner scheduler registration differs")
+
     def adopt(self, request):
         require(valid_uuid(request["decisionId"]) and valid_sha(request["expectedProofSha256"]), "runtime explicit baseline decision/proof")
         if not absent(self.db):

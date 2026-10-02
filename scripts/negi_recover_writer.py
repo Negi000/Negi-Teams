@@ -52,7 +52,7 @@ def master_inventory_absent(root):
         else:
             with (root / "owner.lock").open("rb") as source:raw = source.read(2001)
     except FileNotFoundError:return
-    if len(raw) <= 2000 and json.loads(raw.decode("utf-8")).get("schema") == "negi-master-conversation-owner/4":
+    if len(raw) <= 2000 and json.loads(raw.decode("utf-8")).get("schema") in ("negi-master-conversation-owner/4", "negi-master-conversation-owner/5"):
         raise ValueError("Indexed Master owner requires its original inventory; preserve it")
 
 
@@ -69,9 +69,10 @@ def validate(raw, kind, domain, request_id, expected_hash):
                          {"requestId", "hash"} if kind != "configuration" else {"operation"})
     schema = {"vault":"negi-vault-writer/1", "setup":"negi-setup-writer/1", "configuration":"negi-configuration-writer/1",
               "master":"negi-master-conversation-owner/2"}[kind]
-    if kind == "master" and isinstance(value, dict) and value.get("schema") in ("negi-master-conversation-owner/3", "negi-master-conversation-owner/4"):
+    if kind == "master" and isinstance(value, dict) and value.get("schema") in ("negi-master-conversation-owner/3", "negi-master-conversation-owner/4", "negi-master-conversation-owner/5"):
         schema = value["schema"];required.add("processIdentity")
-        if schema == "negi-master-conversation-owner/4":required.add("indexed")
+        if schema in ("negi-master-conversation-owner/4", "negi-master-conversation-owner/5"):required.add("indexed")
+        if schema == "negi-master-conversation-owner/5":required.add("runtime")
     if (not isinstance(value, dict) or set(value) != required or value.get("schema") != schema
             or type(value.get("pid")) is not int or not 0 < value["pid"] <= 0x7fffffff
             or not isinstance(value.get("owner"), str) or not UUID.fullmatch(value["owner"])
@@ -88,7 +89,7 @@ def validate(raw, kind, domain, request_id, expected_hash):
                 or not isinstance(value["evidenceSha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", value["evidenceSha256"])
                 or not isinstance(value["signature"], str) or not re.fullmatch(r"[0-9a-f]{64}", value["signature"])):
             raise ValueError("Master writer evidence identity invalid")
-        if schema in ("negi-master-conversation-owner/3", "negi-master-conversation-owner/4"):
+        if schema in ("negi-master-conversation-owner/3", "negi-master-conversation-owner/4", "negi-master-conversation-owner/5"):
             identity = value["processIdentity"]
             if (not isinstance(identity, dict) or set(identity) != {"platform", "pid", "startToken"}
                     or type(identity["pid"]) is not int or identity["pid"] != value["pid"] or not isinstance(identity["startToken"], str)
@@ -96,7 +97,7 @@ def validate(raw, kind, domain, request_id, expected_hash):
                             and int(identity["startToken"]) < (1 << 64)
                             or identity["platform"] == "linux" and re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}:[0-9]{1,30}", identity["startToken"]))):
                 raise ValueError("Master process creation identity invalid")
-        if schema == "negi-master-conversation-owner/4":
+        if schema in ("negi-master-conversation-owner/4", "negi-master-conversation-owner/5"):
             indexed = value["indexed"]
             head = indexed.get("head") if isinstance(indexed, dict) else None
             if (not isinstance(indexed, dict) or set(indexed) != {"head", "contextSha256"}
@@ -105,6 +106,18 @@ def validate(raw, kind, domain, request_id, expected_hash):
                     or head["seq"] == 0 and head["sha256"] != "0" * 64 or not isinstance(indexed["contextSha256"], str)
                     or not re.fullmatch(r"[0-9a-f]{64}", indexed["contextSha256"])):
                 raise ValueError("Master indexed ownership baseline invalid")
+        if schema == "negi-master-conversation-owner/5":
+            runtime = value["runtime"]
+            head = runtime.get("head") if isinstance(runtime, dict) else None
+            context = runtime.get("context") if isinstance(runtime, dict) else None
+            if (not isinstance(runtime, dict) or set(runtime) != {"head", "context"}
+                    or not isinstance(head, dict) or set(head) != {"seq", "sha256"} or type(head["seq"]) is not int
+                    or not 1 <= head["seq"] <= 100000 or not isinstance(head["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", head["sha256"])
+                    or not isinstance(context, dict) or set(context) != {"turnRoot", "schedulerPath"}
+                    or any(type(path) is not str or not os.path.isabs(path) or str(Path(os.path.abspath(path))) != path or re.search(r"[\r\n\0]", path)
+                           for path in context.values())
+                    or hashlib.sha256(json.dumps(context, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest() != indexed["contextSha256"]):
+                raise ValueError("Master runtime ownership baseline invalid")
     elif kind != "configuration":
         if domain != ("vault-initialization" if kind == "vault" else "project-setup") or value["requestId"] != request_id or value["hash"] != expected_hash:
             raise ValueError("Writer belongs to another request")
@@ -172,7 +185,7 @@ def win_info(kernel, handle, directory=False, limit=2000):
 
 def master_start_token(raw, kind):
     value = json.loads(raw.decode("utf-8"))
-    if kind != "master" or value.get("schema") not in ("negi-master-conversation-owner/3", "negi-master-conversation-owner/4"):return None
+    if kind != "master" or value.get("schema") not in ("negi-master-conversation-owner/3", "negi-master-conversation-owner/4", "negi-master-conversation-owner/5"):return None
     if value["processIdentity"]["platform"] != "windows":raise OSError("Master process identity platform unsupported")
     return value["processIdentity"]["startToken"]
 
@@ -359,7 +372,7 @@ def _recover_windows(root, kind, domain, request_id, expected_hash, owner_sha256
             win_info(kernel, handle);raw = win_bytes(kernel, handle)
             if owner_sha256 is not None and hashlib.sha256(raw).hexdigest() != owner_sha256:raise ValueError("Observed owner bytes changed")
             pid = validate(raw, kind, domain, request_id, expected_hash)
-            if kind == "master" and json.loads(raw.decode("utf-8")).get("schema") == "negi-master-conversation-owner/4":
+            if kind == "master" and json.loads(raw.decode("utf-8")).get("schema") in ("negi-master-conversation-owner/4", "negi-master-conversation-owner/5"):
                 raise ValueError("Indexed Master owner requires its original inventory; preserve it")
             token = master_start_token(raw, kind);win_dead(kernel, pid, token)
             if kind == "master":publish_receipt_windows(kernel, root, raw, receipt_json)
@@ -482,7 +495,7 @@ def inspect_writer(root, kind):
                 def dead(pid):
                     # This boundary has no Linux process creation-token proof.
                     # Keep its diagnosis unknown rather than infer identity from PID.
-                    if kind == "master" and json.loads(raw.decode("utf-8")).get("schema") in ("negi-master-conversation-owner/3", "negi-master-conversation-owner/4"):
+                    if kind == "master" and json.loads(raw.decode("utf-8")).get("schema") in ("negi-master-conversation-owner/3", "negi-master-conversation-owner/4", "negi-master-conversation-owner/5"):
                         raise OSError("Master process creation identity inspection unsupported on Linux")
                     try:os.kill(pid, 0)
                     except ProcessLookupError:return

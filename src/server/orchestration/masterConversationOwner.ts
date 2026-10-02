@@ -1,12 +1,13 @@
 // Candidate owner proof. Recovery never starts, cancels, settles or replays a provider operation.
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { lstat, readdir } from "node:fs/promises";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { readMasterTurnArtifact as artifact, verifyMasterTurnDirectory as directory } from "./masterTurnRecords.ts";
 import type { FileScheduler } from "./scheduler.ts";
 import type { WriterOperation } from "./writerRecovery.ts";
 import type { MasterInventoryHead, MasterInventoryProcessIdentity } from "./masterConversationInventory.ts";
+import type { RuntimeHead } from "./runtimeJournalInventory.ts";
 
 export type MasterOwnerKind = "inspection" | "turn-admission" | "thread-start";
 interface MasterOwnerCommon {
@@ -17,7 +18,10 @@ export type MasterOwnerPayload = MasterOwnerCommon & (
   { schema: "negi-master-conversation-owner/2" } |
   { schema: "negi-master-conversation-owner/3"; processIdentity: MasterInventoryProcessIdentity } |
   { schema: "negi-master-conversation-owner/4"; processIdentity: MasterInventoryProcessIdentity;
-    indexed: { head: MasterInventoryHead; contextSha256: string } });
+    indexed: { head: MasterInventoryHead; contextSha256: string } } |
+  { schema: "negi-master-conversation-owner/5"; processIdentity: MasterInventoryProcessIdentity;
+    indexed: { head: MasterInventoryHead; contextSha256: string };
+    runtime: { head: RuntimeHead; context: { turnRoot: string; schedulerPath: string } } });
 export type MasterOwner = MasterOwnerPayload & { signature: string };
 export const masterOwnerAuxiliary = ["owner.lock", "owner-recovery-flock-v2.lock", "recoveries"];
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -39,6 +43,17 @@ function validIndexedBaseline(value: unknown): boolean {
     Number.isSafeInteger(head.seq) && Number(head.seq) >= 0 && Number(head.seq) <= 60_000 && typeof head.sha256 === "string" && sha.test(head.sha256) &&
     (head.seq !== 0 || head.sha256 === "0".repeat(64));
 }
+function validRuntimeBaseline(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const row = value as Record<string, unknown>, head = row.head as Record<string, unknown> | undefined,
+    context = row.context as Record<string, unknown> | undefined;
+  return Object.keys(row).sort().join() === "context,head" && !!head && typeof head === "object" && !Array.isArray(head) &&
+    Object.keys(head).sort().join() === "seq,sha256" && Number.isSafeInteger(head.seq) && Number(head.seq) >= 1 && Number(head.seq) <= 100_000 &&
+    typeof head.sha256 === "string" && sha.test(head.sha256) && !!context && typeof context === "object" && !Array.isArray(context) &&
+    Object.keys(context).sort().join() === "schedulerPath,turnRoot" && typeof context.turnRoot === "string" && typeof context.schedulerPath === "string" &&
+    isAbsolute(context.turnRoot) && isAbsolute(context.schedulerPath) && resolve(context.turnRoot) === context.turnRoot && resolve(context.schedulerPath) === context.schedulerPath &&
+    !/[\r\n\0]/.test(context.turnRoot + context.schedulerPath);
+}
 export function signedMasterOwner(payload: MasterOwnerPayload, key: Buffer): string {
   const signature = createHmac("sha256", key).update(JSON.stringify(payload)).digest("hex");
   const bytes = JSON.stringify({ ...payload, signature }) + "\n";
@@ -49,7 +64,9 @@ export function validatedMasterOwner(value: Record<string, unknown>, masterId: s
   const owner = value as unknown as MasterOwner;
   check((owner.schema === "negi-master-conversation-owner/2" && Object.keys(value).length === 10 ||
     owner.schema === "negi-master-conversation-owner/3" && Object.keys(value).length === 11 && validProcessIdentity(owner.processIdentity, owner.pid) ||
-    owner.schema === "negi-master-conversation-owner/4" && Object.keys(value).length === 12 && validProcessIdentity(owner.processIdentity, owner.pid) && validIndexedBaseline(owner.indexed)) && owner.masterId === masterId &&
+    owner.schema === "negi-master-conversation-owner/4" && Object.keys(value).length === 12 && validProcessIdentity(owner.processIdentity, owner.pid) && validIndexedBaseline(owner.indexed) ||
+    owner.schema === "negi-master-conversation-owner/5" && Object.keys(value).length === 13 && validProcessIdentity(owner.processIdentity, owner.pid) &&
+      validIndexedBaseline(owner.indexed) && validRuntimeBaseline(owner.runtime) && owner.indexed.contextSha256 === masterEvidenceHash(JSON.stringify(owner.runtime.context))) && owner.masterId === masterId &&
     Number.isSafeInteger(owner.pid) && owner.pid > 0 && owner.pid <= 0x7fffffff && typeof owner.owner === "string" && uuid.test(owner.owner) &&
     typeof owner.createdAt === "string" && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(owner.createdAt) && Number.isFinite(Date.parse(owner.createdAt)) &&
     ["inspection", "turn-admission", "thread-start"].includes(owner.kind) && owner.operation && Object.keys(owner.operation).length === 3 &&

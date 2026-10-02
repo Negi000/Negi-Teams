@@ -7,12 +7,13 @@ import { isDeepStrictEqual } from "node:util";
 import type { CodexThreadIdentity } from "../master/appServerClient.ts";
 import { assertMasterIdleEvidence } from "./masterIdleEvidence.ts";
 import { readMasterTurnArtifact as artifact, verifyMasterTurnDirectory as directory } from "./masterTurnRecords.ts";
-import type { FileScheduler } from "./scheduler.ts";
+import { FileScheduler } from "./scheduler.ts";
 import { masterOwnerAuxiliary, masterOwnerEvidence, signedMasterOwner, validatedMasterOwner, type MasterOwnerKind, type MasterOwner } from "./masterConversationOwner.ts";
 import { observeWriter, recoverWriter, type WriterOperation } from "./writerRecovery.ts";
 import { guardMasterAdmission, scheduledMasterTurns, type MasterTurnRequest, type MasterTurnLease } from "./masterTurnAdmission.ts";
 import { MasterStorageHeldError, masterStorageTicket, withMasterStorageGuard } from "./masterStorageGuard.ts";
 import { MasterConversationInventory } from "./masterConversationInventory.ts";
+import { RuntimeJournalInventory } from "./runtimeJournalInventory.ts";
 
 type Stage = "requested" | "old_idle" | "start_dispatched" | "bound" | "completed" | "cancelled" | "needs_reconciliation";
 export interface MasterConversationRequest {
@@ -81,14 +82,21 @@ function nextStage(previous: Stage | null, next: Stage) {
 export class MasterConversationAuthority {
   private readonly root: string;
   private readonly stageInventory: MasterConversationInventory | null;
+  private readonly runtimeInventory: RuntimeJournalInventory | null;
   private readonly schedulerPath: string;
   constructor(private readonly options: { root: string; turnRoot: string; masterId: string; scheduler: FileScheduler; onReleased?: () => Promise<void>;
-    stageStorage?: "indexed" }) {
+    stageStorage?: "indexed"; runtimeStorage?: "indexed" }) {
     check(isAbsolute(options.root) && isAbsolute(options.turnRoot) && /^[a-zA-Z0-9_-]{1,100}$/.test(options.masterId), "server registration invalid");
     check(options.stageStorage === undefined || options.stageStorage === "indexed", "stage storage registration invalid");
-    this.options = Object.freeze({ ...options, root: resolve(options.root), turnRoot: resolve(options.turnRoot) });
+    check(options.runtimeStorage === undefined || options.runtimeStorage === "indexed" && options.stageStorage === "indexed", "runtime requires indexed stage registration");
     this.root = resolve(options.root);
     this.schedulerPath = resolve(options.scheduler.path);
+    this.runtimeInventory = options.runtimeStorage === "indexed" ? new RuntimeJournalInventory({ root: this.root,
+      turnRoot: resolve(options.turnRoot), schedulerPath: this.schedulerPath }) : null;
+    // Construct both writers from this fixed registration. Do not trust a caller
+    // to pair arbitrary scheduler/turn journal callbacks with different roots.
+    this.options = Object.freeze({ ...options, root: this.root, turnRoot: resolve(options.turnRoot),
+      scheduler: this.runtimeInventory ? new FileScheduler(this.schedulerPath, { journal: this.runtimeInventory.schedulerJournal() }) : options.scheduler });
     this.stageInventory = options.stageStorage === "indexed" ? new MasterConversationInventory({ root: this.root, masterId: options.masterId,
       recoveryContext: { turnRoot: this.options.turnRoot, schedulerPath: this.schedulerPath } }) : null;
   }
@@ -106,6 +114,7 @@ export class MasterConversationAuthority {
   }
 
   private async requireLegacyInventoryAbsent(): Promise<void> {
+    if (!this.runtimeInventory) await new FileScheduler(this.schedulerPath).assertStorageCompatible();
     try { if (await this.legacyInventoryAbsent()) return; } catch { /* Ambiguous access remains a hold. */ }
     throw new MasterConversationHeldError("会話の保存記録を照合してください。新しい操作は保留されています。");
   }
@@ -113,6 +122,8 @@ export class MasterConversationAuthority {
   private async requireStageStorage(): Promise<void> {
     if (!this.stageInventory) return this.requireLegacyInventoryAbsent();
     try {
+      if (this.runtimeInventory) check((await this.runtimeInventory.audit()).state === "clean", "runtime intent has not been materialized");
+      else await new FileScheduler(this.schedulerPath).assertStorageCompatible();
       this.assertIndexedRecoveryContext();
       check((await this.stageInventory.audit()).state === "clean", "stage intent has not been materialized");
       this.assertIndexedRecoveryContext();
@@ -121,7 +132,9 @@ export class MasterConversationAuthority {
   }
 
   /** Read-only compatibility gate for process/thread/turn dispatch and leases. */
-  async assertStorageCompatible(): Promise<void> { await this.requireLegacyInventoryAbsent(); }
+  async assertStorageCompatible(): Promise<void> {
+    if (this.runtimeInventory) await this.withStorage(() => this.requireStageStorage()); else await this.requireLegacyInventoryAbsent();
+  }
   async withStorage<T>(run: () => Promise<T>): Promise<T> {
     try { return await withMasterStorageGuard(this.root, run, { createIfMissing: this.stageInventory === null }); }
     catch (error) { if (error instanceof MasterStorageHeldError) throw new MasterConversationHeldError(); throw error; }
@@ -185,11 +198,15 @@ export class MasterConversationAuthority {
     check(process.platform === "win32" && ticket?.pid === process.pid, "native owner identity unavailable");
     const indexed = this.stageInventory ? await this.stageInventory.audit() : null;
     check(indexed === null || indexed.state === "clean", "indexed owner acquisition is pending");
+    const runtime = this.runtimeInventory ? await this.runtimeInventory.audit() : null;
+    check(runtime === null || runtime.state === "clean", "runtime owner acquisition is pending");
     const payload = { schema:"negi-master-conversation-owner/3" as const, owner:randomUUID(), pid:process.pid,
       createdAt:new Date().toISOString(), masterId:this.options.masterId, kind, cwdSha256:hash(state.canonicalCwd), operation, evidenceSha256,
       processIdentity: { platform: "windows" as const, pid: ticket.pid, startToken: ticket.startToken } };
-    const bytes = signedMasterOwner(indexed ? { ...payload, schema:"negi-master-conversation-owner/4",
-      indexed:{head:indexed.head,contextSha256:hash(JSON.stringify({turnRoot:this.options.turnRoot,schedulerPath:this.schedulerPath}))} } : payload,state.key);
+    const context = { turnRoot: this.options.turnRoot, schedulerPath: this.schedulerPath };
+    const baseline = indexed ? { head: indexed.head, contextSha256: hash(JSON.stringify(context)) } : null;
+    const bytes = signedMasterOwner(runtime && baseline ? { ...payload, schema: "negi-master-conversation-owner/5", indexed: baseline,
+      runtime: { head: runtime.head, context } } : baseline ? { ...payload, schema:"negi-master-conversation-owner/4", indexed: baseline } : payload,state.key);
     await this.requireStageStorage();
     let file;
     try { file = await open(path, "wx", 0o600); }
@@ -362,13 +379,14 @@ export class MasterConversationAuthority {
 
   private async ownerRecoveryHeld(cwd:string):Promise<MasterOwnerRecoveryPreview|null> {
     try{
+      if(this.runtimeInventory)check((await this.runtimeInventory.audit()).state==="clean","runtime recovery storage pending");
       if(this.stageInventory)this.assertIndexedRecoveryContext();
       const state=await this.recoveryState(cwd);
       if(!state){if(this.stageInventory)await this.stageInventory.audit();return null;}
       const record=await artifact(join(state.master,"owner.lock"),2000);
       if(!record){if(this.stageInventory)await this.stageInventory.audit();return null;}
       const owner=validatedMasterOwner(record.value,this.options.masterId,state.key);
-      if(this.stageInventory&&owner.schema==="negi-master-conversation-owner/4")await this.stageInventory.ownerBaseline(hash(record.bytes));
+      if(this.stageInventory&&(owner.schema==="negi-master-conversation-owner/4"||owner.schema==="negi-master-conversation-owner/5"))await this.stageInventory.ownerBaseline(hash(record.bytes));
       const indexed = this.stageInventory ? await this.stageInventory.ownerRecoveryIntent(owner.owner) : null;
       let saved:RecoveryPayload|null=null;
       if(indexed?.receipt){
@@ -385,7 +403,7 @@ export class MasterConversationAuthority {
       const supported=process.platform==="win32";
       const storagePending=indexed?.missing.some(path=>path!==indexed.receipt?.relativePath)??false;
       const ownMissing=indexed?.receipt!==null&&indexed?.missing.includes(indexed.receipt?.relativePath??"");
-      const compatible=indexed ? indexed.origin!=="adopted"&&!storagePending : owner.schema!=="negi-master-conversation-owner/4"&&await this.legacyInventoryAbsent();
+      const compatible=indexed ? indexed.origin!=="adopted"&&!storagePending : owner.schema!=="negi-master-conversation-owner/4"&&owner.schema!=="negi-master-conversation-owner/5"&&await this.legacyInventoryAbsent();
       if(this.stageInventory){
         check(isDeepStrictEqual(indexed,await this.stageInventory.ownerRecoveryIntent(owner.owner)),"indexed recovery preview changed");
         this.assertIndexedRecoveryContext();
@@ -411,7 +429,8 @@ export class MasterConversationAuthority {
       let record=await artifact(join(state.master,"owner.lock"),2000);
       const owner=record?validatedMasterOwner(record.value,this.options.masterId,state.key):null;
       const decisions=await this.recoveryDecisions(state.master,state.key,owner?.owner),existing=decisions.find(row=>row.payload.decisionId===decisionId);
-      check(owner?.schema!=="negi-master-conversation-owner/4"&&existing?.payload.owner.schema!=="negi-master-conversation-owner/4","indexed owner requires its original inventory registration");
+      check(owner?.schema!=="negi-master-conversation-owner/4"&&owner?.schema!=="negi-master-conversation-owner/5"&&
+        existing?.payload.owner.schema!=="negi-master-conversation-owner/4"&&existing?.payload.owner.schema!=="negi-master-conversation-owner/5","indexed owner requires its original inventory registration");
       if(!record){
         check(existing&&existing.payload.cwdSha256===hash(state.canonicalCwd)&&existing.payload.proofSha256===expectedProofSha256,"absent owner has no matching decision");
         // The receipt describes this past exact owner. Later legitimate work
@@ -458,6 +477,7 @@ export class MasterConversationAuthority {
     check(uuid.test(decisionId),"recovery decision invalid");
     const read=async()=>{
       try{
+        if(this.runtimeInventory)check((await this.runtimeInventory.audit()).state==="clean","runtime recovery decision storage pending");
         if(this.stageInventory)this.assertIndexedRecoveryContext();else await this.requireLegacyInventoryAbsent();
         const indexed=this.stageInventory?await this.stageInventory.recoveryIntent(decisionId):null;
         const state=await this.recoveryState(cwd);if(!state){check(!indexed,"indexed recovery authority absent");return null;}
@@ -467,7 +487,7 @@ export class MasterConversationAuthority {
         const receipt=indexed?.receipt??(legacy?{relativePath:"recoveries/"+legacy.payload.owner.owner+".json",bytes:legacy.bytes}:null);
         if(!receipt)return null;
         const value=JSON.parse(receipt.bytes),payload=this.validateRecoveryRecord(value,value.payload?.owner?.owner+".json",state.key);
-        check(this.stageInventory!==null||payload.owner.schema!=="negi-master-conversation-owner/4","indexed recovery requires its original inventory registration");
+        check(this.stageInventory!==null||payload.owner.schema!=="negi-master-conversation-owner/4"&&payload.owner.schema!=="negi-master-conversation-owner/5","indexed recovery requires its original inventory registration");
         check(payload.decisionId===decisionId&&payload.cwdSha256===hash(state.canonicalCwd),"saved recovery checkout/decision differs");
         const expectedOwner=JSON.stringify(payload.owner)+"\n",ownMissing=indexed?.missing.includes(receipt.relativePath)??false;
         const storagePending=indexed?.missing.some(path=>path!==receipt.relativePath)??false;
@@ -535,14 +555,15 @@ export class MasterConversationAuthority {
     const requestBytes=JSON.stringify({schemaVersion:"negi-master-turn/1",workId,masterId:this.options.masterId,...request,inputSha256:hash(request.text),at:requestedAt})+"\n";
     return this.withLock(cwd, async state => {
       try { await this.idle(state); } catch { throw new MasterConversationHeldError(); }
-      await this.requireLegacyInventoryAbsent();
-      return guardMasterAdmission(scheduledMasterTurns({...this.options,root:this.options.turnRoot,workId,requestedAt}),
-        () => this.requireLegacyInventoryAbsent(), run => this.withStorage(run)).reserve(request);
+      await this.assertStorageCompatible();
+      return guardMasterAdmission(scheduledMasterTurns({...this.options,root:this.options.turnRoot,workId,requestedAt,
+        ...(this.runtimeInventory ? { journal: this.runtimeInventory.turnJournal() } : {})}),
+        () => this.assertStorageCompatible(), run => this.withStorage(run)).reserve(request);
     },{kind:"turn-admission",operation:{domain:"master-conversation",requestId:raw.requestId,hash:hash(requestBytes)}});
   }
 
   private async startupEvidence() {
-    await this.requireLegacyInventoryAbsent();
+    await this.assertStorageCompatible();
     await directory(dirname(this.root));
     let rootIdentity: string;
     try { rootIdentity = await directory(this.root); }
@@ -568,12 +589,16 @@ export class MasterConversationAuthority {
     check(rootIdentity === await directory(this.root) && mastersIdentity === await directory(masters) &&
       isDeepStrictEqual(names, (await readdir(this.root)).sort()) && isDeepStrictEqual(mastersNames, (await readdir(masters)).sort()) &&
       (await artifact(join(this.root, "signing-key.json"), 1000))?.bytes === key.bytes, "startup authority changed");
-    await this.requireLegacyInventoryAbsent();
+    await this.assertStorageCompatible();
     return { rootIdentity, mastersIdentity, mastersNames, masterIdentity, keyBytes: key.bytes, operations };
   }
 
   /** Production bootstrap audit. Read-only: no signing key, journal, owner lock or repair. */
   async assertStartupSafe(cwd: string): Promise<void> {
+    if (this.runtimeInventory) return this.withStorage(() => this.assertStartupSafeHeld(cwd));
+    return this.assertStartupSafeHeld(cwd);
+  }
+  private async assertStartupSafeHeld(cwd: string): Promise<void> {
     try {
       const canonical = await realpath(resolve(cwd));
       check(!inside(canonical, this.root) && !inside(canonical, this.options.turnRoot) && !inside(canonical, this.options.scheduler.path), "state inside checkout");
@@ -610,6 +635,7 @@ export class MasterConversationAuthority {
   private async indexedStatus(requestId: string): Promise<MasterConversationStatus | null> {
     try {
       return await this.withStorage(async () => {
+        const runtime = this.runtimeInventory ? await this.runtimeInventory.audit() : null;
         const indexed = await this.stageInventory!.latestStage(requestId);
         if (!indexed.latest) return null;
         const envelope = JSON.parse(indexed.latest.bytes), last = envelope.payload as RecordPayload;
@@ -622,9 +648,11 @@ export class MasterConversationAuthority {
         if (owner) validatedMasterOwner(owner.value, this.options.masterId, state.key);
         const after = await this.stageInventory!.latestStage(requestId);
         check(isDeepStrictEqual(indexed, after), "indexed status changed during observation");
-        return structuredClone({ request: last.request, stage: indexed.state === "pending" ? "needs_reconciliation" : last.stage,
-          identity: last.identity, reason: indexed.state === "pending" ? "会話の保存が途中です。記録を保持して照合してください。" : last.reason,
-          exclusionHeld: owner !== null || indexed.state === "pending" });
+        if(this.runtimeInventory)check(isDeepStrictEqual(runtime,await this.runtimeInventory.audit()),"runtime status changed during observation");
+        const pending = indexed.state === "pending" || runtime?.state === "pending";
+        return structuredClone({ request: last.request, stage: pending ? "needs_reconciliation" : last.stage,
+          identity: last.identity, reason: pending ? "会話の保存が途中です。記録を保持して照合してください。" : last.reason,
+          exclusionHeld: owner !== null || pending });
       });
     } catch { throw new MasterConversationHeldError(); }
   }

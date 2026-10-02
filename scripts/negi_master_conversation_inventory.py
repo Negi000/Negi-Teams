@@ -519,7 +519,7 @@ class Inventory:
                         for filename in receipt_names:
                             relative = entry + "/" + filename
                             raw = read_file(path / filename, 8000);payload = self.receipt(raw, filename)
-                            require(payload["owner"]["schema"] != "negi-master-conversation-owner/4", "indexed receipt requires its original inventory, not legacy adoption")
+                            require(payload["owner"]["schema"] not in ("negi-master-conversation-owner/4", "negi-master-conversation-owner/5"), "indexed receipt requires its original inventory, not legacy adoption")
                             require(payload["decisionId"] not in decisions, "duplicate legacy recovery decision")
                             decisions.add(payload["decisionId"]);receipts += 1
                             require(receipts <= MAX_RECEIPTS, "migration receipt capacity; preserve legacy history")
@@ -788,7 +788,7 @@ class Inventory:
                 payload = self.receipt(artifact, path.split("/")[1])
                 require(payload["decisionId"] not in receipts and event["stage"] is None and event["requestId"] == payload["owner"]["operation"]["requestId"], "receipt decision/event mismatch")
                 require(imported or event["ownerSha256"] == sha(encoded(payload["owner"]) + b"\n"), "receipt exact owner hash")
-                if payload["owner"]["schema"] == "negi-master-conversation-owner/4":
+                if payload["owner"]["schema"] in ("negi-master-conversation-owner/4", "negi-master-conversation-owner/5"):
                     require(not imported and event["contextSha256"] == payload["owner"]["indexed"]["contextSha256"], "indexed receipt cannot downgrade its context/baseline")
                     self.assert_owner_baseline(conn, checkpoint, payload["owner"], through=seq - 1)
                 adopted_receipts += int(imported)
@@ -915,7 +915,7 @@ class Inventory:
             raw = read_file(self.master / "owner.lock", 2000)
             try:marker = json.loads(raw.decode("utf-8"))
             except (ValueError, UnicodeDecodeError):marker = None
-            if type(marker) is dict and marker.get("schema") == "negi-master-conversation-owner/4":
+            if type(marker) is dict and marker.get("schema") in ("negi-master-conversation-owner/4", "negi-master-conversation-owner/5"):
                 _, owner = self.owner(sha(raw), live=False, thread_only=False)
                 self.assert_owner_baseline(conn, checkpoint, owner)
         return checkpoint, paths, operations, before[2]
@@ -938,8 +938,9 @@ class Inventory:
         require(sha(raw) == expected_sha, "owner bytes changed")
         value = canonical(raw, 2000)
         required = {"schema", "pid", "owner", "createdAt", "masterId", "kind", "cwdSha256", "operation", "evidenceSha256", "signature", "processIdentity"}
-        require(value["schema"] in ("negi-master-conversation-owner/3", "negi-master-conversation-owner/4")
-                and set(value) == required | ({"indexed"} if value["schema"] == "negi-master-conversation-owner/4" else set()) and value["masterId"] == self.master_id
+        require(value["schema"] in ("negi-master-conversation-owner/3", "negi-master-conversation-owner/4", "negi-master-conversation-owner/5")
+                and set(value) == required | ({"indexed"} if value["schema"] in ("negi-master-conversation-owner/4", "negi-master-conversation-owner/5") else set()) |
+                    ({"runtime"} if value["schema"] == "negi-master-conversation-owner/5" else set()) and value["masterId"] == self.master_id
                 and type(value["pid"]) is int and 0 < value["pid"] <= 0x7fffffff and valid_uuid(value["owner"])
                 and value["kind"] in (("thread-start",) if thread_only else ("thread-start", "inspection", "turn-admission")) and valid_sha(value["cwdSha256"]) and valid_sha(value["evidenceSha256"])
                 and valid_sha(value["signature"]), "stage owner shape/kind")
@@ -955,13 +956,17 @@ class Inventory:
         return raw, value
 
     def assert_owner_baseline(self, conn, checkpoint, owner, context=None, through=None):
-        if owner["schema"] != "negi-master-conversation-owner/4":return
+        if owner["schema"] not in ("negi-master-conversation-owner/4", "negi-master-conversation-owner/5"):return
         indexed = owner["indexed"];head = indexed["head"]
         upper = checkpoint[1] if through is None else through
         require(head["seq"] <= upper <= checkpoint[1], "indexed owner baseline is ahead of current history")
         row = conn.execute("SELECT entry_sha FROM events WHERE master_id=? AND seq=?", (self.master_id, head["seq"])).fetchone()
         require(head["sha256"] == (row[0] if row else "0" * 64) and (head["seq"] == 0 or row is not None), "indexed owner baseline prefix changed")
         if context is not None:require(indexed["contextSha256"] == sha(encoded(context)), "indexed owner registered context changed")
+        if owner["schema"] == "negi-master-conversation-owner/5":
+            from negi_runtime_inventory import RuntimeInventory
+            runtime = RuntimeInventory({"root": str(self.root), "context": owner["runtime"]["context"]})
+            with runtime.scope():runtime.assert_owner_baseline(owner, active=through is None)
         owner_sha = sha(encoded(owner) + b"\n")
         for (raw,) in conn.execute("SELECT body FROM events WHERE master_id=? AND seq>? AND seq<=? ORDER BY seq", (self.master_id, head["seq"], upper)):
             event = json.loads(raw, object_pairs_hook=unique)
@@ -977,7 +982,7 @@ class Inventory:
         with self.connection() as (conn, meta):
             checkpoint, paths, _, missing = self.audited(conn, meta)
             raw, owner = self.owner(request["ownerSha256"], live=False, thread_only=False)
-            require(owner["schema"] == "negi-master-conversation-owner/4", "indexed owner baseline required")
+            require(owner["schema"] in ("negi-master-conversation-owner/4", "negi-master-conversation-owner/5"), "indexed owner baseline required")
             self.assert_owner_baseline(conn, checkpoint, owner, context)
             require(read_file(self.master / "owner.lock", 2000) == raw, "indexed owner changed during baseline read")
             result = self.result(checkpoint, paths, missing)
@@ -1008,7 +1013,7 @@ class Inventory:
             body, seq, last = checkpoint
             require(expected == {"seq": seq, "sha256": last}, "stale checkpoint; never retry automatically")
             owner_raw, owner = self.owner(request["ownerSha256"])
-            if owner["schema"] == "negi-master-conversation-owner/4":
+            if owner["schema"] in ("negi-master-conversation-owner/4", "negi-master-conversation-owner/5"):
                 self.assert_owner_baseline(conn, checkpoint, owner, self.recovery_context(request.get("recoveryContext")))
             payload = self.stage(artifact)
             stage_request = payload["request"]
