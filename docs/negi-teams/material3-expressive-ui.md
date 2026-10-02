@@ -2,6 +2,18 @@
 
 ユーザーの2026-10-01の追加要件。Phase 0–8の目的を維持し、元のebi-team UIから画面構造と操作の流れを作り変える。
 
+## 2026-10-02: 端末操作の共通デザインとCtrl状態
+
+チーム画面の端末ヘッダー、担当・接続先のchip、終了操作、スマホの入力補助を共通のMaterial tokensへ揃えた。端末本文のANSI出力は従来の黒背景で保持する。スマホは8キーを4列・2行へ並べ、48px以上の操作領域と下部navigationとの余白を確保する。Ctrlは`aria-pressed`とtonalな選択状態、矢印はキー名、Ctrl+Cは中断キーとして説明する。Web上の48pxは本UIの設計値であり、Androidの48dpと実機の物理寸法を同一視しない（[Androidのtouch target guidance](https://support.google.com/accessibility/android/answer/7101858?hl=en-GB)）。
+
+旧画面ではキー44×44px、終了操作36×32pxを観測した。Ctrlを押して別担当へ移動し、戻って`c`を入力すると、表示は解除済みでも実際にはCtrl+Cが送られた。非表示の端末、補助バーの非表示、接続切断で修飾を解除し、同じ端末の再選択では実際の状態を表示するよう修正した。物理入力と補助キーに同じ一回限りの修飾処理を使用する。
+
+最終ソースの型検査・ビルド成功。既存の会話表示/配線/inline TUI試験は75件中74成功・実Claude依存1スキップ・失敗0（688.4729ms）。これは新しい端末操作のDOM回帰試験ではなく、既存機能の限定的な確認である。端末操作はビルド済みUI、Cookie認証付きHTTP/WS、2担当の合成端末を用い、Chromium1440/768/600/599/481/375/320pxの両テーマで確認した。文書幅は各viewport幅と一致し、終了操作48×48px、320pxのキー68×48px、補助バーbottom734px < navigation top740pxだった。高さ480/420pxへ縮めても横超過・下部navigationとの重なりはなく、端末の表示領域は120/60pxを保持した。高さ縮小は実機キーボードの確認を代替しない。
+
+キーボードでCtrl選択、一回の消費・明示解除、担当切替、同じ端末の再選択、Ctrl+C、Esc/Tab/4矢印、補助バー非表示、切断/再接続を操作した。最終GUI監視区間の入力14件は全て選択した担当に一度ずつ届き、期待する文字/制御sequenceと一致した。spawn/kill/chatSend/chatNewは0、providerプロセス・model turn・Jevは0。console error/warning/page errorは0、reduced motionは0s。実PTYでのコマンド実行、ネイティブ端末safe-area/キーボード、人の使いやすさの受入は未確認。
+
+Browser plugin not availableのため既存Playwright CLIを使用した。初期QAの誤ったelement ref、workspace外へのスクリーンショット保存拒否、入力件数の誤記とfocus待機不足は手順の失敗として保持した。最終試験では入力ごとに新しいWS観測と正確な件数を待ち、同じ文字の直前の観測を代用しない。CLIの制限により実行用script/画像だけ公開外の`.playwright-cli/`へ置き、最終画像とfixture原本はworkspace外へ保存した。ログは公開外の`.ebi-team/`に保持する。Codexの新しい会話とPhase 0–8全体の残る条件は引き続き未完了である。
+
 ## 設計
 
 - 視覚方針: 緑を基調にした明るいtonal surface、大きさの異なる丸み、強い見出しと主要操作で作業と判断を見分ける。端末の出力は可読性を維持する。

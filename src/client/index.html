@@ -43,8 +43,15 @@
           <details class="log"><summary>通知</summary><ul id="notice-list"></ul></details>
         </aside>
       </main>
-      <div id="key-assist" class="key-assist" hidden>
-        <button class="ka-btn" data-key="esc">Esc</button><button class="ka-btn" data-key="tab">Tab</button><button class="ka-btn ka-ctrl" data-key="ctrl">Ctrl</button><button class="ka-btn" data-key="up">↑</button><button class="ka-btn" data-key="down">↓</button><button class="ka-btn" data-key="left">←</button><button class="ka-btn" data-key="right">→</button><button class="ka-btn" data-key="c-c">^C</button>
+      <div id="key-assist" class="key-assist" role="group" aria-label="選択中の端末の入力補助" hidden>
+        <button class="ka-btn" data-key="esc" aria-label="Escキーを送信">Esc</button>
+        <button class="ka-btn" data-key="tab" aria-label="Tabキーを送信">Tab</button>
+        <button class="ka-btn ka-ctrl" data-key="ctrl" aria-pressed="false" title="次の1文字にCtrl修飾を付ける">Ctrl</button>
+        <button class="ka-btn" data-key="up" aria-label="上矢印キーを送信">↑</button>
+        <button class="ka-btn" data-key="down" aria-label="下矢印キーを送信">↓</button>
+        <button class="ka-btn" data-key="left" aria-label="左矢印キーを送信">←</button>
+        <button class="ka-btn" data-key="right" aria-label="右矢印キーを送信">→</button>
+        <button class="ka-btn" data-key="c-c" aria-label="中断キーを送信（Ctrl+C）" title="選択中の端末へCtrl+Cを送信">Ctrl+C</button>
       </div>
     </div>
     <dialog id="spawn-dialog" class="md-dialog" aria-labelledby="spawn-title">

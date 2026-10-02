@@ -122,9 +122,18 @@
 .negi-workspace .task-result-card>.task-result-attention { border-left:3px solid var(--md-error); padding-left:12px; font-weight:600 }
 .negi-workspace .viewer-body { color:var(--md-on-surface); background:transparent; padding:24px }
 .negi-workspace .pane { background:#141c17; color:#e2eadb }
-.negi-workspace .pane-head { color:#e2eadb }
+.negi-workspace .pane-head { background:var(--md-surface-container); color:var(--md-on-surface); flex-wrap:wrap; gap:12px }
+.negi-workspace .pane-head .id { flex:1 1 160px; min-width:0; overflow-wrap:anywhere; line-height:1.8 }
+.negi-workspace .pane-head .pane-actions { flex-shrink:0; gap:8px; margin-left:auto }
+.negi-workspace .pane-head :is(.kind-badge,.backend-badge) { display:inline-block; background:var(--md-surface-high); color:var(--md-on-surface-variant); border:0; border-radius:8px; padding:2px 8px }
 .negi-workspace .terminal { background:#141c17 }
-.negi-workspace .pane-head button { background:#34443a; color:#e2eadb }
+.negi-workspace .pane-head :is(.kill,.summarize) { min-width:48px; min-height:48px; padding:8px 16px; border:0; background:var(--md-surface-high); color:var(--md-on-surface); font-size:14px }
+.negi-workspace .pane-head .kill { padding:8px; background:var(--md-error-container); color:var(--md-error) }
+.negi-workspace .pane-head .kill:hover { color:var(--md-error); background:var(--md-error-container); filter:none }
+.negi-workspace .key-assist:not([hidden]) { position:static; flex:none; gap:8px; padding:8px 12px; border:0; background:var(--md-surface-low) }
+.negi-workspace .key-assist .ka-btn { flex:1 1 48px; min-width:48px; min-height:48px; padding:8px 4px; border:0; border-radius:16px; background:var(--md-surface-high); color:var(--md-on-surface) }
+.negi-workspace .key-assist .ka-btn.armed { background:var(--md-primary-container); color:var(--md-on-primary-container); border-radius:8px }
+.negi-workspace .key-assist .ka-btn[data-key="c-c"] { background:var(--md-error-container); color:var(--md-error) }
 .negi-workspace .summary-panel { border:0; background:var(--md-tertiary-container); color:var(--md-on-tertiary-container); border-radius:24px }
 .negi-workspace .empty { color:var(--md-on-surface-variant); font-size:16px; flex-direction:column; gap:16px; padding:24px; }
 .negi-workspace .empty h1 { color:var(--md-on-surface) }
@@ -189,7 +198,15 @@
   .negi-workspace .chat-input-row { gap:8px }
   .negi-workspace .chat-send { padding:12px 16px }
   .negi-workspace .chat-stop { padding:8px 12px }
-  .negi-workspace .key-assist { position:static; flex:none; gap:4px; padding:8px 12px; background:var(--md-surface-low); overflow-x:auto; }
-  .negi-workspace .ka-btn { flex:none; width:44px; min-height:44px; padding:8px; border-radius:12px }
+  .negi-workspace .key-assist:not([hidden]) { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); overflow:visible }
+  .negi-workspace .key-assist .ka-btn { width:100% }
+  .negi-workspace .key-assist [data-key="esc"] { grid-area:1/1 }
+  .negi-workspace .key-assist [data-key="tab"] { grid-area:1/2 }
+  .negi-workspace .key-assist [data-key="ctrl"] { grid-area:1/3 }
+  .negi-workspace .key-assist [data-key="c-c"] { grid-area:1/4 }
+  .negi-workspace .key-assist [data-key="left"] { grid-area:2/1 }
+  .negi-workspace .key-assist [data-key="up"] { grid-area:2/2 }
+  .negi-workspace .key-assist [data-key="down"] { grid-area:2/3 }
+  .negi-workspace .key-assist [data-key="right"] { grid-area:2/4 }
   .negi-workspace .dashboard { padding:20px }
 }

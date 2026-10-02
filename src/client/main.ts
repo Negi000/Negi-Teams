@@ -181,6 +181,8 @@ function connect(): void {
     // 再接続時はサーバから chatSnapshot が再送されて会話が戻る。
     chatPanel.markDisconnected();
     workbench.markDisconnected();
+    for (const pane of panes.values()) pane.cancelCtrl();
+    updateCtrlIndicator(false);
     if (reconnectTimer === null) {
       reconnectTimer = window.setTimeout(() => {
         reconnectTimer = null;
@@ -426,8 +428,6 @@ function setActive(id: string | null): void {
   const url = new URL(location.href); if (view === "overview") url.searchParams.delete("view"); else url.searchParams.set("view", view); history.replaceState({}, "", url);
   document.title = `${view === "overview" ? "作業一覧" : view === "usage" ? "使用状況" : "チーム"} · Negi-Teams`;
   setDrawer(false);
-  // ペイン切替時は入力補助バーの Ctrl ハイライトをリセットする（武装は各ペイン固有）。
-  updateCtrlIndicator(false);
   applyVisibility();
   renderRegistry();
   renderEmpty();
@@ -784,13 +784,18 @@ const ctrlBtn = keyAssist.querySelector('[data-key="ctrl"]') as HTMLButtonElemen
 /** Ctrl ボタンのハイライト（武装中表示）を更新する。 */
 function updateCtrlIndicator(armed: boolean): void {
   ctrlBtn?.classList.toggle("armed", armed);
+  ctrlBtn?.setAttribute("aria-pressed", String(armed));
+  if (ctrlBtn) ctrlBtn.title = armed ? "次の1文字にCtrl修飾を付けます。もう一度押すと解除" : "次の1文字にCtrl修飾を付ける";
 }
 
 /** 狭幅かどうかで入力補助バーの表示を切り替える。 */
 function syncKeyAssistVisibility(): void {
   const narrow = window.matchMedia("(max-width: 768px)").matches;
   // chat パネル表示中は xterm が無いので入力補助バーの出番も無い（入力欄を隠さない）。
-  keyAssist.hidden = !narrow || !activeId || !panes.has(activeId);
+  const pane = activeId ? panes.get(activeId) : undefined;
+  keyAssist.hidden = !narrow || !pane;
+  if (keyAssist.hidden) pane?.cancelCtrl();
+  updateCtrlIndicator(!keyAssist.hidden && (pane?.isCtrlArmed ?? false));
 }
 syncKeyAssistVisibility();
 window.addEventListener("resize", syncKeyAssistVisibility);
