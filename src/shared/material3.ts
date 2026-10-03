@@ -101,9 +101,11 @@ export const material3Styles = String.raw`
 .negi-ui .md-surface-tonal { background:var(--md-primary-container); color:var(--md-on-primary-container) }
 .negi-ui .md-surface-tertiary { background:var(--md-tertiary-container); color:var(--md-on-tertiary-container) }
 .negi-ui .md-section { margin-top:28px; min-width:0 }
-.negi-ui .md-section-heading { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:16px }
-.negi-ui .md-section-heading h2 { margin:0 }
+.negi-ui .md-section-heading { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:12px; margin-bottom:16px }
+.negi-ui .md-section-heading h2 { flex:1 1 auto; min-width:0; margin:0; overflow-wrap:anywhere }
+.negi-ui .md-section-heading > .md-chip { flex:none }
 .negi-ui .md-section-heading a { font-size:13px; white-space:nowrap }
+.negi-ui .md-section-heading > .md-button { max-width:100%; white-space:normal }
 .negi-ui .md-chip { display:inline-flex; align-items:center; gap:6px; max-width:100%; overflow-wrap:anywhere; border-radius:8px; padding:4px 10px; font-size:12px; font-weight:650; line-height:1.5; background:var(--md-surface-high); color:var(--md-on-surface-variant) }
 .negi-ui .md-chip-success { background:var(--md-primary-container); color:var(--md-on-primary-container) }
 .negi-ui .md-chip-warning { background:var(--md-warning-container); color:var(--md-warning) }
@@ -219,8 +221,9 @@ export const material3Styles = String.raw`
   .negi-ui .md-actions { gap:10px }
   .negi-ui .md-result-group > .md-button { margin-left:16px }
   .negi-ui .md-actions>* { flex:1 1 auto }
-  .negi-ui .md-step { font-size:11px; padding:10px 3px }
-  .negi-ui .md-step-number { font-size:18px }
+  .negi-ui .md-stepper { grid-template-columns:repeat(2,minmax(0,1fr)) }
+  .negi-ui .md-step { display:flex; align-items:center; justify-content:center; gap:8px; min-height:48px; padding:12px 8px; font-size:12px }
+  .negi-ui .md-step-number { font-size:18px; margin-bottom:0 }
   .negi-ui .md-dialog { padding:22px; border-radius:28px }
 }
 @media (prefers-reduced-motion:reduce) {

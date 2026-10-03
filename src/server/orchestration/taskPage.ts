@@ -11,12 +11,13 @@ export function taskPageHtml(authoring=false,integrations=false): string {
 <div id="task-detail" class="md-detail" hidden>
 <div class="md-detail-header"><span id="project" class="md-chip"></span><h2 id="title"></h2><p id="objective"></p></div>
 <section id="approval-section" class="md-surface md-section md-surface-tertiary" hidden><h2>操作の確認</h2><p>実行に必要な操作を確認してください。</p><div id="approvals"></div><small>操作の許可は、成果の受入とは別の判断です。</small></section>
-<section class="md-surface"><div class="md-section-heading"><h2>現在地</h2><span id="state-chip" class="md-chip"></span></div><p id="status" role="status" aria-live="polite" tabindex="-1"></p>
+<section class="md-surface"><div class="md-section-heading"><h2>現在地</h2><span id="state-chip" class="md-chip"></span></div><p id="status" role="status" aria-live="polite" tabindex="-1"></p><p id="limits" class="muted"></p>
 <p id="request-origin" class="muted"></p>
 <div class="md-actions"><a id="requested-origin-link" class="md-button md-tonal" hidden>委任元の会話</a><a id="created-origin-link" class="md-button md-text" hidden>契約案を作成した会話</a></div><p id="origin-error" class="muted" role="status"></p>
 <div class="md-actions"><button id="start" class="md-primary" disabled>契約を確認して実行</button><a id="review-link" class="md-button md-primary" href="/reviews" hidden>この成果をレビュー</a><button id="stop" class="md-danger" disabled>停止を要求</button></div>
 <div class="md-stepper" aria-label="作業の段階"><div class="md-step" data-step="0"><span class="md-step-number">1</span>契約</div><div class="md-step" data-step="1"><span class="md-step-number">2</span><span id="work-step-label">計画・実装</span></div><div class="md-step" data-step="2"><span class="md-step-number">3</span>検証</div><div class="md-step" data-step="3"><span class="md-step-number">4</span>レビュー</div></div>
-<details><summary>担当と使用量</summary><div id="attempts" class="md-list"></div></details><p id="limits" class="muted"></p>
+<details><summary>担当と使用量</summary><div id="attempts" class="md-list"></div></details>
+<details id="task-diagnostic" class="md-version" hidden><summary>詳細な記録を確認</summary><pre id="task-diagnostic-text"></pre></details>
 
 <details class="md-version"><summary>停止と使用量について</summary><small>停止後に結果が不明な作業は、実行枠を保持して照合を待ちます。自動再試行は行いません。サブスクリプションの金額は不明です。</small></details></section>
 <section id="preflight-proof-held" class="md-surface md-section md-surface-tertiary" hidden><h2>終了判断の記録を確認してください</h2><p>保存された終了判断を照合できません。元の要求・差分・台帳を保持し、保存状態を確認してください。</p><a class="md-button md-tonal" href="/storage">保存状態を確認</a></section>
@@ -40,9 +41,36 @@ async function loadCapacity(){
   catch(e){lastCapacityKey=null;$('capacity').replaceChildren();$('capacity-note').textContent=e.message;}
   finally{capacityLoading=false;capacityTimer=setTimeout(loadCapacity,3000);}
 }
-function render(v){const key=JSON.stringify(v)+':'+busy;if(key===lastRenderKey)return;lastRenderKey=key;const previous=current;current=v;const research=v.taskMode==='read_only_research',worker=research?v.luna:v.sol;$('scope-heading').textContent=research?'参照範囲':'変更範囲';$('work-step-label').textContent=research?'計画・調査':'計画・実装';$('start').textContent=research?'契約を確認して調査':'契約を確認して実行';if(!previous||previous.id!==v.id||previous.canStart!==v.canStart)$('contract').open=v.canStart;$('title').textContent=v.title+(v.resultRevisionCount?'・修正版 '+v.resultRevisionCount:'');$('objective').textContent=v.objective;$('details').replaceChildren();for(const [k,val] of [['プロジェクト',v.project],['Task・版',v.taskId+' v'+v.version],['基準SHA',v.baseSha],['checkout',v.checkout],['担当',v.astra.model+' / '+v.astra.effort+' → '+(research?'Luna ':'Sol ')+worker.model+' / '+worker.effort]]){const dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=k;dd.textContent=val;$('details').append(dt,dd)}list('paths',v.allowedPaths);list('out',v.outOfScope);list('invariants',v.invariants);renderApprovals(v.approvals);list('acceptance',v.acceptance);list('verification',v.verification);$('status').textContent=((research?{ready_for_worker:'Lunaへの引継ぎ待ち',working:'Lunaが調査中'}[v.status]:null)||labels[v.status]||v.status)+(v.stopRequested?'・停止要求済み':'');$('attempts').textContent=v.attempts.map(a=>a.role+' '+a.model+' '+a.state+'\n入力 '+(a.usage?.inputTokens??'不明')+' / 出力 '+(a.usage?.outputTokens??'不明')+' / 金額不明').join('\n\n');$('limits').textContent=v.error||(!v.live&&v.status==='queued'?'待機中にサーバが再起動した作業は自動開始しません。契約を照合して新しいrunを登録してください。':'検証結果: '+(({passed:'合格',failed:'不合格'})[v.verificationOutcome]??'未取得')+'。AIの完了宣言は人間受入にしません。');$('runs').disabled=busy;$('review-link').hidden=!v.reviewId;$('review-link').href='/reviews?case='+encodeURIComponent(v.reviewId??'');$('start').disabled=busy||!v.canStart;$('start').hidden=!v.canStart;$('stop').disabled=busy||!v.canStop||v.stopRequested;
+function taskExplanation(v){
+if(v.preflightCloseHeld)return '終了判断の記録を照合できません。保存状態を確認してください。';
+if(v.preflightClosed)return 'この開始要求は終了しました。続ける場合は、統括に新しい契約案を依頼してください。';
+const guidance={
+review_revoked:'成果の受入が取り消されました。レビューで理由を確認し、統括に次の対応を依頼してください。',
+artifact_changed:'成果と検証記録を照合してください。固定した版を確認できるまで、受入を保留しています。',
+quality_issue:'内容の訂正が必要です。レビューの指摘を確認し、統括に新しい契約案を依頼してください。',
+needs_reconciliation:'実行結果を確定できません。下の「保存された実行を確認」から、記録と残っている差分を照合してください。',
+preflight_failed:'実行前の確認を通過できませんでした。詳細な記録で原因を確認し、開始要求の状態を照合してください。',
+failed:'作業が完了しませんでした。詳細な記録と成果を確認し、統括に次の対応を依頼してください。',
+stopped:'作業を停止しました。保存された記録と成果を確認し、続ける場合は統括に新しい契約案を依頼してください。'
+};
+if(Object.hasOwn(guidance,v.status))return guidance[v.status];
+if(v.error==='Luna findings exceeded the fixed review size limit')return '調査結果がレビューに保存できる大きさを超えました。範囲を絞った新しい契約案を統括に依頼してください。';
+if(v.error)return v.status==='not_started'?'開始条件を確認できません。詳細な記録で原因を確認してください。':'作業を保留しています。詳細な記録で原因を確認し、統括に次の対応を依頼してください。';
+if(!v.live&&v.status==='queued')return '待機中にサーバが再起動した作業は自動開始しません。契約を照合して新しいrunを登録してください。';
+if(v.stopRequested)return '停止を要求しました。終了を確認するまで、実行の記録を保持しています。';
+if(v.status==='not_started')return '契約の目的・'+(v.taskMode==='read_only_research'?'参照範囲':'変更範囲')+'・受入条件を確認してから開始してください。';
+if(v.status==='queued'||v.executionPhase==='waiting_for_worker')return '実行枠が空くのを待っています。待機中は停止を要求できます。';
+if(v.status==='planning')return 'Astraが契約に沿って計画を作成しています。';
+if(v.status==='ready_for_worker')return '計画ができました。担当へ引き継ぐ準備をしています。';
+if(v.status==='working')return v.taskMode==='read_only_research'?'Lunaが契約の参照範囲を調査しています。完了後に検証します。':'Solが契約の変更範囲で作業しています。完了後に検証します。';
+if(v.status==='verifying')return '契約で定めた検証を実行しています。結果を確認するまで、成果の受入を待ちます。';
+if(v.status==='accepted')return 'この版は受入済みです。レビューで受入内容を確認できます。';
+if(v.status==='cancelled')return '待機中の開始要求を取り消しました。続ける場合は、統括に新しい契約案を依頼してください。';
+return '検証結果: '+(({passed:'合格',failed:'不合格'})[v.verificationOutcome]??'未取得')+'。AIの完了宣言は人間受入にしません。';
+}
+function render(v){const key=JSON.stringify(v)+':'+busy;if(key===lastRenderKey)return;lastRenderKey=key;const previous=current;current=v;const research=v.taskMode==='read_only_research',worker=research?v.luna:v.sol;$('scope-heading').textContent=research?'参照範囲':'変更範囲';$('work-step-label').textContent=research?'計画・調査':'計画・実装';$('start').textContent=research?'契約を確認して調査':'契約を確認して実行';if(!previous||previous.id!==v.id||previous.canStart!==v.canStart)$('contract').open=v.canStart;$('title').textContent=v.title+(v.resultRevisionCount?'・修正版 '+v.resultRevisionCount:'');$('objective').textContent=v.objective;$('details').replaceChildren();for(const [k,val] of [['プロジェクト',v.project],['Task・版',v.taskId+' v'+v.version],['基準SHA',v.baseSha],['checkout',v.checkout],['担当',v.astra.model+' / '+v.astra.effort+' → '+(research?'Luna ':'Sol ')+worker.model+' / '+worker.effort]]){const dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=k;dd.textContent=val;$('details').append(dt,dd)}list('paths',v.allowedPaths);list('out',v.outOfScope);list('invariants',v.invariants);renderApprovals(v.approvals);list('acceptance',v.acceptance);list('verification',v.verification);$('status').textContent=((research?{ready_for_worker:'Lunaへの引継ぎ待ち',working:'Lunaが調査中'}[v.status]:null)||labels[v.status]||v.status)+(v.stopRequested?'・停止要求済み':'');$('attempts').textContent=v.attempts.map(a=>a.role+' '+a.model+' '+a.state+'\n入力 '+(a.usage?.inputTokens??'不明')+' / 出力 '+(a.usage?.outputTokens??'不明')+' / 金額不明').join('\n\n');$('limits').textContent=taskExplanation(v);const diagnostic=$('task-diagnostic');if(!previous||previous.id!==v.id||previous.error!==v.error)diagnostic.open=false;diagnostic.hidden=!v.error;$('task-diagnostic-text').textContent=v.error??'';$('runs').disabled=busy;$('review-link').hidden=!v.reviewId;$('review-link').href='/reviews?case='+encodeURIComponent(v.reviewId??'');$('start').disabled=busy||!v.canStart;$('start').hidden=!v.canStart;$('stop').disabled=busy||!v.canStop||v.stopRequested;
 $('task-detail').hidden=false;$('project').textContent=v.project;$('refresh').disabled=busy;$('stop').hidden=!v.canStop&&!v.stopRequested;
-$('request-origin').textContent=v.requestedBy?.kind==='master'?'起動元: 統括から委任':v.requestedBy?.kind==='browser'?'起動元: 利用者がTask画面から開始':v.status==='not_started'?'開始前':'起動元: 過去の記録では未記録';
+$('request-origin').textContent=v.requestedBy?.kind==='master'?'起動元: 統括から委任':v.requestedBy?.kind==='browser'?'起動元: 利用者がTask画面から開始':v.status==='not_started'?'':'起動元: 過去の記録では未記録';$('request-origin').hidden=!$('request-origin').textContent;
 const sourceKey=JSON.stringify([v.id,v.requestedBy]);if(!busy&&sourceKey!==originKey){originKey=sourceKey;void loadOrigins(v.id,sourceKey)}
 const waiting=v.live&&v.executionPhase==='waiting_for_worker';if(waiting)$('status').textContent='計画完了・作業枠を待っています'+(v.stopRequested?'・停止要求済み':'');
 const flagged=['blocked','needs_reconciliation','failed','preflight_failed','review_revoked','artifact_changed','quality_issue'].includes(v.status);$('state-chip').textContent=v.acceptedBy?'受入済み':flagged?'確認が必要':waiting?'作業枠待ち':v.status==='queued'?'開始待ち':v.live?'実行中':v.status==='ready_for_review'?'レビュー待ち':labels[v.status]||v.status;$('state-chip').className='md-chip '+(flagged?'md-chip-warning':v.acceptedBy?'md-chip-success':'');

@@ -2,6 +2,12 @@
 
 2026-10-03（JST）。基準は `NEGI_TEAMS_MASTER_PLAN.ja.md` のPhase 0〜8と `REQUIREMENTS_TRACEABILITY.ja.md`。この表は実装・合成テスト・実モデル観測・人間受入を分ける。Git管理外の実行証拠も参照しており、実装差分の公開を全Phaseの完了宣言とは扱わない。
 
+## 2026-10-03追加: Material 3の細幅と状態案内
+
+[狭い画面の見出しとTaskの状態案内](negi-teams/material3-expressive-ui.md#2026-10-03-狭い画面の見出しとtaskの状態案内)。共通の見出し/操作/chipをカード内で折り返し、スマホの作業段階を2列へ調整した。Taskでは現在の状態と次の操作を先に読み、内部の記録は展開して確認する。Task/原因変更時は閉じ、同じ記録の更新では展開を保持する。
+
+最終型検査/build/diff checkと既存認証/会話表示85/85がactual exit0。GUI92項目成功、1440/375/320px各明暗の契約案/Task/レビュー、実テーマ切替、Cookie認証付きの契約確定・署名受入/取消・再起動、キーボード、記録の更新/切替/安全なテキスト表示を確認した。横超過/overlay/console error・warning/page error0、編集した2ソースの試験前後SHA一致。model結果は合成、過渡状態はcontrolled HTTP payloadで、実provider/model/Jev・実機・人の受入・CI成功の証拠ではない。全73要件・Phase0〜8と全体ゴールはACTIVE。
+
 ## 2026-10-03追加: Luna調査Task・成果レビューとMaterial 3画面
 
 [Lunaの読み取り専用Taskと成果レビュー](negi-teams-luna-tasks.md)。明示したresearch契約とLuna設定だけをAstra→Lunaの共通schedulerへ接続し、正確なrole・read lease・別Context Pack・固定成果・変更ゼロ検証・native Job終了を記録する。専用成果manifest・部分保存回復・署名付き受入/取消・再起動・元Astra通知を接続した。raw/template契約案の確定はresearch classとLuna profileを維持し、通常Taskと並列CLIへ登録できる。単一Vault CLIは引き続きレビュー未登録と表示する。研究成果はコード統合/修正版/baselineへ渡さず、後続は新しい契約にする。
