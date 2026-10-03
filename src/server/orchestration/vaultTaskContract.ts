@@ -83,7 +83,7 @@ function currentVaultExport(vault: string, id: string, project: string): unknown
     env: { ...withoutControlPlaneEnv(), PYTHONIOENCODING: "utf-8" } }));
 }
 function compileContextPack(vault: string, contract: VaultTaskContract,
-                            role: "astra" | "sol", maxChars: number, knowledgeProofDirectory?: string,
+                            role: "astra" | "sol" | "luna", maxChars: number, knowledgeProofDirectory?: string,
                             contextCacheDirectory?: string): string {
   const script = bundledScript("negi_vault.py");
   const content = execFileSync("python", [script, "--vault", vault, "pack",
@@ -127,7 +127,7 @@ async function artifactDirectory(raw: string, vault: string, checkout: string): 
   }
   return actual;
 }
-async function savePack(directory: string, runId: string, role: "astra" | "sol", content: string) {
+async function savePack(directory: string, runId: string, role: "astra" | "sol" | "luna", content: string) {
   const bytes = Buffer.from(content, "utf8");
   const sha256 = createHash("sha256").update(bytes).digest("hex");
   const runKey = createHash("sha256").update(runId).digest("hex").slice(0, 16);
@@ -258,6 +258,10 @@ export async function runSingleTaskFromVault(options: Omit<SingleTaskRunOptions,
   contextCacheDirectory?: string;
 }) {
   const contract = await loadVaultTaskContract(options.vaultDirectory, options.snapshotPath, options.cwd);
+  const research = contract.taskClass === "read_only_research";
+  const workerRole = research ? "luna" : "sol";
+  if (research ? !options.luna || options.sol !== undefined : !options.sol || options.luna !== undefined)
+    throw Error("Vault worker differs from its fixed Task class");
   const vault = await realpath(resolve(options.vaultDirectory));
   const checkout = await realpath(resolve(options.cwd));
   let contextCacheDirectory: string | undefined;
@@ -281,36 +285,37 @@ export async function runSingleTaskFromVault(options: Omit<SingleTaskRunOptions,
   if (!Number.isSafeInteger(maxChars) || maxChars < 1000 || maxChars > 64_000) {
     throw new Error("Context Pack character limit invalid");
   }
-  const compile = (role: "astra" | "sol") => compileContextPack(vault, contract, role, maxChars,
+  const compile = (role: "astra" | "sol" | "luna") => compileContextPack(vault, contract, role, maxChars,
     options.knowledgeProofDirectory, contextCacheDirectory);
   const astraContext = compile("astra");
-  const solContext = compile("sol");
+  const workerContext = compile(workerRole);
   const out = await artifactDirectory(options.artifactDir, vault, checkout);
   const astraPack = await savePack(out, options.runId, "astra", astraContext);
-  const solPack = await savePack(out, options.runId, "sol", solContext);
-  const runContract: ContractRef = { ...contract, contextPacks: { astra: astraPack, sol: solPack } };
-  return runSingleTask({ ...options, contract: runContract, artifactDir: out,
-    astraContext, solContext,
-    beforeSol: async () => {
-      await options.beforeSol?.();
+  const workerPack = await savePack(out, options.runId, workerRole, workerContext);
+  const runContract: ContractRef = { ...contract, contextPacks: { astra: astraPack, [workerRole]: workerPack } };
+  const checkpoint=async()=>{
+      if(research)await options.beforeWorker?.();else await options.beforeSol?.();
       const current = await loadVaultTaskContract(options.vaultDirectory, options.snapshotPath, options.cwd);
-      if (!isDeepStrictEqual(current, contract)) throw new Error("Vault Task Contract changed before Sol");
-      if (compile("astra") !== astraContext || compile("sol") !== solContext) {
-        throw new Error("Context Pack changed before Sol");
+      if (!isDeepStrictEqual(current, contract)) throw new Error("Vault Task Contract changed before worker");
+      if (compile("astra") !== astraContext || compile(workerRole) !== workerContext) {
+        throw new Error("Context Pack changed before worker");
       }
-    },
+    };
+  return runSingleTask({ ...options, contract: runContract, artifactDir: out,
+    astraContext, ...(research ? { lunaContext: workerContext, beforeWorker:checkpoint } : { solContext: workerContext, beforeSol:checkpoint }),
     verify: async (evidence) => {
       try {
         if (!isDeepStrictEqual(currentVaultExport(vault, contract.vaultId, contract.project), contract)) {
-          return { outcome: "unknown" as const, evidenceRef: "vault:task-contract-changed-after-sol" };
+          return { outcome: "unknown" as const, evidenceRef: `vault:task-contract-changed-after-${workerRole}` };
         }
-        if (compile("astra") !== astraContext || compile("sol") !== solContext) {
-          return { outcome: "unknown" as const, evidenceRef: "vault:context-pack-changed-after-sol" };
+        if (compile("astra") !== astraContext || compile(workerRole) !== workerContext) {
+          return { outcome: "unknown" as const, evidenceRef: `vault:context-pack-changed-after-${workerRole}` };
         }
         if (gitCheckoutState(checkout).head.toLowerCase() !== contract.baseSha.toLowerCase()) {
-          return { outcome: "unknown" as const, evidenceRef: "git:base-sha-changed-after-sol" };
+          return { outcome: "unknown" as const, evidenceRef: `git:base-sha-changed-after-${workerRole}` };
         }
-        const foreign = pathsOutsideScope(changedGitPaths(checkout), contract.scope.allowedPaths);
+        const changed = changedGitPaths(checkout);
+        const foreign = research ? changed : pathsOutsideScope(changed, contract.scope.allowedPaths);
         if (foreign.length) {
           return { outcome: "failed" as const,
             evidenceRef: `git:outside-allowed-paths:${JSON.stringify(foreign.slice(0, 10))}` };

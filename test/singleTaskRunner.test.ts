@@ -37,6 +37,57 @@ class FakeClient implements SingleTaskClient {
   }
 }
 
+test("explicit research uses Luna, two read-only threads and a fixed post-turn verifier",async()=>{
+  const dir=await mkdtemp(join(tmpdir(),"negi-luna-runner-"));
+  try{
+    const astra=new FakeClient("gpt-6-astra","Read the scoped parser."),luna=new FakeClient("gpt-6-luna","Finding src/server/orchestration/parser.ts:1; unknowns recorded.");
+    const ledger=new FileTaskLedger(join(dir,"run.jsonl"));let admission=0,verification=0;
+    const state=await runSingleTask({runId:"research-1",contract:{...contract,taskClass:"read_only_research"},cwd:dir,
+      astra:{client:astra,model:astra.model,effort:"medium"},luna:{client:luna,model:luna.model,effort:"medium"},
+      ledger,artifactDir:join(dir,"artifacts"),turnTimeoutMs:1000,lunaContext:"LUNA_PACK",
+      beforeWorker:async()=>{assert.equal(luna.starts,0);admission++},
+      beforeSol:async()=>{throw Error("Sol callback must never grant a Luna admission")},
+      verify:async evidence=>{verification++;assert.equal((await ledger.read()).state!.attempts.at(-1)!.role,"luna");
+        assert.match(await readFile(evidence.workRef.split("#")[0],"utf8"),/Finding/);return {outcome:"passed",evidenceRef:"fixed:clean-checkout"}}});
+    assert.equal(admission,1);assert.equal(verification,1);assert.equal(astra.sandbox,"read-only");assert.equal(luna.sandbox,"read-only");
+    assert.deepEqual(state.attempts.map(a=>a.role),["astra","luna"]);assert.equal(state.status,"ready_for_review");assert.equal(state.acceptedBy,null);
+    assert.match(astra.prompts[0],/Lunaへ渡せる短い調査/);assert.doesNotMatch(astra.prompts[0],/Sol|変更可能/);
+    assert.match(luna.prompts[0],/権限昇格・外部送信は禁止/);assert.match(luna.prompts[0],/LUNA_PACK/);
+    assert.deepEqual((await ledger.read()).state,state);
+  }finally{await rm(dir,{recursive:true,force:true})}
+});
+
+test("mismatched or ambiguous worker cannot initialize a client or create a Task ledger",async()=>{
+  const dir=await mkdtemp(join(tmpdir(),"negi-luna-mismatch-"));
+  try{
+    const client=new FakeClient("gpt-6-luna","unused"),role={client,model:client.model,effort:"medium"};
+    const ledger=new FileTaskLedger(join(dir,"run.jsonl")),base={runId:"mismatch",cwd:dir,astra:role,ledger,
+      artifactDir:join(dir,"artifacts"),turnTimeoutMs:1000,verify:async()=>({outcome:"passed" as const,evidenceRef:"must-not-run"})};
+    for(const roles of [{contract:{...contract,taskClass:"read_only_research"},sol:role},
+      {contract:{...contract,taskClass:"read_only_research"},sol:role,luna:role},
+      {contract,luna:role},{contract,sol:role,luna:role}])
+      await assert.rejects(runSingleTask({...base,...roles}),/worker must match/);
+    assert.equal(client.starts,0);assert.equal((await ledger.read()).state,null);
+  }finally{await rm(dir,{recursive:true,force:true})}
+});
+
+test("an unknown Luna result is held and a failed fixed verification cannot be accepted",async()=>{
+  for(const unknown of [true,false]){
+    const dir=await mkdtemp(join(tmpdir(),"negi-luna-held-"));
+    try{
+      const astra=new FakeClient("gpt-6-astra","Investigate."),luna=new FakeClient("gpt-6-luna","Accepted; all passed.",unknown);
+      const ledger=new FileTaskLedger(join(dir,"run.jsonl"));let checks=0;
+      const options={runId:"held",contract:{...contract,taskClass:"read_only_research"},cwd:dir,
+        astra:{client:astra,model:astra.model,effort:"medium"},luna:{client:luna,model:luna.model,effort:"medium"},
+        ledger,artifactDir:join(dir,"artifacts"),turnTimeoutMs:1000,
+        verify:async()=>{checks++;return {outcome:"failed" as const,evidenceRef:"fixed:failed"}}};
+      const state=await runSingleTask(options);assert.equal(state.status,unknown?"needs_reconciliation":"blocked");
+      assert.equal(state.acceptedBy,null);assert.equal(checks,unknown?0:1);assert.equal(luna.starts,1);
+      await assert.rejects(runSingleTask(options),/already|exists/);assert.equal(luna.starts,1);
+    }finally{await rm(dir,{recursive:true,force:true})}
+  }
+});
+
 test("Astra plan passes to Sol, evidence persists, and review remains explicit", async () => {
   const dir = await mkdtemp(join(tmpdir(), "negi-runner-"));
   try {

@@ -8,7 +8,7 @@ export interface VerificationCommand {
   args: string[];
   timeoutMs: number;
 }
-export interface VaultRunConfig {
+export interface VaultRunBase {
   executable: string;
   checkout: string;
   vault: string;
@@ -17,11 +17,23 @@ export interface VaultRunConfig {
   schedulerPath: string;
   runId: string;
   astra: { model: string; effort: string };
-  sol: { model: string; effort: string };
   verification: VerificationCommand[];
   resources: string[];
   /** Server-signed human approval of a resident Astra plan. No new planning turn. */
   approvedPlan?: { proofDirectory: string; requestId: string };
+}
+export type VaultRunConfig = VaultRunBase & (
+  { sol: { model: string; effort: string }; taskMode?: never; luna?: never } |
+  { taskMode: "read_only_research"; luna: { model: string; effort: string }; sol?: never }
+);
+export function vaultWorker(config: VaultRunConfig) {
+  return config.taskMode === "read_only_research"
+    ? { role: "luna" as const, profile: config.luna, checkoutMode: "read" as const }
+    : { role: "sol" as const, profile: config.sol, checkoutMode: "write" as const };
+}
+export function assertVaultWorkerContract(config: VaultRunConfig, contract: { taskClass?: string }): void {
+  if ((config.taskMode === "read_only_research") !== (contract.taskClass === "read_only_research"))
+    throw Error("Read-only research requires its explicit Luna configuration and Vault task class");
 }
 
 function object(value: unknown): Record<string, unknown> | null {
@@ -49,6 +61,13 @@ function role(value: unknown, name: string): { model: string; effort: string } {
 export function parseVaultRunConfig(value: unknown): VaultRunConfig {
   const row = object(value);
   if (!row) throw new Error("Vault run config must be an object");
+  // No Sol alias is serialized for a read-only run. Historical parsers require
+  // sol and therefore reject this registration rather than grant write access.
+  const readOnly = row.taskMode === "read_only_research";
+  if (row.lunaPolicy !== undefined || (readOnly ? "sol" in row :
+      row.taskMode !== undefined || row.luna !== undefined))
+    throw Error("Vault run worker mode invalid or ambiguous");
+  const worker = readOnly ? { taskMode: "read_only_research" as const, luna: role(row.luna, "luna") } : { sol: role(row.sol, "sol") };
   if (!Array.isArray(row.verification) || row.verification.length > 10 ||
       !Array.isArray(row.resources) || row.resources.length > 20) {
     throw new Error("Vault run verification/resources invalid");
@@ -90,7 +109,7 @@ export function parseVaultRunConfig(value: unknown): VaultRunConfig {
     snapshot: path(row.snapshot, "snapshot"), outputDir: path(row.outputDir, "outputDir"),
     schedulerPath: path(row.schedulerPath, "schedulerPath"),
     runId: label(row.runId, "runId"), astra: role(row.astra, "astra"),
-    sol: role(row.sol, "sol"), verification, resources, ...(approvedPlan ? { approvedPlan } : {}) };
+    ...worker, verification, resources, ...(approvedPlan ? { approvedPlan } : {}) };
 }
 
 /** A CLI run can only claim mechanical coverage for explicitly mapped contract checks. */

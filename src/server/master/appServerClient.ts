@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { AppServerTransport } from "./appServerTransport.ts";
+import { RESEARCH_DISABLED_FEATURES, researchThreadConfig } from "./researchToolPolicy.ts";
 
 type RecordValue = Record<string, unknown>;
 function record(value: unknown): RecordValue | null {
@@ -94,6 +95,8 @@ export interface CodexDynamicToolCall {
 export interface CodexDynamicToolResult { success: boolean; text: string }
 export interface CodexThreadOptions {
   cwd: string; model: string; sandbox: "read-only" | "workspace-write";
+  /** Fixed research contract: no permission escalation or sandbox networking. */
+  readOnlyContract?: true;
   instructions?: string; dynamicTools?: CodexDynamicToolDefinition[];
   dynamicToolLimits?: Record<string, CodexDynamicToolLimits>;
   /** Resident lifecycle pins the returned directory, policy and effort as well as the model. */
@@ -121,6 +124,7 @@ export class CodexAppServerClient {
   private readonly approvals = new Map<string, CodexApprovalRequest>();
   private readonly approvalTimers = new Map<string, NodeJS.Timeout>();
   private dynamicToolNames = new Set<string>();
+  private researchCwd:string|null=null;
   private dynamicToolLimits = new Map<string, CodexDynamicToolLimits>();
   private readonly dynamicCalls = new Map<string, { fingerprint: string; result: Promise<CodexDynamicToolResult> }>();
   /** Provider completion does not imply that host tool side effects have settled. */
@@ -258,8 +262,23 @@ export class CodexAppServerClient {
       throw new Error("resident provider returned different directory, policy, effort or state");
   }
 
+  private async assertResearchToolAuthority(cwd:string,threadId:string|null=null):Promise<void>{
+    // Read static effective config before asking for inventory, so a configured
+    // MCP command is never started merely to discover that it was disallowed.
+    const response=record(await this.transport.request("config/read",{cwd,includeLayers:false}));
+    const config=record(response?.config),features=record(config?.features),servers=record(config?.mcp_servers);
+    if(!config||config.web_search!=="disabled"||!features||!servers||Object.keys(servers).length||
+      RESEARCH_DISABLED_FEATURES.some(name=>features[name]!==false))
+      throw Error("Research external tool authority is not disabled in effective configuration");
+    const inventory=record(await this.transport.request("mcpServerStatus/list",{threadId,limit:1,cursor:null}));
+    if(!inventory||Object.keys(inventory).sort().join()!=="data,nextCursor"||!Array.isArray(inventory.data)||
+      inventory.data.length||inventory.nextCursor!==null)
+      throw Error("Research external tool inventory is not empty");
+  }
   private async openThread(options: CodexThreadOptions, oldThreadId: string | null): Promise<CodexThreadIdentity> {
     this.requireInitialized();
+    if(options.readOnlyContract && (options.sandbox!=="read-only"||options.resident||options.dynamicTools?.length))
+      throw Error("Research thread must be read-only without resident or dynamic tool authority");
     if ((this.identity && this.identity.threadId !== oldThreadId) || this.threadRequestPending || this.needsReconciliation || !options.cwd || !options.model) {
       throw new Error("thread already started, uncertain, or options missing");
     }
@@ -270,17 +289,22 @@ export class CodexAppServerClient {
     const tools = options.dynamicTools ?? [];
     this.threadRequestPending = true;
     try {
+      if(options.readOnlyContract)await this.assertResearchToolAuthority(options.cwd);
       const result = record(await this.transport.request("thread/start", {
         cwd: options.cwd, model: options.model, sandbox: options.sandbox,
-        approvalPolicy: "on-request", approvalsReviewer: "user",
+        approvalPolicy: options.readOnlyContract ? "never" : "on-request", approvalsReviewer: "user",
         ...(options.resident ? { ephemeral: false, config: { model_reasoning_effort: options.resident.effort, sandbox_read_only: { network_access: false } },
-          ...(options.resident.modelProvider ? { modelProvider: options.resident.modelProvider } : {}) } : {}),
+          ...(options.resident.modelProvider ? { modelProvider: options.resident.modelProvider } : {}) } :
+          options.readOnlyContract?{config:researchThreadConfig()}:{}),
         ...(options.instructions ? { baseInstructions: options.instructions } : {}),
         ...(tools.length ? { dynamicTools: structuredClone(tools) } : {}),
       }));
       const threadId = identityToken(record(result?.thread)?.id, "thread.id");
       const resolvedModel = requiredString(result?.model, "model");
       const modelProvider = identityToken(result?.modelProvider, "modelProvider");
+      if(options.readOnlyContract && (result?.approvalPolicy!=="never" ||
+        record(result?.sandbox)?.type!=="readOnly"||record(result?.sandbox)?.networkAccess!==false))
+        throw Error("Research provider returned different sandbox, network or approval policy");
       if (options.resident) this.verifyResidentResponse(result, options);
       if (options.resident && (!Array.isArray(record(result?.thread)?.turns) || (record(result?.thread)!.turns as unknown[]).length))
         throw new Error("new resident conversation is not empty");
@@ -302,6 +326,7 @@ export class CodexAppServerClient {
       this.identity = { threadId, requestedModel: options.model, resolvedModel,
         modelProvider,
         rerouted: resolvedModel !== options.model };
+      this.researchCwd=options.readOnlyContract?options.cwd:null;
       return { ...this.identity };
     } catch (error) { this.needsReconciliation = true; throw error; }
     finally { this.threadRequestPending = false; }
@@ -382,6 +407,7 @@ export class CodexAppServerClient {
     this.turnRequestPending = true;
     this.dynamicCalls.clear();
     try {
+      if(this.researchCwd)await this.assertResearchToolAuthority(this.researchCwd,identity.threadId);
       const result = record(await this.transport.request("turn/start", {
         threadId: identity.threadId, input: [{ type: "text", text, text_elements: [] }], effort,
       }));

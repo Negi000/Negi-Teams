@@ -116,3 +116,19 @@ test("unknown verification cannot be settled as a known failed run",async()=>{
     assert.equal(await scheduler.startNext("must-not-run"),null);
   });
 });
+
+test("the research wrapper refuses legacy Luna entries without the exact mode before claiming capacity",async()=>{
+  const dir=await mkdtemp(join(tmpdir(),"negi-research-mode-"));
+  try{
+    const scheduler=new FileScheduler(join(dir,"scheduler.jsonl")),checkout=join(dir,"checkout");
+    await scheduler.ensureSubscriptionConfiguration();
+    await scheduler.append(event("legacy-luna",{type:"submit",work:{id:"research",parentId:null,dependencies:[],role:"luna",
+      checkout,checkoutMode:"read",resources:[],reserveUsd:0,execution:"direct"}}));
+    const options={runId:"research",cwd:checkout,ledger:new FileTaskLedger(join(dir,"run.jsonl")),luna:{}} as Parameters<typeof runScheduledVaultTask>[0]["run"];
+    let calls=0;
+    await assert.rejects(runScheduledVaultTask({scheduler,dispatchKey:"blocked-mode",run:options,
+      execute:async()=>{calls++;return result("research","ready_for_review")}}),/permissions/);
+    assert.equal(calls,0);assert.equal((await scheduler.read()).state!.entries[0].status,"queued");
+    assert.equal((await scheduler.read()).events.some(e=>e.action.type==="claim"),false);
+  }finally{await rm(dir,{recursive:true,force:true})}
+});

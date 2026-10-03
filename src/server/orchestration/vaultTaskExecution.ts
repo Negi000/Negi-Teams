@@ -1,24 +1,33 @@
 // Shared server/CLI execution. Browser input never supplies executable commands.
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdir, readFile, realpath, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { lstat, mkdir, readFile, realpath, stat } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { AppServerProcess } from "../master/appServerProcess.ts";
-import { boundedAppServerArgs, subscriptionChildEnv } from "../master/boundedAppServer.ts";
+import { boundedAppServerArgs, researchAppServerArgs, subscriptionChildEnv } from "../master/boundedAppServer.ts";
+import { RESEARCH_CODEX_VERSION } from "../master/researchToolPolicy.ts";
 import { FileScheduler } from "./scheduler.ts";
 import { FileTaskLedger, type ReconciliationVerifier, type TaskSnapshot, type TaskRole } from "./singleTask.ts";
 import type { CodexApprovalRequest } from "../master/appServerClient.ts";
 import { runScheduledVaultTask, type TaskAdmissionGuard } from "./scheduledVaultRun.ts";
 import { loadVaultTaskContract,
   runSingleTaskFromVault, type VaultTaskContract } from "./vaultTaskContract.ts";
-import { assertVaultRunOutputPaths, assertVerificationCoverage, canonicalVaultRunRegistration, type VaultRunConfig } from "./vaultRunConfig.ts";
+import { assertVaultRunOutputPaths, assertVerificationCoverage, assertVaultWorkerContract, vaultWorker, canonicalVaultRunRegistration, type VaultRunConfig } from "./vaultRunConfig.ts";
 import { loadApprovedTaskPlan, type ApprovedTaskPlan } from "./approvedTaskPlan.ts";
 import { verifyConfiguredCheckout } from "./checkoutVerification.ts";
 import { TaskExecutionOwner } from "./taskExecutionOwner.ts";
 
 const exec = promisify(execFile);
 const hash = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
+async function assertResearchExecutable(config:VaultRunConfig):Promise<void>{
+  const entry=await lstat(config.executable),actual=await realpath(config.executable);
+  const normalized=(path:string)=>process.platform==="win32"?resolve(path).toLowerCase():resolve(path);
+  if(!entry.isFile()||entry.isSymbolicLink()||normalized(actual)!==normalized(config.executable))
+    throw Error("Research executable identity changed before launch");
+  const version=await exec(actual,["--version"],{encoding:"utf8",windowsHide:true,timeout:20_000,env:subscriptionChildEnv()});
+  if(version.stdout.trim()!==RESEARCH_CODEX_VERSION)throw Error("Research Codex version requires tool-authority compatibility review");
+}
 export interface PreparedVaultRun { config: VaultRunConfig; contract: VaultTaskContract; approvedPlan?: ApprovedTaskPlan; executionConfigSha256?:string }
 export interface TaskOperationApproval {
   id: string; attemptId: string; threadId: string; turnId: string;
@@ -41,11 +50,13 @@ export async function prepareVaultRun(raw: VaultRunConfig): Promise<PreparedVaul
   const executionConfigSha256=hash(JSON.stringify({config:registered,snapshotSha256:hash(await readFile(registered.snapshot))}));
   const config = { ...registered, executable: await realpath(registered.executable) };
   if (!(await stat(config.executable)).isFile()) throw new Error("Codex executable is not a regular file");
+  if(config.taskMode==="read_only_research")await assertResearchExecutable(config);
   const login = await exec(config.executable, ["login", "status"],
     { encoding: "utf8", windowsHide: true, timeout: 20_000, env: subscriptionChildEnv() });
   if (!login.stdout.includes("Logged in using ChatGPT") && !login.stderr.includes("Logged in using ChatGPT"))
     throw new Error("Codex is not logged in using ChatGPT; refusing model dispatch");
   const contract = await loadVaultTaskContract(config.vault, config.snapshot, config.checkout);
+  assertVaultWorkerContract(config,contract);
   assertVerificationCoverage(contract.verification, config.verification);
   await assertVaultRunOutputPaths(config);
   const approvedPlan = await loadApprovedTaskPlan(config, contract);
@@ -54,20 +65,24 @@ export async function prepareVaultRun(raw: VaultRunConfig): Promise<PreparedVaul
 
 export async function submitVaultRun(prepared: PreparedVaultRun, scheduler: FileScheduler): Promise<void> {
   const { config } = prepared;
+  assertVaultWorkerContract(config,prepared.contract);
+  const worker=vaultWorker(config);
   await mkdir(config.outputDir, { recursive: true });
   await scheduler.ensureSubscriptionConfiguration();
   if ((await scheduler.read()).state?.entries.some((entry) => entry.work.id === config.runId))
     throw new Error("Run ID already registered; inspect it before any new attempt");
   await scheduler.append({ key: `${config.runId}:submit`, at: new Date().toISOString(),
     action: { type: "submit", work: { id: config.runId, parentId: null, dependencies: [],
-      role: "sol", checkout: config.checkout, checkoutMode: "write",
-      execution: config.approvedPlan ? "direct" : "astra_to_sol",
-      resources: config.resources.map((name) => ({ name, mode: "write" as const })), reserveUsd: 0 } } });
+      role: worker.role, checkout: config.checkout, checkoutMode: worker.checkoutMode,
+      ...(worker.role==="luna"?{taskMode:"read_only_research" as const}:{}),
+      execution: config.approvedPlan ? "direct" : worker.role==="luna"?"astra_to_luna":"astra_to_sol",
+      resources: config.resources.map((name) => ({ name, mode: worker.checkoutMode })), reserveUsd: 0 } } });
 }
 
 export async function verifyVaultRun(prepared: PreparedVaultRun, signal?: AbortSignal, outputName = "verification.json",processOwner?:TaskExecutionOwner) {
   if (!/^verification(?:-r[1-9][0-9]?)?\.json$/.test(outputName)) throw new Error("Verification output name invalid");
   const { config, contract } = prepared;
+  assertVaultWorkerContract(config,contract);
   return verifyConfiguredCheckout({ ...config, baseSha: contract.baseSha, allowedPaths: contract.scope.allowedPaths,
     requiredVerification: contract.verification, commands: config.verification,processOwner }, signal, outputName);
 }
@@ -75,6 +90,8 @@ export async function verifyVaultRun(prepared: PreparedVaultRun, signal?: AbortS
 export async function executeVaultRun(prepared: PreparedVaultRun, scheduler: FileScheduler,
                                       signal?: AbortSignal, hooks?: TaskExecutionHooks): Promise<TaskSnapshot> {
   const { config, contract } = prepared;
+  assertVaultWorkerContract(config,contract);
+  const workerProfile=vaultWorker(config),research=workerProfile.role==="luna";
   // One deadline covers both roles and verification, not a fresh budget per turn.
   const deadline = AbortSignal.timeout(contract.limits.timeLimitMinutes * 60_000);
   const deadlineAtMs = Date.now() + contract.limits.timeLimitMinutes * 60_000;
@@ -91,7 +108,8 @@ export async function executeVaultRun(prepared: PreparedVaultRun, scheduler: Fil
       snapshotPath: config.snapshot, ledger, artifactDir: join(config.outputDir, "artifacts"),
       turnTimeoutMs: Math.min(600_000, contract.limits.timeLimitMinutes * 60_000),
       deadlineAtMs,
-      astra: { client: null as never, ...config.astra }, sol: { client: null as never, ...config.sol },
+      astra: { client: null as never, ...config.astra },
+      ...(research?{luna:{client:null as never,...workerProfile.profile}}:{sol:{client:null as never,...workerProfile.profile}}),
       ...(prepared.approvedPlan ? { approvedPlan: prepared.approvedPlan } : {}),
       verify: () => verifyVaultRun(prepared, signal,"verification.json",owner) },
     execute: async (options) => {
@@ -100,9 +118,9 @@ export async function executeVaultRun(prepared: PreparedVaultRun, scheduler: Fil
       const queued: Array<{ role: TaskRole; request: CodexApprovalRequest }> = [];
       let approvalJobs: Promise<void> = Promise.resolve();
       let astra: AppServerProcess | null = null;
-      let sol: AppServerProcess | null = null;
+      let worker: AppServerProcess | null = null;
       const register = async (role: TaskRole, request: CodexApprovalRequest) => {
-        const provider = role === "astra" ? astra : sol;
+        const provider = role === "astra" ? astra : worker;
         const bound = bindings.get(role);
         if (!provider || !bound || bound.threadId !== request.threadId || bound.turnId !== request.turnId)
           throw new Error("Operation approval does not match the active Task attempt");
@@ -126,40 +144,54 @@ export async function executeVaultRun(prepared: PreparedVaultRun, scheduler: Fil
           provider.client.answerApproval(request, allow);
         });
       };
-      const onApproval = (role: TaskRole) => hooks ? (request: CodexApprovalRequest) => {
+      const onApproval = (role: TaskRole) => research ? (request:CodexApprovalRequest)=>{
+        // A research contract cannot be escalated by the browser or a model.
+        const provider=role==="astra"?astra:worker;
+        try{provider?.client.answerApproval(request,false)}catch{/* the provider has ended */}
+      } : hooks ? (request: CodexApprovalRequest) => {
         if (!bindings.has(role)) { queued.push({ role, request }); return; }
         approvalJobs = approvalJobs.then(() => register(role, request)).catch(() => {
-          const provider = role === "astra" ? astra : sol;
+          const provider = role === "astra" ? astra : worker;
           try { provider?.client.answerApproval(request, false); } catch { /* provider may be gone */ }
         });
       } : undefined;
-      const stop = () => { if (astra) void astra.stop().catch(()=>{}); if (sol) void sol.stop().catch(()=>{}); };
+      const stop = () => { if (astra) void astra.stop().catch(()=>{}); if (worker) void worker.stop().catch(()=>{}); };
       signal?.addEventListener("abort", stop, { once: true });
       try {
         if (!prepared.approvedPlan) {
+          if(research)await assertResearchExecutable(config);
           await owner.launching("astra");
           const launch={ executable: config.executable,
-            args: boundedAppServerArgs(true), env: subscriptionChildEnv(), cwd: config.checkout,
+            args: research?researchAppServerArgs():boundedAppServerArgs(true), env: subscriptionChildEnv(), cwd: config.checkout,
             client: { transportTimeoutMs: 20_000, onApproval: onApproval("astra") } };
           astra=process.platform==="win32"?await AppServerProcess.launchContained(launch,owner.processTreeRoot):AppServerProcess.launch(launch);
           await owner.started("astra", astra.pid,astra.treeIdentity??undefined);
         }
-        await owner.launching("sol");
+        if(research)await assertResearchExecutable(config);
+        await owner.launching(workerProfile.role);
         const launch={ executable: config.executable,
-          args: boundedAppServerArgs(true), env: subscriptionChildEnv(), cwd: config.checkout,
-          client: { transportTimeoutMs: 20_000, onApproval: onApproval("sol") } };
-        sol=process.platform==="win32"?await AppServerProcess.launchContained(launch,owner.processTreeRoot):AppServerProcess.launch(launch);
-        await owner.started("sol", sol.pid,sol.treeIdentity??undefined);
-        for (const provider of [...(astra ? [astra] : []), sol]) {
+          args: research?researchAppServerArgs():boundedAppServerArgs(true), env: subscriptionChildEnv(), cwd: config.checkout,
+          client: { transportTimeoutMs: 20_000, onApproval: onApproval(workerProfile.role) } };
+        worker=process.platform==="win32"?await AppServerProcess.launchContained(launch,owner.processTreeRoot):AppServerProcess.launch(launch);
+        await owner.started(workerProfile.role, worker.pid,worker.treeIdentity??undefined);
+        for (const provider of [...(astra ? [astra] : []), worker]) {
           await provider.client.initialize();
           const account = await provider.client.readAccountMode();
           if (account.type !== "chatgpt" || !account.requiresOpenaiAuth)
             throw new Error("Task execution requires ChatGPT account authentication");
         }
+        const beforeWorker=async()=>{
+          if(signal?.aborted)throw Error("User requested stop");
+          if(prepared.approvedPlan&&JSON.stringify(await loadApprovedTaskPlan(config,contract))!==JSON.stringify(prepared.approvedPlan))
+            throw Error("Approved Task plan changed before worker");
+          if(research)await options.beforeWorker?.();else await options.beforeSol?.();
+          if(signal?.aborted)throw Error("User requested stop");
+        };
         return await runSingleTaskFromVault({ ...options,
           knowledgeProofDirectory: hooks?.knowledgeProofDirectory,
           contextCacheDirectory: hooks?.contextCacheDirectory,
-          astra: { client: astra?.client ?? null as never, ...config.astra }, sol: { client: sol.client, ...config.sol },
+          astra: { client: astra?.client ?? null as never, ...config.astra },
+          ...(research?{luna:{client:worker.client,...workerProfile.profile}}:{sol:{client:worker.client,...workerProfile.profile}}),
           expectedModelProvider: "openai",
           onProviderBound: async (bound) => {
             bindings.set(bound.role, bound);
@@ -178,16 +210,10 @@ export async function executeVaultRun(prepared: PreparedVaultRun, scheduler: Fil
               key: `operation-discard:${approval.id}`, at: new Date().toISOString(),
               action: { type: "discard_approval", approvalId: approval.id, reason: "provider_turn_ended" } });
           },
-          beforeSol: async () => {
-            if (signal?.aborted) throw new Error("User requested stop");
-            if (prepared.approvedPlan && JSON.stringify(await loadApprovedTaskPlan(config, contract)) !== JSON.stringify(prepared.approvedPlan))
-              throw new Error("Approved Task plan changed before Sol");
-            await options.beforeSol?.();
-            if (signal?.aborted) throw new Error("User requested stop");
-          } });
+          ...(research?{beforeWorker}:{beforeSol:beforeWorker}) });
       } finally {
         signal?.removeEventListener("abort", stop);
-        const stopped = await Promise.allSettled(([ ["astra", astra], ["sol", sol] ] as const)
+        const stopped = await Promise.allSettled(([ ["astra", astra], [workerProfile.role, worker] ] as const)
           .filter((entry) => entry[1] !== null).map(async ([role, provider]) => {
             const exit=await provider!.stop();await owner.exited(role, provider!.pid,exit.treeReceipt);
           }));

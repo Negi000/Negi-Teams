@@ -38,6 +38,31 @@ test("global slots, dependencies and same-checkout writes are admitted centrally
   });
 });
 
+test("explicit research mode rejects write leases and missing/foreign execution modes while legacy Luna writers replay",async()=>{
+  await withScheduler(async(scheduler,path,dir)=>{
+    await scheduler.append(event("configure-research",{type:"configure",maxConcurrent:2,budgetUsd:0}));
+    let index=0;
+    const research={role:"luna" as const,checkoutMode:"read" as const,taskMode:"read_only_research" as const};
+    for(const execution of ["direct","astra_to_luna"] as const){
+      for(const overrides of [{checkoutMode:"write" as const},{resources:[{name:"shared",mode:"write" as const}]},
+        {role:"sol" as const},{taskMode:undefined}]){
+        // A mode-less direct Luna writer remains a legacy capability. Only the
+        // new pipeline requires a mode; the wrapper never accepts it as research.
+        if(execution==="direct"&&"taskMode" in overrides)continue;
+        await assert.rejects(scheduler.append(event(`reject-${index}`,{type:"submit",work:work(`reject-${index++}`,join(dir,"source"),
+          {...research,execution,...overrides})})),/invalid/);
+      }
+      await scheduler.append(event(`accept-${execution}`,{type:"submit",work:work(`accept-${execution}`,join(dir,"source"),{...research,execution})}));
+    }
+    for(const execution of [undefined,"astra_to_sol"] as const)
+      await assert.rejects(scheduler.append(event(`reject-${index}`,{type:"submit",work:work(`reject-${index++}`,join(dir,"source"),{...research,execution})})),/invalid/);
+    await scheduler.append(event("legacy-writer",{type:"submit",work:work("legacy-writer",join(dir,"source"),{role:"luna"})}));
+    const current=(await scheduler.read()).state!,reopened=(await new FileScheduler(path).read()).state!;
+    assert.deepEqual(reopened,current);assert.equal(current.entries.at(-1)!.work.checkoutMode,"write");
+    assert.equal(current.entries[1].phase,"planning");
+  });
+});
+
 test("unresolved provider outcomes keep slot and write lock across reload", async () => {
   await withScheduler(async (scheduler, path, dir) => {
     await scheduler.append(event("config", { type: "configure", maxConcurrent: 2, budgetUsd: 10 }));

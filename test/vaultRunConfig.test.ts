@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { assertVaultRunOutputPaths, assertVerificationCoverage,
+import { assertVaultRunOutputPaths, assertVerificationCoverage, assertVaultWorkerContract, vaultWorker,
   parseVaultRunConfig } from "../src/server/orchestration/vaultRunConfig.ts";
 
 const root = process.platform === "win32" ? "E:\\Negi-Teams\\" : "/tmp/";
@@ -18,6 +18,19 @@ const base = { executable: `${root}codex`, checkout: `${root}checkout`,
 
 test("explicit Vault run config preserves command argv without invoking a shell", () => {
   assert.deepEqual(parseVaultRunConfig(base), base);
+});
+test("research registration is explicit and contains no legacy Sol write profile",()=>{
+  const {sol,...common}=base;
+  const raw={...common,taskMode:"read_only_research",luna:{model:"gpt-6-luna",effort:"low"}};
+  const parsed=parseVaultRunConfig(raw);
+  assert.deepEqual(parsed,raw);assert.equal("sol" in parsed,false);
+  assert.deepEqual(vaultWorker(parsed),{role:"luna",profile:raw.luna,checkoutMode:"read"});
+  assert.doesNotThrow(()=>assertVaultWorkerContract(parsed,{taskClass:"read_only_research"}));
+  assert.throws(()=>assertVaultWorkerContract(parsed,{}),/explicit Luna/);
+  assert.throws(()=>assertVaultWorkerContract(parseVaultRunConfig(base),{taskClass:"read_only_research"}),/explicit Luna/);
+  for(const value of [{...raw,sol},{...raw,sol:undefined},{...common,luna:raw.luna},
+    {...raw,taskMode:"unknown"},{...raw,luna:undefined},{...raw,lunaPolicy:"approved"}])
+    assert.throws(()=>parseVaultRunConfig(value),/invalid|ambiguous/);
 });
 test("Vault run config rejects relative paths, repeated locks and uncontrolled commands", () => {
   assert.throws(() => parseVaultRunConfig({ ...base, checkout: "relative" }), /absolute path/);

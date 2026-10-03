@@ -6,7 +6,7 @@ import { mkdir } from "node:fs/promises";
 
 export type TaskStatus = "queued" | "planning" | "ready_for_worker" | "working" |
   "verifying" | "ready_for_review" | "accepted" | "blocked" | "stopped" | "needs_reconciliation";
-export type TaskRole = "astra" | "sol";
+export type TaskRole = "astra" | "sol" | "luna";
 export interface AttemptUsage {
   scope: "turn" | "thread" | "unknown";
   inputTokens: number | null;
@@ -23,6 +23,7 @@ export interface ContractRef {
   sha256: string;
   project: string;
   objective: string;
+  taskClass?: string;
   acceptance: string[];
   baseSha: string;
   scope?: { in: string[]; out: string[]; allowedPaths: string[] };
@@ -31,7 +32,7 @@ export interface ContractRef {
   escalation?: string[];
   limits?: { maxAttempts: number; timeLimitMinutes: number };
   sourceNotes?: Array<{ id: string; kind: string; version: number; sha256: string; path: string }>;
-  contextPacks?: { astra: { sha256: string; path: string }; sol: { sha256: string; path: string } };
+  contextPacks?: { astra: { sha256: string; path: string }; sol?: { sha256: string; path: string }; luna?: { sha256: string; path: string } };
   approvedPlan?: { approvalRef: string; threadId: string; turnId: string; callId: string };
 }
 export interface Attempt {
@@ -147,6 +148,10 @@ export function reduceTask(state: TaskSnapshot | null, event: TaskEvent): TaskSn
     requireState(Boolean(a.runId) && Boolean(a.contract.vaultId) && a.contract.version > 0 &&
       hex(a.contract.sha256) && gitObjectId(a.contract.baseSha) && Boolean(a.contract.project) &&
       Boolean(a.contract.objective) && a.contract.acceptance.length > 0, "invalid contract snapshot");
+    requireState(a.contract.taskClass===undefined || typeof a.contract.taskClass==="string"&&
+      /^[a-z][a-z0-9_.-]{0,79}$/.test(a.contract.taskClass),"invalid Task class");
+    if(a.contract.contextPacks)requireState(Object.keys(a.contract.contextPacks).sort().join()===
+      ["astra",a.contract.taskClass==="read_only_research"?"luna":"sol"].sort().join(),"context pack roles differ from Task class");
     return { runId: a.runId, contract: structuredClone(a.contract), status: "queued",
       attempts: [], approvals: [], providerObservations: [], verification: null,
       stopReason: null, stoppedFrom: null,
@@ -169,7 +174,7 @@ export function reduceTask(state: TaskSnapshot | null, event: TaskEvent): TaskSn
       requireState(Boolean(a.attemptId) && Boolean(a.requestedModel) &&
         !next.attempts.some((x) => x.id === a.attemptId), "attempt ID/model invalid");
       const expectedRole = next.status === "queued" ? "astra" :
-        next.status === "ready_for_worker" ? "sol" : null;
+        next.status === "ready_for_worker" ? next.contract.taskClass === "read_only_research" ? "luna" : "sol" : null;
       requireState(a.role === expectedRole, "role or status invalid");
       next.attempts.push({ id: a.attemptId, role: a.role, requestedModel: a.requestedModel,
         resolvedModel: null, threadId: null, turnId: null, state: "running", outputRef: null,
@@ -275,6 +280,8 @@ export function reduceTask(state: TaskSnapshot | null, event: TaskEvent): TaskSn
       return next;
     }
     case "decide_approval": {
+      requireState(next.contract.taskClass!=="read_only_research" || a.decision!=="allow",
+        "read-only research cannot grant operation escalation");
       const p = next.approvals.find((x) => x.id === a.approvalId);
       requireState(Boolean(p) && p!.decision === "pending" && active?.id === a.attemptId &&
         ["allow", "deny"].includes(a.decision) && (a.decision !== "allow" || p!.targetKnown !== false) &&
@@ -319,6 +326,7 @@ export function reduceTask(state: TaskSnapshot | null, event: TaskEvent): TaskSn
       next.acceptedBy = a.reviewer;
       return next;
     case "reverify_result":
+      requireState(next.contract.taskClass!=="read_only_research","read-only research requires a new fixed contract for correction");
       requireState(next.status === "ready_for_review" && next.acceptedBy === null &&
         next.verification?.outcome === "passed" && next.verification.evidenceRef === a.fromEvidenceRef &&
         Boolean(a.evidenceRef && a.revisionRef) && a.evidenceRef !== a.fromEvidenceRef &&

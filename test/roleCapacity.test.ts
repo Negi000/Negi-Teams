@@ -97,6 +97,25 @@ test("simultaneous worker admissions across scheduler instances cannot exceed th
   });
 });
 
+test("Astra to Luna research uses the planner then worker capacity and retains its read lease while waiting or unknown",async()=>{
+  await fixture(async(scheduler,dir)=>{
+    await scheduler.ensureSubscriptionConfiguration({maxConcurrent:2,planners:1,workers:1});
+    await record(scheduler,{type:"submit",work:work(dir,"worker")});await scheduler.claim("worker","busy");
+    await record(scheduler,{type:"submit",work:work(dir,"research",{role:"luna",checkoutMode:"read",taskMode:"read_only_research",execution:"astra_to_luna"})});
+    await scheduler.claim("research","research-plan");
+    let usage=schedulerCapacityUsage((await scheduler.read()).state!);assert.deepEqual([usage.global,usage.planners,usage.workers],[2,1,1]);
+    await finish(scheduler,"research");usage=schedulerCapacityUsage((await scheduler.read()).state!);
+    assert.deepEqual([usage.global,usage.planners,usage.workers,usage.waitingWorkers],[1,0,1,1]);
+    await record(scheduler,{type:"submit",work:work(dir,"writer",{checkout:join(dir,"research")})});
+    assert.equal(await scheduler.tryClaim("writer","no-write"),null);assert.equal(await scheduler.tryStartWorker("research","no-worker"),null);
+    await settle(scheduler,"worker");assert.ok(await scheduler.tryStartWorker("research","luna-worker"));
+    await record(scheduler,{type:"unknown",workId:"research",reason:"Luna result uncertain"});
+    const reopened=new FileScheduler(scheduler.path);usage=schedulerCapacityUsage((await reopened.read()).state!);
+    assert.deepEqual([usage.global,usage.planners,usage.workers,usage.unresolved],[1,0,1,1]);
+    assert.equal(await reopened.tryClaim("writer","still-no-write"),null);
+  });
+});
+
 test("unknown planning and working hold their respective roles; unphased history counts conservatively", async () => {
   await fixture(async (scheduler, dir) => {
     await scheduler.ensureSubscriptionConfiguration();

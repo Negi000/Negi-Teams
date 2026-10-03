@@ -8,7 +8,7 @@ import { MasterConversationAuthority } from "./masterConversations.ts";
 import type { ConfigurationAdmission } from "./projectConfiguration.ts";
 import { FileTaskLedger, type TaskEvent, type TaskSnapshot } from "./singleTask.ts";
 import { HumanReviewProofStore, isReviewRequestId } from "./humanReviewProof.ts";
-import { assertVaultRunOutputPaths, canonicalVaultRunRegistration, parseVaultRunConfig, type VaultRunConfig } from "./vaultRunConfig.ts";
+import { assertVaultRunOutputPaths, canonicalVaultRunRegistration, parseVaultRunConfig as parseExecutionConfig, type VaultRunConfig } from "./vaultRunConfig.ts";
 import { executeVaultRun, prepareVaultRun, submitVaultRun, verifyVaultRun, type PreparedVaultRun, type TaskOperationApproval } from "./vaultTaskExecution.ts";
 import { captureTaskReview, taskReviewCheckoutFingerprint, verifyTaskReviewCheckout, type TaskReviewManifest } from "./taskReviewArtifact.ts";
 import { ReviewDecisionBusyError, type LocalReviewService } from "./reviewService.ts";
@@ -31,6 +31,13 @@ import { TaskPreflightRecovery, withTaskPreflightLock, type PreflightRecoveryVie
 import type { VaultTaskContract } from "./vaultTaskContract.ts";
 
 const hash = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
+// The existing browser result schema describes a Git diff. Until a separately
+// verified artifact review is installed, it must never dispatch a research run.
+function parseVaultRunConfig(raw:unknown):VaultRunConfig {
+  const config=parseExecutionConfig(raw);
+  if(config.taskMode==="read_only_research")throw Error("Read-only Task artifact review is not yet registered; browser Task dispatch is held");
+  return config;
+}
 function inside(root: string, path: string): boolean {
   const rel = relative(root.toLowerCase(), path.toLowerCase());
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));

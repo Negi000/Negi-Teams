@@ -16,7 +16,7 @@ const exec = promisify(execFile), hash = (v:unknown)=>createHash("sha256").updat
 const inside=(a:string,b:string)=>{const r=relative(a.toLowerCase(),b.toLowerCase());return !r||(!r.startsWith("..")&&!isAbsolute(r))};
 const label=(v:unknown)=>typeof v==="string"&&/^[a-zA-Z0-9._-]{1,100}$/.test(v);
 export interface ProjectSettings { id:string; title:string; project:string; repository:string; vault:string; executable:string;
-  allowedPaths:string[]; astra:VaultRunConfig["astra"]; sol:VaultRunConfig["sol"]; verification:VaultRunConfig["verification"];
+  allowedPaths:string[]; astra:VaultRunConfig["astra"]; sol:NonNullable<VaultRunConfig["sol"]>; verification:VaultRunConfig["verification"];
   maxAttempts:number; timeLimitMinutes:number }
 export interface ProjectSetupPreview { schema:"negi-project-setup/1"; settings:ProjectSettings; baseSha:string;
   sources:Array<{id:string;kind:string;version:number;sha256:string;path:string}>; hash:string }
@@ -129,6 +129,7 @@ export class LocalProjectSetup {
       new Set(p.allowedPaths).size!==p.allowedPaths.length)throw Error("Allowed paths invalid");
     const config=parseVaultRunConfig({executable,checkout:repository,vault,snapshot:join(this.root,"profile","not-a-task.json"),outputDir:join(this.root,"profile"),
       schedulerPath:join(this.root,"scheduler.jsonl"),runId:p.id,astra:p.astra,sol:p.sol,verification:p.verification,resources:[]});
+    if(config.taskMode!==undefined)throw Error("Setup requires the registered implementation Task review path");
     if(!config.verification.length||!config.verification.every(c=>isAbsolute(c.program)))throw Error("Explicit verification programs required");
     for(const c of config.verification)c.program=await existing(c.program,"file");
     if(new Set(config.verification.map(c=>c.requirement)).size!==config.verification.length||

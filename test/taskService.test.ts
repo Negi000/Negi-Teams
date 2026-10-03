@@ -77,6 +77,22 @@ async function until(predicate: () => Promise<boolean>, timeoutMs = 5000) {
   }
 }
 
+test("browser Task paths hold research profiles until their artifact review schema is installed",async()=>{
+  await fixture(async({catalog,config,prepare})=>{
+    const {sol,...common}=config;
+    const research={...common,taskMode:"read_only_research",luna:{model:"gpt-6-luna",effort:"low"}};
+    let starts=0;
+    const runtime={prepare,submit:submitVaultRun,execute:async(...args:Parameters<typeof completed>)=>{starts++;return completed(...args)}};
+    await assert.rejects(LocalTaskService.open({...catalog as object,runs:[{title:"Research",config:research}]},runtime),/artifact review.*held/);
+    const service=await LocalTaskService.open(catalog,runtime);
+    try{
+      await assert.rejects(service.validateAuthoringConfiguration(research),/artifact review.*held/);
+      await assert.rejects(service.registerAuthoredRun("Research",{...research,approvedPlan:{proofDirectory:config.outputDir,requestId:randomUUID()}} as VaultRunConfig),/artifact review.*held/);
+      assert.equal(starts,0);assert.equal((await service.list()).length,1);
+    }finally{await service.close()}
+  });
+});
+
 test("busy review decision keeps queued work until the lock is released, then dispatches once",async()=>{
  await fixture(async({catalog,config,prepare})=>{
   let busy=true,checks=0,calls=0;

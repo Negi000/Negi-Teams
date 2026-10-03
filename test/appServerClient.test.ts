@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { CodexAppServerClient, type CodexApprovalRequest, type CodexDynamicToolCall, type CodexDynamicToolResult, type CodexDynamicToolLimits } from "../src/server/master/appServerClient.ts";
+import { researchThreadConfig } from "../src/server/master/researchToolPolicy.ts";
 
 function fakeServer(handle: (request: Record<string, unknown>) => unknown,
                     options: ConstructorParameters<typeof CodexAppServerClient>[2] = {}) {
@@ -40,6 +41,60 @@ function basic(request: Record<string, unknown>): unknown {
     default: throw new Error(`unexpected request: ${request.method}`);
   }
 }
+
+test("research thread pins never approval and disabled sandbox networking and rejects provider relaxation",async()=>{
+  const options={cwd:"E:/repo",model:"gpt-6-astra",sandbox:"read-only" as const,readOnlyContract:true as const};
+  for(const response of [{approvalPolicy:"never",sandbox:{type:"readOnly",networkAccess:false}},
+    {approvalPolicy:"on-request",sandbox:{type:"readOnly",networkAccess:false}},
+    {approvalPolicy:"never",sandbox:{type:"workspaceWrite",networkAccess:false}},
+    {approvalPolicy:"never",sandbox:{type:"readOnly",networkAccess:true}},{}]){
+    const f=fakeServer(request=>request.method==="config/read"?{config:researchThreadConfig(),origins:{},layers:null}:
+      request.method==="mcpServerStatus/list"?{data:[],nextCursor:null}:
+      request.method==="thread/start"?{...basic(request) as object,...response}:basic(request));
+    try{
+      await f.client.initialize();await f.client.discoverModels();
+      if(response.approvalPolicy==="never"&&response.sandbox?.type==="readOnly"&&response.sandbox.networkAccess===false)
+        assert.equal((await f.client.startThread(options)).threadId,"thread-a");
+      else {await assert.rejects(f.client.startThread(options),/different sandbox/);assert.equal(f.client.dispatchBlocked,true);}
+      const params=f.messages.find(m=>m.method==="thread/start")!.params as Record<string,unknown>;
+      assert.equal(params.approvalPolicy,"never");assert.deepEqual(params.config,researchThreadConfig());
+    }finally{f.client.close()}
+  }
+  const f=fakeServer(basic);
+  try{
+    await f.client.initialize();await f.client.discoverModels();
+    await assert.rejects(f.client.startThread({...options,sandbox:"workspace-write"}),/must be read-only/);
+    await assert.rejects(f.client.startThread({...options,dynamicTools:[{type:"function",name:"unexpected",description:"Unexpected",inputSchema:{type:"object"}}]}),/must be read-only/);
+    assert.equal(f.messages.some(m=>m.method==="thread/start"),false);
+  }finally{f.client.close()}
+});
+
+test("research refuses inherited external tool config, nonempty/partial inventory and late changes before any turn",async()=>{
+  const clean=researchThreadConfig(),options={cwd:"E:/repo",model:"gpt-6-astra",sandbox:"read-only" as const,readOnlyContract:true as const};
+  const configs=[{}, {...clean,mcp_servers:{unsafe:{command:"must-not-start"}}}, {...clean,web_search:"live"},
+    {...clean,features:{...clean.features,plugins:true}},{...clean,features:{}}];
+  for(const config of configs){
+    const f=fakeServer(request=>request.method==="config/read"?{config}:basic(request));
+    try{await f.client.initialize();await f.client.discoverModels();await assert.rejects(f.client.startThread(options),/external tool authority/);
+      assert.equal(f.messages.some(m=>m.method==="mcpServerStatus/list"||m.method==="thread/start"||m.method==="turn/start"),false);
+    }finally{f.client.close()}
+  }
+  for(const inventory of [{data:[{name:"unexpected"}],nextCursor:null},{data:[],nextCursor:"more"},{data:[]}]){
+    const f=fakeServer(request=>request.method==="config/read"?{config:clean}:request.method==="mcpServerStatus/list"?inventory:basic(request));
+    try{await f.client.initialize();await f.client.discoverModels();await assert.rejects(f.client.startThread(options),/inventory is not empty/);
+      assert.equal(f.messages.some(m=>m.method==="thread/start"||m.method==="turn/start"),false);
+    }finally{f.client.close()}
+  }
+  let changed=false;
+  const f=fakeServer(request=>request.method==="config/read"?{config:changed?{...clean,mcp_servers:{late:{command:"must-not-start"}}}:clean}:
+    request.method==="mcpServerStatus/list"?{data:[],nextCursor:null}:
+    request.method==="thread/start"?{...basic(request) as object,approvalPolicy:"never",sandbox:{type:"readOnly",networkAccess:false}}:basic(request));
+  try{await f.client.initialize();await f.client.discoverModels();await f.client.startThread(options);changed=true;
+    await assert.rejects(f.client.startTurn("research","medium"),/external tool authority/);
+    assert.equal(f.client.dispatchBlocked,true);assert.equal(f.messages.filter(m=>m.method==="thread/start").length,1);
+    assert.equal(f.messages.some(m=>m.method==="turn/start"),false);
+  }finally{f.client.close()}
+});
 
 const taskTool = { type: "function" as const, name: "negi_dispatch_task", description: "Fixed Task dispatch",
   inputSchema: { type: "object", additionalProperties: false } };

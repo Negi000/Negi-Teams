@@ -38,6 +38,8 @@ interface CheckoutVerificationOptions {
   runId: string; checkout: string; outputDir: string; baseSha: string;
   allowedPaths: string[]; requiredVerification: string[]; commands: VerificationCommand[];
   processOwner?:TaskExecutionOwner;
+  /** Explicit research mode; legacy/write callers still require a diff. */
+  taskMode?: "read_only_research";
 }
 export async function verifyConfiguredCheckout(options:CheckoutVerificationOptions, signal?: AbortSignal, outputName = "verification.json") {
   if (outputName !== "command-verification.json" && !/^verification(?:-r[1-9][0-9]?)?\.json$/.test(outputName)) throw Error("Verification output name invalid");
@@ -46,13 +48,17 @@ export async function verifyConfiguredCheckout(options:CheckoutVerificationOptio
   const localOwner=process.platform==="win32"&&!options.processOwner?await TaskExecutionOwner.acquire(
     join(options.outputDir,"verification-owners",outputName),options.runId,
     hash(JSON.stringify({runId:options.runId,checkout:options.checkout,baseSha:options.baseSha,
-      allowedPaths:options.allowedPaths,requiredVerification:options.requiredVerification,commands:options.commands})),
+      allowedPaths:options.allowedPaths,requiredVerification:options.requiredVerification,commands:options.commands,
+      ...(options.taskMode?{taskMode:options.taskMode}:{})})),
     `${options.runId}:${outputName}:verification`):undefined;
   try{const result=await verifyOwnedCheckout({...options,processOwner:options.processOwner??localOwner},signal,outputName);
     await localOwner?.finish();return result;
   }catch(error){await localOwner?.hold();throw error}
 }
 async function verifyOwnedCheckout(options:CheckoutVerificationOptions,signal:AbortSignal|undefined,outputName:string){
+  const research=options.taskMode==="read_only_research";
+  const cleanAtStart=!research||(!changedGitPaths(options.checkout).length&&
+    !(await exec("git",["status","--porcelain","--untracked-files=all"],{cwd:options.checkout,windowsHide:true,env:appServerChildEnv()})).stdout.trim());
   const checks = [];
   const commands=[...options.commands,{ requirement: "git diff --check", program: "git", args: ["diff", "--check"], timeoutMs: 30_000 }];
   for (const [index,command] of commands.entries()) {
@@ -76,10 +82,14 @@ async function verifyOwnedCheckout(options:CheckoutVerificationOptions,signal:Ab
   const paths = changedGitPaths(options.checkout), foreign = pathsOutsideScope(paths, options.allowedPaths);
   const head = (await exec("git", ["rev-parse", "HEAD"], { cwd: options.checkout, windowsHide: true, env: appServerChildEnv() })).stdout.trim();
   const baseMatches = head.toLowerCase() === options.baseSha.toLowerCase();
-  const passed = !signal?.aborted && paths.length > 0 && !foreign.length && baseMatches && checks.every(c => c.passed);
+  const cleanAtEnd=!research||(!paths.length&&
+    !(await exec("git",["status","--porcelain","--untracked-files=all"],{cwd:options.checkout,windowsHide:true,env:appServerChildEnv()})).stdout.trim());
+  const passed = !signal?.aborted && (research ? cleanAtStart&&cleanAtEnd : paths.length > 0) &&
+    !foreign.length && baseMatches && checks.every(c => c.passed);
   const bytes = Buffer.from(JSON.stringify({ runId: options.runId, baseSha: options.baseSha,
     baseMatches, changedPaths: paths, outsideScope: foreign, requiredVerification: options.requiredVerification,
     checks, stoppedDuringVerification: signal?.aborted ?? false, mechanicalChecksPassed: passed, humanAcceptance: null,
+    ...(research?{taskMode:"read_only_research",cleanAtStart,cleanAtEnd}:{}),
     ...(options.processOwner?{processOwnership:{directory:options.processOwner.root,scope:"Windows Job membership; external brokers are not contained"}}:{}),
     note: "Command exit status and path scope only; human review must assess the Task acceptance criteria." }, null, 2) + "\n");
   const path = join(options.outputDir, outputName), file = await open(path, "wx");

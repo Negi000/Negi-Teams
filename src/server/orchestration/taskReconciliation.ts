@@ -13,7 +13,7 @@ import { HumanReviewProofStore, isReviewRequestId, type HumanReviewReceipt } fro
 import { inspectTaskExecutionOwner, type TaskExecutionOwnerView } from "./taskExecutionOwner.ts";
 import { FileTaskLedger, type Attempt, type ProviderTurnEvidence, type ReconciliationVerifier, type TaskSnapshot } from "./singleTask.ts";
 import type { FileScheduler, ScheduledEntry } from "./scheduler.ts";
-import type { VaultRunConfig } from "./vaultRunConfig.ts";
+import { assertVaultWorkerContract, vaultWorker, type VaultRunConfig } from "./vaultRunConfig.ts";
 
 export const reconciliationHash=(value:unknown)=>createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const byteHash=(value:Buffer|string)=>createHash("sha256").update(value).digest("hex");
@@ -24,6 +24,7 @@ export interface TaskReconciliationSource {
 }
 export interface TaskReconciliationDossier {
   runId:string;configSha256:string;snapshotSha256:string;
+  taskMode?:"read_only_research";
   contract:Pick<TaskSnapshot["contract"],"vaultId"|"version"|"sha256"|"baseSha"> & {scope:{allowedPaths:string[]}};taskStatus:string;attempt:Attempt;
   approvals:Array<{id:string;operation:string;target:string;targetSha256:string;targetTruncated:boolean;decision:string}>;
   approvalSummary:{count:number;omitted:number;sha256:string};
@@ -103,10 +104,14 @@ async function storedContract(source:TaskReconciliationSource,state:TaskSnapshot
   const snapshot=await regular(source.config.snapshot,2_000_000);
   if(!snapshot||byteHash(snapshot)!==source.snapshotSha256)throw Error("Task snapshot changed before reconciliation");
   const fixed=JSON.parse(snapshot.toString()) as VaultTaskContract;
+  assertVaultWorkerContract(source.config,fixed);
   const {contextPacks,approvedPlan,...original}=state.contract;
   if(state.runId!==source.config.runId||!isDeepStrictEqual(original,fixed))throw Error("Execution ledger differs from its fixed Task contract");
   if(contextPacks){
-    for(const role of ["astra","sol"] as const){const pack=contextPacks[role];
+    const worker=fixed.taskClass==="read_only_research"?"luna":"sol";
+    if(Object.keys(contextPacks).sort().join()!==["astra",worker].sort().join())throw Error("Task context pack roles differ from its fixed contract");
+    for(const role of ["astra",worker] as const){const pack=contextPacks[role];
+      if(!pack)throw Error("Task context pack missing");
       const root=join(source.config.outputDir,"artifacts"),rel=relative(root,pack.path);
       if(!rel||rel.startsWith("..")||isAbsolute(rel)||dirname(pack.path)!==root||(await lstat(root)).isSymbolicLink()||
         !/^[0-9a-f]{64}$/.test(pack.sha256))throw Error("Task context pack identity invalid");
@@ -124,15 +129,21 @@ async function localDossier(source:TaskReconciliationSource):Promise<TaskReconci
   const ledger=await source.ledger.read(),schedule=await source.scheduler.read(),state=ledger.state;
   const entry=schedule.state?.entries.find(e=>e.work.id===config.runId);
   const unknownVerification=state?.verification?.outcome==="unknown";
+  const worker=vaultWorker(config);
   const attempt=state?([...state.attempts].reverse().find(a=>["unknown","running"].includes(a.state))??
     (unknownVerification?state.attempts.at(-1):undefined)):undefined;
   if(!state||!entry||!attempt||!["running","needs_reconciliation"].includes(entry.status)||
     !(["needs_reconciliation","planning","working"].includes(state.status)||(state.status==="blocked"&&unknownVerification))||
-    entry.claimKey!==`${config.runId}:dispatch`||entry.work.checkout!==config.checkout)
+    entry.claimKey!==`${config.runId}:dispatch`||entry.work.checkout!==config.checkout||
+    entry.work.role!==worker.role||entry.work.checkoutMode!==worker.checkoutMode||
+    entry.work.taskMode!==config.taskMode||
+    (worker.role==="luna"&&(entry.work.execution!==(config.approvedPlan?"direct":"astra_to_luna")||
+      state.attempts.some(a=>a.role!=="astra"&&a.role!=="luna"))))
     throw Error("This phase requires a separate recovery decision; no uncertain provider attempt can be closed");
   const authoritySha256=await storedContract(source,state);
   const owner=await inspectTaskExecutionOwner(config.outputDir,config.runId,source.configSha256,entry.claimKey);
   return {runId:config.runId,configSha256:source.configSha256,snapshotSha256:source.snapshotSha256,
+    ...(worker.role==="luna"?{taskMode:"read_only_research" as const}:{}),
     contract:{vaultId:state.contract.vaultId,version:state.contract.version,sha256:state.contract.sha256,baseSha:state.contract.baseSha,
       scope:{allowedPaths:state.contract.scope?.allowedPaths??[]}},taskStatus:state.status,attempt,
     approvals:state.approvals.slice(-100).map(a=>({id:a.id.slice(0,160),operation:a.operation.slice(0,200),target:a.target.slice(0,500),
@@ -163,6 +174,7 @@ function reasons(d:TaskReconciliationDossier):string[]{
     "所属する処理の終了は確認しましたが、外部サービス経由で起動した処理は確認できないため、実行枠を保持します。":
     "起動した処理全体の終了を確認できないため、実行枠の解放を保留しています。");
   if(!d.checkout.safe||d.artifact.state==="unsafe")held.push("差分または成果ファイルを安全に読み取れません。");
+  if(d.taskMode==="read_only_research"&&d.checkout.changedPaths.length)held.push("読み取り専用Taskの作業場所に変更があります。変更内容を確認するまで実行枠を保持します。");
   return held;
 }
 const withoutProvider=(d:TaskReconciliationDossier)=>({...d,provider:null,providerError:null});

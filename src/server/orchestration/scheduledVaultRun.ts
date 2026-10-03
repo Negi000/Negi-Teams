@@ -33,10 +33,14 @@ export async function runScheduledVaultTask(options: ScheduledVaultRunOptions): 
   if (!dispatchKey || !run.runId) throw new Error("scheduled run identity missing");
   const current = (await scheduler.read()).state;
   const registered = current?.entries.find((entry) => entry.work.id === run.runId);
-  if (!registered || registered.work.role !== "sol" ||
-      registered.work.checkoutMode !== "write" ||
+  const research = run.luna !== undefined && run.sol === undefined;
+  if (!registered || registered.work.role !== (research ? "luna" : "sol") ||
+      registered.work.checkoutMode !== (research ? "read" : "write") ||
+      registered.work.taskMode !== (research ? "read_only_research" : undefined) ||
+      (registered.work.execution !== "direct" && registered.work.execution !== (research ? "astra_to_luna" : "astra_to_sol") &&
+        !(registered.work.execution === undefined && !research)) ||
       resolve(registered.work.checkout).toLowerCase() !== resolve(run.cwd).toLowerCase()) {
-    throw new Error("scheduled run does not match registered Sol checkout");
+    throw new Error("scheduled run does not match registered worker and checkout permissions");
   }
   const claim=()=>scheduler.claim(run.runId,dispatchKey);
   if(options.admit)await options.admit(claim);else await claim();
@@ -51,9 +55,9 @@ export async function runScheduledVaultTask(options: ScheduledVaultRunOptions): 
       reason:"Owned process termination has not been confirmed; retain checkout and execution slot"});throw error}
   };
   let result: TaskSnapshot;
-  const executionRun: VaultRunOptions = registered.work.execution === "astra_to_sol" ? { ...run,
-    beforeSol: async () => {
-      await run.beforeSol?.();
+  const isPipeline = registered.work.execution === "astra_to_sol" || registered.work.execution === "astra_to_luna";
+  const checkpoint = async () => {
+      if(research)await run.beforeWorker?.();else await run.beforeSol?.();
       const planned = (await run.ledger.read()).state;
       const attempt = planned?.attempts.at(-1);
       if (planned?.runId !== run.runId || planned.status !== "ready_for_worker" || attempt?.role !== "astra" ||
@@ -83,10 +87,14 @@ export async function runScheduledVaultTask(options: ScheduledVaultRunOptions): 
       }
       // The wait can outlive an operator's edits. Check again while holding the worker lease.
       await assertPlan();
-    } } : run;
+    };
+  // Preserve the historical Sol checkpoint for injected callers, including its
+  // after-wait contract recheck. Research has its own exact worker checkpoint.
+  const executionRun:VaultRunOptions=isPipeline?{...run,
+    ...(research?{beforeWorker:checkpoint}:{beforeSol:checkpoint})}:run;
   try {
     result = await (options.execute ?? runSingleTaskFromVault)(executionRun);
-    if (registered.work.execution === "astra_to_sol" && ["ready_for_review", "accepted"].includes(result.status) &&
+    if (isPipeline && ["ready_for_review", "accepted"].includes(result.status) &&
         (await scheduler.read()).state?.entries.find(entry => entry.work.id === run.runId)?.phase !== "working")
       throw new Error("Pipeline completed without a recorded worker admission");
   }

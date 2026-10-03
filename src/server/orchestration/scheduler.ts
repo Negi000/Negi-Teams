@@ -34,7 +34,9 @@ export interface ScheduledWork {
   resources: ResourceClaim[];
   reserveUsd: number;
   /** Old unphased Sol writers conservatively reserve both role limits until terminal. */
-  execution?: "direct" | "astra_to_sol";
+  execution?: "direct" | "astra_to_sol" | "astra_to_luna";
+  /** A Luna implementation role alone is not a read-only permission boundary. */
+  taskMode?: "read_only_research";
   /** Server-owned binding for resident Master records. Legacy records lack this binding. */
   masterOwner?: { masterId: string; requestSha256: string };
 }
@@ -99,8 +101,11 @@ function validRoleLimits(value: SchedulerRoleLimits): boolean {
   return Boolean(value) && Number.isSafeInteger(value.planners) && value.planners >= 0 &&
     Number.isSafeInteger(value.workers) && value.workers >= 0;
 }
+function pipeline(work: ScheduledWork): boolean {
+  return work.execution === "astra_to_sol" || work.execution === "astra_to_luna";
+}
 function capacityDemand(entry: ScheduledEntry): { planners: number; workers: number; global: number } {
-  if (entry.work.execution === "astra_to_sol") return entry.phase === "waiting_for_worker"
+  if (pipeline(entry.work)) return entry.phase === "waiting_for_worker"
     ? { planners: 0, workers: 0, global: 0 } : entry.phase === "working"
       ? { planners: 0, workers: 1, global: 1 } : { planners: 1, workers: 0, global: 1 };
   const legacy = entry.work.execution === undefined && entry.work.role === "sol" && entry.work.checkoutMode === "write";
@@ -152,7 +157,7 @@ export function schedulerWorkEligible(state: SchedulerSnapshot, entry: Scheduled
   return !state.entries.some((other) => active(other) && conflicts(entry.work, other.work));
 }
 export function schedulerWorkerEligible(state: SchedulerSnapshot, entry: ScheduledEntry): boolean {
-  return entry.status === "running" && entry.work.execution === "astra_to_sol" && entry.phase === "waiting_for_worker" &&
+  return entry.status === "running" && pipeline(entry.work) && entry.phase === "waiting_for_worker" &&
     Boolean(entry.planningEvidence) && entry.work.dependencies.every(id =>
       state.entries.find(candidate => candidate.work.id === id)?.status === "verified") &&
     hasCapacity(state, { planners: 0, workers: 1, global: 1 });
@@ -211,8 +216,14 @@ export function reduceScheduler(state: SchedulerSnapshot | null,
       ["astra", "sol", "luna"].includes(work.role) &&
       ["read", "write"].includes(work.checkoutMode) &&
       (work.role !== "astra" || work.checkoutMode === "read") &&
+      (work.taskMode === undefined ? work.execution !== "astra_to_luna" :
+        work.taskMode === "read_only_research" && work.role === "luna" && work.checkoutMode === "read" &&
+        work.resources.every(claim=>claim.mode==="read") &&
+        (work.execution === "direct" || work.execution === "astra_to_luna")) &&
       (work.execution === undefined || work.execution === "direct" ||
-        (work.execution === "astra_to_sol" && work.role === "sol" && work.checkoutMode === "write")), "invalid or duplicate work");
+        (work.execution === "astra_to_sol" && work.role === "sol" && work.checkoutMode === "write") ||
+        (work.execution === "astra_to_luna" && work.role === "luna" && work.checkoutMode === "read" &&
+          work.resources.every(claim=>claim.mode==="read"))), "invalid or duplicate work");
     reject(work.parentId === null || next.entries.some((entry) => entry.work.id === work.parentId),
       "parent must be registered");
     reject(new Set(work.dependencies).size === work.dependencies.length &&
@@ -225,7 +236,7 @@ export function reduceScheduler(state: SchedulerSnapshot | null,
     next.entries.push({ work: structuredClone(work), status: action.type === "close_unsubmitted" ? "cancelled" : "queued", claimKey: null,
       evidenceRef: action.type === "close_unsubmitted" ? action.evidenceRef : null,
       reason: action.type === "close_unsubmitted" ? "未実行を照合し、開始要求を終了しました。新しい作業は契約案から作成してください。" : null, actualCostUsd: null,
-      ...(work.execution === "astra_to_sol" ? { phase: "planning" as const } : {}) });
+      ...(pipeline(work) ? { phase: "planning" as const } : {}) });
     blockDependents(next);
     return next;
   }
@@ -238,7 +249,7 @@ export function reduceScheduler(state: SchedulerSnapshot | null,
     return next;
   }
   if (action.type === "finish_planning") {
-    reject(entry!.status === "running" && entry!.work.execution === "astra_to_sol" && entry!.phase === "planning" &&
+    reject(entry!.status === "running" && pipeline(entry!.work) && entry!.phase === "planning" &&
       typeof action.planRef === "string" && /^.{1,4096}#sha256=[a-f0-9]{64}$/.test(action.planRef) &&
       [action.threadId, action.turnId].every(id => typeof id === "string" && id.length > 0 && id.length <= 200 && !/[\r\n\0]/.test(id)),
       "planning release requires a running pipeline and bound output evidence");

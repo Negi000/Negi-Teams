@@ -7,7 +7,7 @@ import { isProcessTreeIdentity, matchesProcessTreeReceipt, type ProcessTreeIdent
 
 interface Owner { schema:"negi-task-execution-owner/1"; id:string; runId:string; configSha256:string;
   claimKey:string; pid:number; at:string }
-type ExecutionRole="astra"|"sol"|`verification-${number}`;
+type ExecutionRole="astra"|"sol"|"luna"|`verification-${number}`;
 type ChildEvent={kind:"launch";role:ExecutionRole}|{kind:"started";role:ExecutionRole;pid:number;tree?:ProcessTreeIdentity}|{kind:"exited";role:ExecutionRole;pid:number;tree?:ProcessTreeReceipt};
 export interface TaskExecutionOwnerView {
   status:"missing"|"live"|"finished"|"dead"|"unknown";
@@ -47,7 +47,7 @@ export class TaskExecutionOwner {
   }
   get processTreeRoot(){return join(this.root,"process-trees")}
   async launching(role:ExecutionRole){
-    if(!/^(astra|sol|verification-(?:[0-9]|10))$/.test(role))throw Error("Task process role invalid");
+    if(!/^(astra|sol|luna|verification-(?:[0-9]|10))$/.test(role))throw Error("Task process role invalid");
     if(this.children.has(role))throw Error("Task provider already launched");
     await this.record({kind:"launch",role});this.children.set(role,{pid:null,exited:false});
   }
@@ -96,7 +96,7 @@ export async function inspectTaskExecutionOwner(root:string,runId:string,configS
     const children=new Map<string,{pid:number|null;exited:boolean;tree?:ProcessTreeIdentity;confirmed?:boolean}>();
     const text=childBytes?.toString("utf8")??"";if(text&&!text.endsWith("\n"))return view;
     for(const line of text.split("\n").filter(Boolean)){
-      const e=JSON.parse(line) as ChildEvent&{ownerId:string};if(e.ownerId!==owner.id||!/^(astra|sol|verification-(?:[0-9]|10))$/.test(e.role))return view;
+      const e=JSON.parse(line) as ChildEvent&{ownerId:string};if(e.ownerId!==owner.id||!/^(astra|sol|luna|verification-(?:[0-9]|10))$/.test(e.role))return view;
       const c=children.get(e.role);
       if(e.kind==="launch"){if(c||Object.keys(e).length!==3)return view;children.set(e.role,{pid:null,exited:false})}
       else if(e.kind==="started"){if(!c||c.pid!==null||!Number.isSafeInteger(e.pid)||e.pid<=0||Object.keys(e).length!==(e.tree?5:4)||
