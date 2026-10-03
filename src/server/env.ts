@@ -62,5 +62,11 @@ export function loadDotenv(path: string = join(process.cwd(), ".env")): string[]
   return applied;
 }
 
+/** Include declared keys even when an explicit process environment overrides them. */
+export function dotenvKeys(path: string = join(process.cwd(), ".env")): string[] {
+  try { return readFileSync(path, "utf8").split(/\r?\n/).flatMap(line => { const kv = parseLine(line); return kv ? [kv[0]] : []; }); }
+  catch { return []; }
+}
+
 // import 副作用として即実行（index.ts の他 import より前に .env を適用するため）。
 export const loadedEnvKeys = loadDotenv();

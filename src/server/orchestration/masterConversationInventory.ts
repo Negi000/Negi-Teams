@@ -1,3 +1,4 @@
+import { withoutControlPlaneEnv } from "../controlPlaneEnv.ts";
 // Explicit server-registered candidate for indexed Authority stages/recovery.
 // Ordinary provider/turn/startup and authenticated UI remain separately gated.
 import { spawn } from "node:child_process";
@@ -74,7 +75,7 @@ async function invokeHeld(request: Record<string, unknown>): Promise<Record<stri
   // No shell, no payload/key in command line. Wait for exit even after timeout.
   const output = await new Promise<string>((accept, reject) => {
     const child = spawn("python", ["-B", filename], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, PYTHONIOENCODING: "utf-8" } });
+      env: { ...withoutControlPlaneEnv(), PYTHONIOENCODING: "utf-8" } });
     let stdout = "", stderr = "", size = 0, failure: Error | null = null;
     // Do not terminate an explicit adoption on an elapsed-time deadline: it may
     // already have created its one permitted DB. Wait for its actual exit. The

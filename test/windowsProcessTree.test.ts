@@ -42,10 +42,10 @@ test("supervisor kill cannot leave contained descendants and supplies no false t
 }));
 
 test("contained App Server preserves JSON RPC pipes and sanitized child environment",{skip:!windows},async()=>fixture(async root=>{
-  const code=String.raw`const fs=require('node:fs');fs.writeFileSync(process.argv[1],JSON.stringify({auth:process.env.EBI_AUTH_TOKEN??null,job:process.env.NEGI_JOB_TOKEN??null}));let b='';process.stdin.on('data',c=>{b+=c;let n;while((n=b.indexOf('\n'))>=0){const m=JSON.parse(b.slice(0,n));b=b.slice(n+1);if(m.id!==undefined)process.stdout.write(JSON.stringify({id:m.id,result:{userAgent:'fixture'}})+'\n')}});`;
+  const code=String.raw`const fs=require('node:fs');fs.writeFileSync(process.argv[1],JSON.stringify({auth:process.env.EBI_AUTH_TOKEN??null,job:process.env.NEGI_JOB_TOKEN??null,policy:process.env.NEGI_POLICY_SIGNING_SECRET??null}));let b='';process.stdin.on('data',c=>{b+=c;let n;while((n=b.indexOf('\n'))>=0){const m=JSON.parse(b.slice(0,n));b=b.slice(n+1);if(m.id!==undefined)process.stdout.write(JSON.stringify({id:m.id,result:{userAgent:'fixture'}})+'\n')}});`;
   const resultPath=join(root,"env.json");
-  const host=await AppServerProcess.launchContained({executable:process.execPath,args:["-e",code,resultPath],cwd:root,env:{...process.env,EBI_AUTH_TOKEN:"fixture-secret",ebi_auth_token:"fixture-lower",NEGI_JOB_TOKEN:"fixture-token"}},join(root,"trusted"));
-  try{await host.client.initialize();assert.equal(host.treeIdentity?.rootPid,host.pid);assert.deepEqual(JSON.parse(await readFile(resultPath,"utf8")),{auth:null,job:null})}finally{const exit=await host.stop();assert.equal(exit.treeReceipt?.activeProcesses,0)}
+  const host=await AppServerProcess.launchContained({executable:process.execPath,args:["-e",code,resultPath],cwd:root,env:{...process.env,EBI_AUTH_TOKEN:"fixture-secret",ebi_auth_token:"fixture-lower",NEGI_POLICY_SIGNING_SECRET:"fixture-policy",negi_policy_signing_secret:"fixture-alias",NEGI_JOB_TOKEN:"fixture-token"}},join(root,"trusted"));
+  try{await host.client.initialize();assert.equal(host.treeIdentity?.rootPid,host.pid);assert.deepEqual(JSON.parse(await readFile(resultPath,"utf8")),{auth:null,job:null,policy:null})}finally{const exit=await host.stop();assert.equal(exit.treeReceipt?.activeProcesses,0)}
 }));
 
 test("missing executable never falls back to an uncontained launch",{skip:!windows},async()=>fixture(async root=>{

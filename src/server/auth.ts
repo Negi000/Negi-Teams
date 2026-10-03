@@ -178,12 +178,15 @@ export function delay(ms: number): Promise<void> {
  * トークンを入力→POST /login→サーバが Cookie をセット→ "/" へ遷移、の一枚。
  */
 export function loginReturnTo(returnTo: string): string {
-  if (["/reviews", "/tasks", "/knowledge", "/setup", "/storage", "/task-plans", "/integrations"].includes(returnTo) ||
+  if (["/reviews", "/tasks", "/knowledge", "/policies", "/setup", "/storage", "/task-plans", "/integrations"].includes(returnTo) ||
       /^\/tasks\?run=[a-zA-Z0-9._-]{1,128}$/.test(returnTo)) return returnTo;
   if (!returnTo.startsWith("/") || returnTo.startsWith("//") || returnTo.length > 4096) return "/";
   try {
     const url = new URL(returnTo, "http://negi.local");
     if (url.hash || url.origin !== "http://negi.local") return "/";
+    if (url.pathname === "/policies" && [...url.searchParams.keys()].every(key => key === "policy") &&
+        url.searchParams.getAll("policy").length === 1 && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/.test(url.searchParams.get("policy") ?? ""))
+      return "/policies?policy=" + encodeURIComponent(url.searchParams.get("policy")!);
     if (url.pathname === "/conversations") {
       const t = conversationTarget(url);
       return "/conversations" + (t.draft ? "?draft=" + t.draft : "?run=" + t.run + "&source=" + t.source);

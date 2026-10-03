@@ -1,5 +1,6 @@
 // A bounded, immutable review package for one verified Git result.
 import { createHash } from "node:crypto";
+import { withoutControlPlaneEnv } from "../controlPlaneEnv.ts";
 import { execFileSync } from "node:child_process";
 import { lstat, open, readFile, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
@@ -26,7 +27,7 @@ export interface TaskReviewCaptureOptions {
   deferLedger?: boolean;
 }
 function git(checkout: string, args: string[]): string {
-  return execFileSync("git", args, { cwd: checkout, encoding: "utf8", windowsHide: true,
+  return execFileSync("git", args, { cwd: checkout, env: withoutControlPlaneEnv(), encoding: "utf8", windowsHide: true,
     timeout: 20_000, maxBuffer: 150_000 });
 }
 function diff(checkout: string): string {

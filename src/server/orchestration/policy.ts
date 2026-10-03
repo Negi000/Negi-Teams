@@ -46,12 +46,15 @@ function hash(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 function validPolicy(policy: ReadOnlyPolicy): boolean {
-  return Boolean(policy.id && policy.model && policy.effort &&
+  const label = (value: unknown) => typeof value === "string" &&
+    /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/.test(value);
+  return Boolean(policy && label(policy.id) && label(policy.model) && label(policy.effort) &&
+    (policy.parentId === null || label(policy.parentId)) &&
     policy.taskClass === "read_only_research" &&
     ["astra", "sol", "luna"].includes(policy.role) &&
     ["elapsed_ms", "input_tokens", "api_cost_usd"].includes(policy.metric) &&
-    Array.isArray(policy.sourceRefs) && policy.sourceRefs.length > 0 &&
-    policy.sourceRefs.every((ref) => typeof ref === "string" && ref.length > 0));
+    Array.isArray(policy.sourceRefs) && policy.sourceRefs.length > 0 && policy.sourceRefs.length <= 20 &&
+    policy.sourceRefs.every((ref) => typeof ref === "string" && ref.trim().length > 0 && ref.length <= 2048));
 }
 function metricDelta(pair: PairedComparison, metric: PolicyMetric): number | null {
   if (metric === "elapsed_ms") return pair.delta.elapsedMs;
@@ -83,8 +86,11 @@ export function reducePolicy(state: PolicyState | null, event: PolicyEvent): Pol
   }
   if (action.type === "compare") {
     requirePolicy(entry!.stage === "shadow" && Array.isArray(action.pairs) &&
-      action.pairs.length >= 2 &&
-      new Set(action.pairs.map((pair) => pair.experimentId)).size === action.pairs.length,
+      action.pairs.length >= 2 && action.pairs.length <= 100 &&
+      new Set(action.pairs.map((pair) => pair.experimentId)).size === action.pairs.length &&
+      new Set(action.pairs.map((pair) => pair.baseline.objectiveHash)).size === action.pairs.length &&
+      new Set(action.pairs.flatMap((pair) => [pair.baseline.evidenceRef, pair.candidate.evidenceRef]))
+        .size === action.pairs.length * 2,
     "two independent paired cases required");
     const deltas: number[] = [];
     for (const pair of action.pairs) {
@@ -92,6 +98,10 @@ export function reducePolicy(state: PolicyState | null, event: PolicyEvent): Pol
       requirePolicy(fresh.evidenceHash === pair.evidenceHash &&
         JSON.stringify(fresh) === JSON.stringify(pair) && fresh.candidateEligible,
       "comparison integrity or quality failed");
+      requirePolicy(fresh.candidate.profile.model === entry!.policy.model &&
+        fresh.candidate.profile.effort === entry!.policy.effort &&
+        JSON.stringify(fresh.baseline.profile) === JSON.stringify(action.pairs[0].baseline.profile),
+      "comparison does not measure the proposed profile against one baseline");
       const delta = metricDelta(fresh, entry!.policy.metric);
       requirePolicy(delta !== null, "target metric was not observed");
       deltas.push(delta!);

@@ -1,4 +1,5 @@
 import * as pty from "node-pty";
+import { CONTROL_PLANE_ENV } from "./controlPlaneEnv.ts";
 import { IdleDetector } from "./idleDetector.ts";
 import { countPtmxFds, readPtmxMax } from "./ptmxWatch.ts";
 import type { AgentRecord, AgentStatus, AgentMode, AgentKind } from "../shared/protocol.ts";
@@ -626,7 +627,7 @@ export class Agent {
         mcpConfigPath: launch.mcpConfigPath ?? null,
         systemPrompt: launch.systemPrompt ?? null,
       }),
-      [...backend.envDenyList, "EBI_AUTH_TOKEN", "NEGI_REVIEW_CONFIG", "NEGI_TASK_CONFIG", "NEGI_KNOWLEDGE_CONFIG", "NEGI_INTEGRATION_CONFIG"],
+      [...backend.envDenyList, ...CONTROL_PLANE_ENV],
     );
     try {
       this.proc = pty.spawn(launch.command, launch.args, {

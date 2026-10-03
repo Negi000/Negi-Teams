@@ -262,7 +262,7 @@ test("review HTTP requires a browser cookie and same-origin mutation even on loo
 
 test("model process environment omits browser login and review configuration", () => {
   assert.deepEqual(appServerChildEnv({ PATH: "synthetic", EBI_AUTH_TOKEN: "do-not-inherit",
-    NEGI_REVIEW_CONFIG: "private-config", OPENAI_API_KEY: "caller-owned" }),
+    NEGI_REVIEW_CONFIG: "private-config", NEGI_POLICY_CONFIG: "private-policy", negi_policy_config: "case-variant", NeGi_PoLiCy_SiGnInG_SeCrEt: "private-key", OPENAI_API_KEY: "caller-owned" }),
   { PATH: "synthetic", OPENAI_API_KEY: "caller-owned" });
 });
 

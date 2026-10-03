@@ -1,3 +1,4 @@
+import { withoutControlPlaneEnv } from "../controlPlaneEnv.ts";
 // Resident Astra drafts semantic work. Only an authenticated concrete approval
 // compiles a Vault contract and a server-owned isolated run; recovery never sends a model turn.
 import { createHash } from "node:crypto";
@@ -167,7 +168,7 @@ export class LocalTaskAuthoringService {
       for (const writable of [...tasks.knowledgeRegistrations().flatMap(r => [r.vault,r.checkout]), repository])
         for (const evidence of [root, worktreeRoot]) if (inside(writable,evidence) || inside(evidence,writable)) throw new Error("Task authoring roots overlap writable source roots");
       if (inside(root,worktreeRoot) || inside(worktreeRoot,root)) throw new Error("Task plan storage and worktrees must be separate");
-      const top = (await exec("git", ["rev-parse", "--show-toplevel"], { cwd: repository, windowsHide: true })).stdout.trim();
+      const top = (await exec("git", ["rev-parse", "--show-toplevel"], { cwd: repository, env:withoutControlPlaneEnv(),windowsHide:true })).stdout.trim();
       if ((await realpath(top)).toLowerCase() !== repository.toLowerCase()) throw new Error("Project repository must be a Git root");
       const core = { id: p.id, title: text(p.title, 160), project, repository, worktreeRoot, allowedPaths,
         maxAttempts: Number(p.maxAttempts), timeLimitMinutes: Number(p.timeLimitMinutes), config };
@@ -222,7 +223,7 @@ export class LocalTaskAuthoringService {
       .map(p => fileURLToPath(new URL(p,import.meta.url))).find(existsSync);
     if (!script) throw new Error("Bundled Task authoring compiler missing");
     return JSON.parse((await exec("python", [script,"--vault",profile.config.vault,...args], { windowsHide:true,
-      timeout:20000,maxBuffer:300000,env:{...process.env,PYTHONIOENCODING:"utf-8"} })).stdout);
+      timeout:20000,maxBuffer:300000,env:{...withoutControlPlaneEnv(),PYTHONIOENCODING:"utf-8"} })).stdout);
   }
   private async projectReferences(id:string,references:string[]=[]) {
     const p = this.profile(id);
@@ -245,7 +246,7 @@ export class LocalTaskAuthoringService {
         throw new Error("Task drafts require the configured resident Astra");
       const source = await this.projectReferences(profileId,f.references.map(r=>r.id));
       for (const r of f.references) if (!source.sources.some(s=>s.id===r.id && s.version===r.version && s.sha256===r.sha256)) throw new Error("Task plan reference is stale");
-      const baseSha = integrationBase?.baseSha ?? (await exec("git", ["rev-parse","HEAD"], { cwd:p.repository,windowsHide:true })).stdout.trim().toLowerCase();
+      const baseSha = integrationBase?.baseSha ?? (await exec("git", ["rev-parse","HEAD"], { cwd:p.repository,env:withoutControlPlaneEnv(),windowsHide:true })).stdout.trim().toLowerCase();
       if (!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(baseSha)) throw new Error("Project base SHA invalid");
       const core = { schema:"negi-task-plan/1" as const,id:planIdentity(origin),createdAt:new Date().toISOString(),
         profileId,profileHash:p.hash,baseSha,sources:source.sources,fields:f,origin:structuredClone(origin),...(integrationBase?{integrationBase}:{}) };
@@ -273,7 +274,7 @@ export class LocalTaskAuthoringService {
       const source=await this.projectReferences(profileId,[...new Set(f.nodes.flatMap(n=>n.task.references.map(r=>r.id)))]);
       for(const n of f.nodes)for(const r of n.task.references)
         if(!source.sources.some(s=>s.id===r.id&&s.version===r.version&&s.sha256===r.sha256))throw new Error("Task decomposition reference is stale");
-      const baseSha=integrationBase?.baseSha??(await exec("git",["rev-parse","HEAD"],{cwd:p.repository,windowsHide:true})).stdout.trim().toLowerCase();
+      const baseSha=integrationBase?.baseSha??(await exec("git",["rev-parse","HEAD"],{cwd:p.repository,env:withoutControlPlaneEnv(),windowsHide:true})).stdout.trim().toLowerCase();
       if(!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(baseSha))throw new Error("Project base SHA invalid");
       const core={schema:"negi-task-decomposition/1" as const,id:planIdentity(origin,"\ndecomposition"),createdAt:new Date().toISOString(),
         profileId,profileHash:p.hash,baseSha,sources:source.sources,fields:f,origin:structuredClone(origin),...(integrationBase?{integrationBase}:{})};
@@ -374,7 +375,7 @@ export class LocalTaskAuthoringService {
     if (!isDeepStrictEqual(refs.sources,d.sources)) throw new Error("Task plan source references changed");
     const base=d.integrationBase?await this.baselines.resolve(p.id,d.integrationBase.id):undefined;
     if(base&&!isDeepStrictEqual(base,d.integrationBase))throw Error("Task integration baseline changed");
-    const head = base?.baseSha ?? (await exec("git",["rev-parse","HEAD"],{cwd:p.repository,windowsHide:true})).stdout.trim().toLowerCase();
+    const head = base?.baseSha ?? (await exec("git",["rev-parse","HEAD"],{cwd:p.repository,env:withoutControlPlaneEnv(),windowsHide:true})).stdout.trim().toLowerCase();
     if (head!==d.baseSha) throw new Error("Project base SHA changed");
   }
   private async view(d: Draft): Promise<TaskPlanView> {
@@ -433,7 +434,7 @@ export class LocalTaskAuthoringService {
         await save(join(out,"worktree-intent.json"),{configHash:sha(JSON.stringify(config)),baseSha:d.baseSha});
         try { await lstat(config.checkout); throw new Error("Task worktree destination already exists"); }
         catch(error) { if ((error as NodeJS.ErrnoException).code!=="ENOENT") throw error; }
-        await exec("git",["worktree","add","--detach",config.checkout,d.baseSha],{cwd:p.repository,windowsHide:true,timeout:120000,maxBuffer:100000});
+        await exec("git",["worktree","add","--detach",config.checkout,d.baseSha],{cwd:p.repository,env:withoutControlPlaneEnv(),windowsHide:true,timeout:120000,maxBuffer:100000});
         await this.assertWorktree(config,p,d.baseSha,true);
         await save(join(out,"worktree-created.json"),{configHash:sha(JSON.stringify(config)),baseSha:d.baseSha});
         await loadVaultTaskContract(config.vault,config.snapshot,config.checkout);
@@ -467,10 +468,10 @@ export class LocalTaskAuthoringService {
   }
   private async assertWorktree(config:VaultRunConfig,p:Profile,baseSha:string,clean:boolean):Promise<void> {
     if ((await lstat(config.checkout)).isSymbolicLink() || !inside(p.worktreeRoot,await realpath(config.checkout))) throw new Error("Authored worktree root changed");
-    const common=async(cwd:string)=>(await realpath((await exec("git",["rev-parse","--path-format=absolute","--git-common-dir"],{cwd,windowsHide:true})).stdout.trim())).toLowerCase();
+    const common=async(cwd:string)=>(await realpath((await exec("git",["rev-parse","--path-format=absolute","--git-common-dir"],{cwd,env:withoutControlPlaneEnv(),windowsHide:true})).stdout.trim())).toLowerCase();
     if (await common(config.checkout)!==await common(p.repository)) throw new Error("Authored worktree belongs to another Git repository");
-    const head=(await exec("git",["rev-parse","HEAD"],{cwd:config.checkout,windowsHide:true})).stdout.trim().toLowerCase();
-    if (head!==baseSha || (clean && (await exec("git",["status","--porcelain"],{cwd:config.checkout,windowsHide:true})).stdout.trim())) throw new Error("Authored worktree is not the fixed clean base");
+    const head=(await exec("git",["rev-parse","HEAD"],{cwd:config.checkout,env:withoutControlPlaneEnv(),windowsHide:true})).stdout.trim().toLowerCase();
+    if (head!==baseSha || (clean && (await exec("git",["status","--porcelain"],{cwd:config.checkout,env:withoutControlPlaneEnv(),windowsHide:true})).stdout.trim())) throw new Error("Authored worktree is not the fixed clean base");
   }
   private async restoreRegistrations():Promise<void> {
     for (const d of await this.drafts()) {

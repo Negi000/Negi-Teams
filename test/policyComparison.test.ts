@@ -16,7 +16,7 @@ function arm(label: "baseline" | "candidate", caseId: string,
   return { label, profile: { model: "gpt-6-luna",
     effort: label === "baseline" ? "medium" : "low" },
     checkout: `C:/trial/${caseId}/${label}`, baseSha: digest("base"),
-    objectiveHash: digest("objective"), acceptanceHash: digest("acceptance"),
+    objectiveHash: digest(`objective-${caseId}`), acceptanceHash: digest("acceptance"),
     toolsHash: digest("tools"), evaluatorVersion: "code-audit-v1",
     outputHash: digest(`${caseId}-${label}`), quality: "passed",
     evidenceRef: `local:${caseId}/${label}`, elapsedMs: label === "baseline" ? 100 : 70,
@@ -105,4 +105,21 @@ test("candidate cannot be compared on an unknown or regressed target metric", ()
   const unknown = pair("unknown", { elapsedMs: null });
   assert.throws(() => reducePolicy(state, event("unknown", { type: "compare",
     id: policy.id, pairs: [pair("good"), unknown] })), /not observed/);
+});
+
+test("comparison must measure the proposed profile, a fixed baseline and distinct cases", () => {
+  let state = reducePolicy(null, event("propose", { type: "propose", policy }));
+  state = reducePolicy(state, event("shadow", { type: "shadow", id: policy.id, evidenceRef: "local:shadow" }));
+  const compare = (pairs: ReturnType<typeof pair>[]) => reducePolicy(state,
+    event("compare", { type: "compare", id: policy.id, pairs }));
+  assert.throws(() => compare([pair("one"), pair("two", { profile: { model: "gpt-6-luna", effort: "high" } })]),
+    /proposed profile/);
+  const changedBaseline = comparePair("two", arm("baseline", "two", {
+    profile: { model: "gpt-6-luna", effort: "high" } }), arm("candidate", "two"));
+  assert.throws(() => compare([pair("one"), changedBaseline]), /one baseline/);
+  const repeated = comparePair("renamed", arm("baseline", "one"), arm("candidate", "one"));
+  assert.throws(() => compare([pair("one"), repeated]), /independent/);
+  const reusedArtifact = pair("two", { evidenceRef: "local:one/candidate" });
+  assert.throws(() => compare([pair("one"), reusedArtifact]), /independent/);
+  assert.equal(compare([pair("one"), pair("two")]).entries[0].stage, "compared");
 });

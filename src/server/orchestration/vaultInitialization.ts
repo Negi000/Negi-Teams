@@ -1,3 +1,4 @@
+import { withoutControlPlaneEnv } from "../controlPlaneEnv.ts";
 // Human-approved creation of an absent Vault. Existing notes are never adopted.
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
@@ -32,7 +33,7 @@ async function directory(path:string):Promise<Identity>{
   // Windows Node and Python expose different device namespaces. Use the same
   // stat implementation for the preview and the native publication boundary.
   const identity=JSON.parse((await exec("python",[await script("negi_publish_vault.py"),"--identity",path],
-    {windowsHide:true,timeout:10000,maxBuffer:20000,env:{...process.env,PYTHONIOENCODING:"utf-8"}})).stdout) as Identity;
+    {windowsHide:true,timeout:10000,maxBuffer:20000,env:{...withoutControlPlaneEnv(),PYTHONIOENCODING:"utf-8"}})).stdout) as Identity;
   if(!/^\d+$/.test(identity.device)||!/^\d+$/.test(identity.inode))throw Error("Vault native identity invalid");
   return identity;
 }
@@ -126,10 +127,10 @@ export class LocalVaultInitialization {
       if(inside(root,candidate)||inside(candidate,root))throw Error("Vault initialization overlaps protected source");
     if(!isDeepStrictEqual(await directory(dirname(p.input.target)),p.parent)||
       !isDeepStrictEqual(await directory(p.input.repository),p.repository))throw Error("Vault initialization roots changed");
-    const git=await exec("git",["rev-parse","--show-toplevel","HEAD"],{cwd:p.input.repository,windowsHide:true,timeout:10000});
+    const git=await exec("git",["rev-parse","--show-toplevel","HEAD"],{cwd:p.input.repository,env:withoutControlPlaneEnv(),windowsHide:true,timeout:10000});
     const [top,head]=git.stdout.trim().split(/\r?\n/);
     if(await realpath(top)!==p.input.repository||head!==p.baseSha||
-      (await exec("git",["status","--porcelain"],{cwd:p.input.repository,windowsHide:true,timeout:10000})).stdout.trim())
+      (await exec("git",["status","--porcelain"],{cwd:p.input.repository,env:withoutControlPlaneEnv(),windowsHide:true,timeout:10000})).stdout.trim())
       throw Error("Vault initialization baseline changed");
   }
   async preview(raw:unknown,requestId:string,historicalRoots:string[]=[],updated=new Date().toISOString().slice(0,10)){
@@ -137,7 +138,7 @@ export class LocalVaultInitialization {
       !Number.isFinite(Date.parse(updated))||Math.abs(Date.now()-Date.parse(updated))>172800000)throw Error("Vault preview identity or date invalid");
     const normalized=input(raw),parent=await realpath(dirname(normalized.target)),repository=await realpath(normalized.repository);
     normalized.target=join(parent,basename(normalized.target));normalized.repository=repository;
-    const baseSha=(await exec("git",["rev-parse","HEAD"],{cwd:repository,windowsHide:true,timeout:10000})).stdout.trim();
+    const baseSha=(await exec("git",["rev-parse","HEAD"],{cwd:repository,env:withoutControlPlaneEnv(),windowsHide:true,timeout:10000})).stdout.trim();
     if(!/^[0-9a-f]{40}$/.test(baseSha))throw Error("Vault initialization requires committed SHA1 baseline");
     const p=preview(normalized,requestId.toLowerCase(),updated,await directory(parent),await directory(repository),baseSha,"owned-seed/1");
     if(Buffer.byteLength(JSON.stringify(p))>70000)throw Error("Vault preview too large");
@@ -207,7 +208,7 @@ export class LocalVaultInitialization {
   }
   private async move(sourcePath:string,target:string,p:VaultInitializationPreview,source:Identity){
     await exec("python",[await script("negi_publish_vault.py"),"--source",sourcePath,"--target",target,"--device",p.parent.device,"--inode",p.parent.inode,"--source-device",source.device,"--source-inode",source.inode],
-      {windowsHide:true,timeout:20000,maxBuffer:20000,env:{...process.env,PYTHONIOENCODING:"utf-8"}});
+      {windowsHide:true,timeout:20000,maxBuffer:20000,env:{...withoutControlPlaneEnv(),PYTHONIOENCODING:"utf-8"}});
   }
   private stageRecord(p:VaultInitializationPreview,stage:string,seed:string,source:Identity):StageClaim{
     return {schema:"negi-vault-stage-intent/1",requestId:p.requestId,hash:p.hash,parent:p.parent,seed,stage:basename(stage),source};
@@ -280,7 +281,7 @@ export class LocalVaultInitialization {
       await this.inspect(stage,p);
       // Validate the actual Vault parser and mandatory closure before publication.
       const inspector=await script("negi_task_authoring.py"),refs=JSON.parse((await exec("python",[inspector,"--vault",stage,"inspect","--project",p.input.project],
-        {windowsHide:true,timeout:20000,maxBuffer:200000,env:{...process.env,PYTHONIOENCODING:"utf-8"}})).stdout) as {sources:Array<{path:string;sha256:string}>};
+        {windowsHide:true,timeout:20000,maxBuffer:200000,env:{...withoutControlPlaneEnv(),PYTHONIOENCODING:"utf-8"}})).stdout) as {sources:Array<{path:string;sha256:string}>};
       if(refs.sources.length!==2||refs.sources.some(r=>!p.files.some(f=>f.path===r.path&&f.sha256===r.sha256)))throw Error("Initial Vault references differ");
       await this.protect(p,historicalRoots);await this.inspect(stage,p);
       if(!await exists(join(stage,READY)))await writeNew(join(stage,READY),p.ready);

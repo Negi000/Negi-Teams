@@ -3,6 +3,7 @@
 // パス/ブランチ名経由のコマンドインジェクションを防ぐ。
 
 import { execFile } from "node:child_process";
+import { withoutControlPlaneEnv } from "./controlPlaneEnv.ts";
 import { promisify } from "node:util";
 import { resolve, join } from "node:path";
 
@@ -13,6 +14,7 @@ async function git(repo: string, args: string[]): Promise<{ stdout: string; stde
   // `-C <repo>` で対象 repo を固定する。
   return execFileAsync("git", ["-C", repo, ...args], {
     encoding: "utf8",
+    env: withoutControlPlaneEnv(),
     maxBuffer: 1024 * 1024,
   });
 }

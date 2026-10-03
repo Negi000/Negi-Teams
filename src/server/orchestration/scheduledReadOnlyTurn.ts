@@ -5,6 +5,7 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import type { CodexAppServerClient, CodexTurnObservation } from
   "../master/appServerClient.ts";
 import { FileScheduler, type SchedulerAction } from "./scheduler.ts";
+import type { ReadOnlyPolicySource, ReadOnlyPolicySelection } from "./policyService.ts";
 
 export interface ScheduledReadOnlyTurnOptions {
   scheduler: FileScheduler;
@@ -15,6 +16,9 @@ export interface ScheduledReadOnlyTurnOptions {
   cwd: string;
   model: string;
   effort: string;
+  /** Explicit opt-in: model/effort become the fixed default, rather than an
+   * explicit user override. The signed active version is read exactly once. */
+  approvedPolicy?: ReadOnlyPolicySource;
   prompt: string;
   artifactDir: string;
   timeoutMs: number;
@@ -26,6 +30,8 @@ export interface ScheduledReadOnlyResult {
   threadId: string;
   turnId: string;
   observation: CodexTurnObservation;
+  profile: { model: string; effort: string; source: "explicit" | "default" | "approved-policy";
+    policyId: string | null; policyHash: string | null; stateSha256: string | null; selectionRef: string };
 }
 
 function inside(root: string, target: string): boolean {
@@ -59,19 +65,40 @@ export async function runScheduledReadOnlyTurn(options: ScheduledReadOnlyTurnOpt
   let threadId: string;
   let turnId: string;
   let observation: CodexTurnObservation;
+  let selected: ReadOnlyPolicySelection | null = null;
+  let model = options.model, effort = options.effort, selectionRef = "";
   try {
     await options.client.initialize();
     const catalog = await options.client.discoverModels();
-    if (!catalog.some((item) => item.model === options.model &&
-        item.efforts.includes(options.effort) && item.inputModalities.includes("text"))) {
+    if (options.approvedPolicy) {
+      selected = await options.approvedPolicy.select({ taskClass: "read_only_research", role: entry.work.role,
+        defaultProfile: { model, effort }, catalog });
+      if (selected) {
+        if (!selected.policyId || !/^[0-9a-f]{64}$/.test(selected.policyHash) ||
+            !/^[0-9a-f]{64}$/.test(selected.stateSha256)) throw Error("read-only policy selection identity invalid");
+        // Copy the selection before provider awaits. A later activation or
+        // rollback only affects the next dispatch, never this running turn.
+        selected = structuredClone(selected); model = selected.model; effort = selected.effort;
+      }
+    }
+    if (!catalog.some((item) => item.model === model &&
+        item.efforts.includes(effort) && item.inputModalities.includes("text"))) {
       throw new Error("requested read-only model/effort unavailable");
     }
-    const thread = await options.client.startThread({ cwd, model: options.model,
+    const selection = JSON.stringify({ workId, dispatchKey, role: entry.work.role, cwd,
+      taskClass: "read_only_research", model, effort, source: selected ? "approved-policy" : options.approvedPolicy ? "default" : "explicit",
+      policyId: selected?.policyId ?? null, policyHash: selected?.policyHash ?? null,
+      stateSha256: selected?.stateSha256 ?? null });
+    const selectionPath = join(actualArtifactDir, `${createHash("sha256").update(JSON.stringify([workId, dispatchKey])).digest("hex")}-profile.json`);
+    const file = await open(selectionPath, "wx");
+    try { await file.writeFile(selection, "utf8"); await file.sync(); } finally { await file.close(); }
+    selectionRef = `${selectionPath}#sha256=${createHash("sha256").update(selection).digest("hex")}`;
+    const thread = await options.client.startThread({ cwd, model,
       sandbox: "read-only", instructions: "Work within the prompt. Do not edit files or spawn agents." });
-    if (thread.rerouted || thread.resolvedModel !== options.model)
+    if (thread.rerouted || thread.resolvedModel !== model)
       throw new Error("read-only model rerouted");
     threadId = thread.threadId;
-    turnId = await options.client.startTurn(options.prompt, options.effort);
+    turnId = await options.client.startTurn(options.prompt, effort);
     observation = await options.client.waitForTurn(turnId, options.timeoutMs);
   } catch (error) {
     await record("unknown", { type: "unknown", workId,
@@ -108,5 +135,7 @@ export async function runScheduledReadOnlyTurn(options: ScheduledReadOnlyTurnOpt
     outcome: verified ? "verified" : "failed", evidenceRef: outputRef,
     actualCostUsd: null });
   return { status: verified ? "verified" : "failed", outputRef, threadId,
-    turnId, observation };
+    turnId, observation, profile: { model, effort, source: selected ? "approved-policy" : options.approvedPolicy ? "default" : "explicit",
+      policyId: selected?.policyId ?? null, policyHash: selected?.policyHash ?? null,
+      stateSha256: selected?.stateSha256 ?? null, selectionRef } };
 }

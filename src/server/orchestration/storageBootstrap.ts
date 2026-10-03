@@ -1,3 +1,4 @@
+import { withoutControlPlaneEnv } from "../controlPlaneEnv.ts";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstat } from "node:fs/promises";
@@ -20,7 +21,7 @@ export class StorageBootstrap {
     }
     const info = await lstat(path);if (!info.isFile() || info.isSymbolicLink()) throw Error("Storage bootstrap helper invalid");
     const output = await new Promise<string>((accept, reject) => {
-      const child = spawn("python", ["-B", path], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, PYTHONIOENCODING: "utf-8" } });
+      const child = spawn("python", ["-B", path], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: { ...withoutControlPlaneEnv(), PYTHONIOENCODING: "utf-8" } });
       let stdout = "", size = 0, failure: Error | null = null;
       child.stdout.setEncoding("utf8");child.stderr.resume();
       child.stdout.on("data", (chunk: string) => { size += Buffer.byteLength(chunk);if (size > 24000) { failure = Error("Storage bootstrap output limit");child.kill(); } else stdout += chunk; });

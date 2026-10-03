@@ -1,6 +1,7 @@
 // A reviewed integration becomes a separate, reachable Git checkpoint. The
 // reviewed checkout, its index, HEAD and branch remain the review's original version.
 import { createHash } from "node:crypto";
+import { withoutControlPlaneEnv } from "../controlPlaneEnv.ts";
 import { execFileSync } from "node:child_process";
 import { lstat, mkdir, open, readFile, realpath, unlink } from "node:fs/promises";
 import { join } from "node:path";
@@ -10,7 +11,7 @@ import type { LocalReviewService } from "./reviewService.ts";
 
 const hash = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
 function git(cwd: string, args: string[], env = process.env, input?: Buffer | string): string {
-  return execFileSync("git", ["--no-replace-objects", ...args], { cwd, env, input, encoding: "utf8", windowsHide: true,
+  return execFileSync("git", ["--no-replace-objects", ...args], { cwd, env: withoutControlPlaneEnv(env), input, encoding: "utf8", windowsHide: true,
     timeout: 20_000, maxBuffer: 200_000, stdio: ["pipe", "pipe", "pipe"] }).trim();
 }
 async function common(cwd: string): Promise<string> {

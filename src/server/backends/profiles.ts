@@ -197,9 +197,12 @@ export function applyEnvDenyList(
   denyList: readonly string[],
 ): Record<string, string | undefined> {
   if (denyList.length === 0) return parentEnv;
+  // Windows environment names are case-insensitive. Apply that same exclusion
+  // on every platform so a case alias cannot pass control-plane configuration.
+  const denied = new Set(denyList.map(key => key.toUpperCase()));
   const out: Record<string, string | undefined> = {};
   for (const [key, value] of Object.entries(parentEnv)) {
-    if (denyList.includes(key)) continue;
+    if (denied.has(key.toUpperCase())) continue;
     out[key] = value;
   }
   return out;

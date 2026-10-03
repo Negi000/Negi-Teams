@@ -7,6 +7,7 @@ import { createServer, type Socket } from "node:net";
 import { join, isAbsolute, resolve, delimiter, extname } from "node:path";
 import { promisify } from "node:util";
 import { windowsJobSource } from "./windowsJobSource.ts";
+import { withoutControlPlaneEnv } from "../controlPlaneEnv.ts";
 
 const exec=promisify(execFile),hash=(v:string|Buffer)=>createHash("sha256").update(v).digest("hex");
 export interface ProcessTreeIdentity { schema:"negi-windows-job/1"; id:string; rootPid:number; supervisorPid:number; helperSha256:string }
@@ -45,7 +46,7 @@ async function helper(directory:string){
     const f=await open(source,"wx",0o600);try{await f.writeFile(windowsJobSource);await f.sync()}finally{await f.close()}
     const compiler=join(process.env.WINDIR??"C:/Windows","Microsoft.NET/Framework64/v4.0.30319/csc.exe");
     await exec(compiler,["/nologo","/target:exe","/platform:x64","/reference:System.Web.Extensions.dll","/out:"+path,source],
-      {windowsHide:true,timeout:30_000,maxBuffer:1_000_000});
+      {windowsHide:true,timeout:30_000,maxBuffer:1_000_000,env:withoutControlPlaneEnv()});
     if(!(await lstat(path)).isFile())throw Error("Job supervisor output invalid");
     return {path,sha256:hash(await readFile(path))};
   })();compiled.set(root,pending)}
@@ -84,7 +85,7 @@ export class WindowsProcessTree {
               const provided=typeof value.token==="string"?Buffer.from(value.token):Buffer.alloc(0),expected=Buffer.from(token);
               if(value.kind!=="hello"||provided.length!==expected.length||!timingSafeEqual(provided,expected))throw Error("Job supervisor identity mismatch");
               authenticated=true;
-              const env=Object.fromEntries(Object.entries(options.env).filter(([key,value])=>key.toUpperCase()!=="NEGI_JOB_TOKEN"&&typeof value==="string"));
+              const env=Object.fromEntries(Object.entries(withoutControlPlaneEnv(options.env)).filter(([key,value])=>key.toUpperCase()!=="NEGI_JOB_TOKEN"&&typeof value==="string"));
               const config=JSON.stringify({executable:options.executable,args:options.args,cwd:options.cwd,env});
               if(Buffer.byteLength(config)>500_000)throw Error("Contained process configuration too large");connection.write(config+"\n");
             }else if(value.kind==="started"&&rootPid===null&&Number.isSafeInteger(value.rootPid)&&value.rootPid>0){rootPid=value.rootPid;clearTimeout(timeout);readyResolve(connection)}
@@ -99,7 +100,7 @@ export class WindowsProcessTree {
       connection.on("end",()=>{if(rootPid===null)readyReject(Error("Job supervisor channel closed before containment"))});
     });
     try{
-      const helperEnv=Object.fromEntries(Object.entries(options.env).filter(([key])=>key.toUpperCase()!=="NEGI_JOB_TOKEN"));
+      const helperEnv=Object.fromEntries(Object.entries(withoutControlPlaneEnv(options.env)).filter(([key])=>key.toUpperCase()!=="NEGI_JOB_TOKEN"));
       child=spawn(binary.path,[pipeName],{cwd:options.cwd,env:{...helperEnv,NEGI_JOB_TOKEN:token},stdio:["pipe","pipe","pipe"],shell:false,windowsHide:true});
       const exited=new Promise<{receipt:ProcessTreeReceipt|null;code:number|null;error:string|null}>(resolve=>{
         child!.on("error",e=>{error=e.message;readyReject(e)});

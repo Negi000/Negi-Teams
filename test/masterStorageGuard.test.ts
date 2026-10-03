@@ -5,13 +5,29 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
-import { invokeMasterStorage, masterStorageTicket, withMasterStorageGuard } from "../src/server/orchestration/masterStorageGuard.ts";
+import { invokeMasterStorage, masterStorageChildEnv, masterStorageHelperSources, masterStorageTicket, withMasterStorageGuard } from "../src/server/orchestration/masterStorageGuard.ts";
 
 async function fixture(run: (data: { dir: string; root: string }) => Promise<void>) {
   const dir = await mkdtemp(join(tmpdir(), "negi-master-storage-"));
   try { await run({ dir, root: join(dir, "日本語の会話") }); } finally { await rm(dir, { recursive: true, force: true }); }
 }
 const windows = { skip: process.platform !== "win32" };
+
+test("native helper environment excludes all credentials and case aliases", () => {
+  assert.deepEqual(masterStorageChildEnv({ Path: "system", SystemRoot: "windows", TEMP: "tmp",
+    EBI_AUTH_TOKEN: "private", negi_policy_signing_secret: "private", NEGI_POLICY_CONFIG: "private",
+    OPENAI_API_KEY: "private", PYTHONPATH: "untrusted" }), { Path: "system", SystemRoot: "windows", TEMP: "tmp" });
+});
+test("both native helpers are fingerprinted and changed source is held before execution", async () => fixture(async ({ dir }) => {
+  const trusted = await masterStorageHelperSources(resolve("scripts"));
+  for (const row of trusted) await writeFile(join(dir, row.name + ".py"), row.source);
+  assert.deepEqual((await masterStorageHelperSources(dir)).map(row => row.source), trusted.map(row => row.source));
+  for (const row of trusted) {
+    await writeFile(join(dir, row.name + ".py"), row.source + "\nraise RuntimeError('untrusted')\n");
+    await assert.rejects(masterStorageHelperSources(dir), /保存処理|確認が必要/);
+    await writeFile(join(dir, row.name + ".py"), row.source);
+  }
+}));
 
 test("read-only acquisition never creates a missing authority or guard", windows, async () => fixture(async ({ root }) => {
   await assert.rejects(withMasterStorageGuard(root, async () => { throw Error("must not enter"); }, { createIfMissing: false }));

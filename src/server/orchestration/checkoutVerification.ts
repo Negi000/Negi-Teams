@@ -74,7 +74,7 @@ async function verifyOwnedCheckout(options:CheckoutVerificationOptions,signal:Ab
     }
   }
   const paths = changedGitPaths(options.checkout), foreign = pathsOutsideScope(paths, options.allowedPaths);
-  const head = (await exec("git", ["rev-parse", "HEAD"], { cwd: options.checkout, windowsHide: true })).stdout.trim();
+  const head = (await exec("git", ["rev-parse", "HEAD"], { cwd: options.checkout, windowsHide: true, env: appServerChildEnv() })).stdout.trim();
   const baseMatches = head.toLowerCase() === options.baseSha.toLowerCase();
   const passed = !signal?.aborted && paths.length > 0 && !foreign.length && baseMatches && checks.every(c => c.passed);
   const bytes = Buffer.from(JSON.stringify({ runId: options.runId, baseSha: options.baseSha,

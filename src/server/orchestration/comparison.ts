@@ -43,9 +43,11 @@ function difference(a: number | null, b: number | null): number | null {
 
 export function comparePair(experimentId: string, baseline: ComparisonArm,
                             candidate: ComparisonArm): PairedComparison {
-  if (!experimentId || baseline.label !== "baseline" || candidate.label !== "candidate" ||
-      ![baseline, candidate].every((arm) => Boolean(arm.checkout && arm.evidenceRef &&
-        arm.evaluatorVersion && arm.profile?.model && arm.profile.effort) &&
+  const text = (value: unknown) => typeof value === "string" && value.trim().length > 0 && value.length <= 2048;
+  if (!text(experimentId) || !baseline || !candidate || baseline.label !== "baseline" || candidate.label !== "candidate" ||
+      ![baseline, candidate].every((arm) => [arm.checkout, arm.evidenceRef,
+        arm.evaluatorVersion, arm.profile?.model, arm.profile?.effort].every(text) &&
+        ["passed", "failed", "unknown"].includes(arm.quality) &&
         gitSha(arm.baseSha) &&
         [arm.objectiveHash, arm.acceptanceHash, arm.toolsHash, arm.outputHash].every(sha) &&
         [arm.elapsedMs, arm.inputTokens, arm.outputTokens, arm.apiCostUsd].every(measure))) {

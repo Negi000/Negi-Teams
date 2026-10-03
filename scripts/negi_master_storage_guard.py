@@ -203,6 +203,25 @@ def main():
         result = acquire(request["root"], request.get("create", True))
     elif set(request) == {"action", "ticket"} and request["action"] == "release":
         release(request["ticket"]);result = {"released": True}
+    elif request.get("action") == "publish-proof":
+        import re
+        require(set(request) == {"action", "root", "pending", "final", "storageTicket"}, "proof publication fields")
+        root = root_path(request["root"])
+        uuid = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+        require(isinstance(request["final"], str) and re.fullmatch(uuid + r"\.json", request["final"]) and
+                isinstance(request["pending"], str) and re.fullmatch(re.escape(request["final"]) + r"\.pending-" + uuid, request["pending"]), "proof publication names")
+        with storage_guard(root, request["storageTicket"]):
+            from negi_recover_writer import regular
+            source = root / request["pending"];target = root / request["final"]
+            info = source.lstat();regular(info)
+            require(info.st_nlink == 1 and info.st_size <= 2_000_000, "proof publication size/aliases")
+            kernel = native()
+            kernel.MoveFileW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR];kernel.MoveFileW.restype = wintypes.BOOL
+            # Same-directory atomic rename with no replacement. Unlike a hard
+            # link publication, a crash cannot leave a second alias to the file.
+            from negi_recover_writer import windows_extended
+            require(kernel.MoveFileW(windows_extended(source), windows_extended(target)), "proof publication refused")
+        result = {"published": True}
     elif request.get("action") == "recover-master":
         require(set(request) <= {"action", "root", "requestId", "hash", "ownerSha256", "receipt", "storageTicket"} and
                 {"action", "root", "requestId", "hash", "ownerSha256", "receipt"} <= set(request), "recovery fields")

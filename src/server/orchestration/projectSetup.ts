@@ -1,3 +1,4 @@
+import { withoutControlPlaneEnv } from "../controlPlaneEnv.ts";
 // An authenticated human confirms an exact startup profile. No model or configured
 // verification command runs here; existing Vault notes and Git work are read only.
 import { createHash, randomUUID } from "node:crypto";
@@ -132,23 +133,23 @@ export class LocalProjectSetup {
     for(const c of config.verification)c.program=await existing(c.program,"file");
     if(new Set(config.verification.map(c=>c.requirement)).size!==config.verification.length||
       ![config.astra,config.sol].every(r=>["low","medium","high","xhigh","max","ultra"].includes(r.effort)))throw Error("Setup roles/checks invalid");
-    const top=(await exec("git",["rev-parse","--show-toplevel"],{cwd:repository,windowsHide:true,timeout:10000})).stdout.trim();
+    const top=(await exec("git",["rev-parse","--show-toplevel"],{cwd:repository,env:withoutControlPlaneEnv(),windowsHide:true,timeout:10000})).stdout.trim();
     if((await realpath(top)).toLowerCase()!==repository.toLowerCase())throw Error("Repository must be Git root");
     await this.cleanRepository(repository);
-    const baseSha=(await exec("git",["rev-parse","HEAD"],{cwd:repository,windowsHide:true,timeout:10000})).stdout.trim().toLowerCase();
+    const baseSha=(await exec("git",["rev-parse","HEAD"],{cwd:repository,env:withoutControlPlaneEnv(),windowsHide:true,timeout:10000})).stdout.trim().toLowerCase();
     if(!/^[0-9a-f]{40}$/.test(baseSha))throw Error("Committed SHA1 Git baseline required");
     const script=fileURLToPath(new URL("../../../scripts/negi_task_authoring.py",import.meta.url));
     // Dist builds live one level deeper than TS sources.
     let inspector=script;try{await lstat(inspector)}catch{inspector=fileURLToPath(new URL("../../../../scripts/negi_task_authoring.py",import.meta.url))}
     const refs=JSON.parse((await exec("python",[inspector,"--vault",vault,"inspect","--project",String(p.project)],
-      {windowsHide:true,timeout:20000,maxBuffer:200000,env:{...process.env,PYTHONIOENCODING:"utf-8"}})).stdout) as {sources:ProjectSetupPreview["sources"]};
+      {windowsHide:true,timeout:20000,maxBuffer:200000,env:{...withoutControlPlaneEnv(),PYTHONIOENCODING:"utf-8"}})).stdout) as {sources:ProjectSetupPreview["sources"]};
     const settings:ProjectSettings={id:String(p.id),title:p.title.trim(),project:String(p.project),repository,vault,executable,allowedPaths:p.allowedPaths as string[],
       astra:config.astra,sol:config.sol,verification:config.verification,maxAttempts:Number(p.maxAttempts),timeLimitMinutes:Number(p.timeLimitMinutes)};
     const core={schema:"negi-project-setup/1" as const,settings,baseSha,sources:refs.sources},preview={...core,hash:hash(core)};
     if(Buffer.byteLength(JSON.stringify(preview))>20000)throw Error("Setup preview too large");return preview;
   }
   private async cleanRepository(repository:string) {
-    if((await exec("git",["status","--porcelain"],{cwd:repository,windowsHide:true,timeout:10000})).stdout.trim())
+    if((await exec("git",["status","--porcelain"],{cwd:repository,env:withoutControlPlaneEnv(),windowsHide:true,timeout:10000})).stdout.trim())
       throw Error("Project setup requires a clean committed baseline; existing changes are retained");
   }
   private async unusedRuntime() {

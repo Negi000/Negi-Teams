@@ -1,3 +1,4 @@
+import { withoutControlPlaneEnv } from "../controlPlaneEnv.ts";
 // Native exclusion is process-lifetime; callers authorize the exact signed
 // operation before invoking this fixed-name writer recovery boundary.
 import { execFile } from "node:child_process";
@@ -31,7 +32,7 @@ async function script(){
 }
 export async function observeWriter(root:string,kind:WriterKind):Promise<WriterObservation>{
   const result=await exec("python",[await script(),"--root",root,"--kind",kind,"--inspect"],
-    {windowsHide:true,timeout:10000,maxBuffer:20000,env:{...process.env,PYTHONIOENCODING:"utf-8"}});
+    {windowsHide:true,timeout:10000,maxBuffer:20000,env:{...withoutControlPlaneEnv(),PYTHONIOENCODING:"utf-8"}});
   const value=JSON.parse(result.stdout) as WriterObservation,op=value?.operation;
   if(!value||Array.isArray(value)||Object.keys(value).sort().join()!=="legacyGuard,operation,sha256,state"||
     !["absent","live","dead","unknown"].includes(value.state)||typeof value.legacyGuard!=="boolean"||
@@ -63,7 +64,7 @@ export async function recoverWriter(root:string,kind:WriterKind,operation:Writer
   const result=await exec("python",[path,"--root",root,"--kind",kind,"--domain",operation.domain,
     "--request-id",operation.requestId.toLowerCase(),"--hash",operation.hash,...(ownerSha256?["--owner-sha256",ownerSha256]:[]),
     ...(receiptBytes?["--receipt-json",receiptBytes]:[])],
-    {windowsHide:true,timeout:10000,maxBuffer:20000,env:{...process.env,PYTHONIOENCODING:"utf-8"}});
+    {windowsHide:true,timeout:10000,maxBuffer:20000,env:{...withoutControlPlaneEnv(),PYTHONIOENCODING:"utf-8"}});
   const value=JSON.parse(result.stdout) as {released:boolean};
   if(!value||Array.isArray(value)||Object.keys(value).join()!=="released"||typeof value.released!=="boolean")throw Error("Native writer recovery result invalid");
   return value.released;

@@ -1,3 +1,4 @@
+import { withoutControlPlaneEnv } from "../controlPlaneEnv.ts";
 // Explicit browser reconciliation. Inspecting never resumes a Task or releases a claim.
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
@@ -58,7 +59,7 @@ async function regular(path:string,max:number):Promise<Buffer|null>{
 }
 function git(root:string,args:string[]){
   return execFileSync("git",["-c","core.fsmonitor=false",...args],{cwd:root,windowsHide:true,timeout:10_000,
-    maxBuffer:8_000_000,env:{...process.env,GIT_OPTIONAL_LOCKS:"0"},stdio:["ignore","pipe","pipe"]});
+    maxBuffer:8_000_000,env:{...withoutControlPlaneEnv(),GIT_OPTIONAL_LOCKS:"0"},stdio:["ignore","pipe","pipe"]});
 }
 export async function checkoutFacts(config:VaultRunConfig,allowed:string[]):Promise<TaskReconciliationDossier["checkout"]>{
   const root=await realpath(config.checkout),top=await realpath(git(root,["rev-parse","--show-toplevel"]).toString().trim());

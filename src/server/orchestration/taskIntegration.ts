@@ -1,6 +1,7 @@
 // Local integration of verified, disjoint file ownership into a clean checkout.
 // No model turn, commit, push, or human acceptance is performed here.
 import { createHash } from "node:crypto";
+import { withoutControlPlaneEnv } from "../controlPlaneEnv.ts";
 import { execFileSync } from "node:child_process";
 import { chmod, copyFile, lstat, mkdir, open, readFile, realpath, unlink } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
@@ -13,7 +14,7 @@ import { changedGitPaths, pathsOutsideScope } from "./vaultTaskContract.ts";
 
 const hash = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
 function git(cwd: string, args: string[]): string {
-  return execFileSync("git", args, { cwd, windowsHide: true, encoding: "utf8", timeout: 20_000, maxBuffer: 200_000 });
+  return execFileSync("git", args, { cwd, env: withoutControlPlaneEnv(), windowsHide: true, encoding: "utf8", timeout: 20_000, maxBuffer: 200_000 });
 }
 function inside(root: string, path: string): boolean {
   const rel = relative(root.toLowerCase(), path.toLowerCase());

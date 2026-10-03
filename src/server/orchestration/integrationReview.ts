@@ -1,6 +1,7 @@
 // Pins an already verified integration for separately authenticated human review.
 // This never applies a diff, starts a model, accepts a result, commits or pushes.
 import { createHash } from "node:crypto";
+import { withoutControlPlaneEnv } from "../controlPlaneEnv.ts";
 import { execFileSync } from "node:child_process";
 import { lstat, open, readFile, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
@@ -31,7 +32,7 @@ export interface IntegrationReviewManifest {
   review: RegisteredReviewCase;
 }
 function git(checkout: string, args: string[]): string {
-  return execFileSync("git", args, { cwd: checkout, encoding: "utf8", windowsHide: true,
+  return execFileSync("git", args, { cwd: checkout, env: withoutControlPlaneEnv(), encoding: "utf8", windowsHide: true,
     timeout: 20_000, maxBuffer: 150_000 });
 }
 function patch(checkout: string): string {

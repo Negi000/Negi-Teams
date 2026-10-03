@@ -1,6 +1,7 @@
 // Local facts for reviewing an uncertain attempt. This does not reconcile the
 // ledger, clear a client guard, start a process, or authorize another dispatch.
 import { createHash } from "node:crypto";
+import { withoutControlPlaneEnv } from "../controlPlaneEnv.ts";
 import { execFileSync } from "node:child_process";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
@@ -24,7 +25,7 @@ export interface ReconciliationDossier {
 }
 
 function git(checkout: string, args: string[]): string {
-  return execFileSync("git", args, { cwd: checkout, windowsHide: true }).toString("utf8");
+  return execFileSync("git", args, { cwd: checkout, env: withoutControlPlaneEnv(), windowsHide: true }).toString("utf8");
 }
 
 function within(root: string, path: string): boolean {

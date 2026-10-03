@@ -5,6 +5,7 @@ export function reviewPageHtml(): string {
 <div class="md-page-heading"><div><div class="md-eyebrow">REVIEW</div><h1>成果レビュー</h1><p>成果を読み、コメントと受入を記録します。</p></div><button id="reload" class="md-icon-button" aria-label="レビューを更新" title="レビューを更新">↻</button></div>
 <div class="md-compact-picker"><label>レビュー対象<select id="cases" aria-label="レビュー対象"></select></label></div>
 <p id="message" class="md-message" role="status" aria-live="polite"></p>
+<p><a class="md-button md-tonal" href="/policies">実行設定の比較を確認</a></p>
 <p id="result-notification-error" class="md-message md-error" role="status" aria-live="polite"></p>
 <p id="knowledge-link" hidden><a class="md-button md-tonal" href="/knowledge">知識候補を確認</a><small>コメントからの候補は、参照を許可するまで次の作業では使われません。</small></p>
 <div id="empty" class="md-empty" hidden><strong>レビュー対象はまだありません</strong>Taskの検証が完了すると、成果がここに表示されます。</div>

@@ -1,7 +1,8 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
-import { lstat } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { lstat, readFile } from "node:fs/promises";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 interface Ticket { schema: "negi-master-storage-guard/1"; root: string; pid: number; startToken: string; handles: string[]; identities: number[][] }
@@ -17,6 +18,35 @@ export class MasterStorageHeldError extends Error {
 }
 function check(value: unknown): asserts value { if (!value) throw new MasterStorageHeldError(); }
 
+/** Native helpers require system paths, never provider or control-plane secrets. */
+export function masterStorageChildEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const allowed = new Set(["PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "USERPROFILE", "LOCALAPPDATA", "APPDATA"]);
+  return Object.fromEntries(Object.entries(env).filter(([name]) => allowed.has(name.toUpperCase())));
+}
+const helpers = [
+  ["negi_recover_writer", "8c329091d17254155780729659a40198a6979785b723a11a3b85f73339c01069"],
+  ["negi_master_storage_guard", "005e13946d157bf9a47a90a10ff60efb70d642be2125458d68deb0ff237c82cf"],
+] as const;
+/** Execute these verified snapshots, never re-open their paths as Python code.
+ * Updating either packaged helper requires updating its source fingerprint. */
+export async function masterStorageHelperSources(directory: string) {
+  return Promise.all(helpers.map(async ([name, sha256]) => {
+    const filename = join(directory, name + ".py"), info = await lstat(filename);
+    check(info.isFile() && !info.isSymbolicLink() && info.nlink === 1 && info.size < 100000);
+    const source = (await readFile(filename, "utf8")).replace(/\r\n/g, "\n");
+    check(createHash("sha256").update(source).digest("hex") === sha256);
+    return { name, filename, source };
+  }));
+}
+const bootstrap = `import json,sys,types
+rows=json.loads(sys.stdin.buffer.readline(150001))
+for row in rows:
+    module=sys.modules["__main__"] if row["name"]=="negi_master_storage_guard" else types.ModuleType(row["name"])
+    module.__file__=row["filename"]
+    sys.modules[row["name"]]=module
+    exec(compile(row["source"],row["filename"],"exec"),module.__dict__)
+`;
+
 export function masterStorageTicket(root: string): Ticket | undefined {
   const current = context.getStore();
   return current?.active && current.key === key(root) && leases.get(current.key) === current.lease && current.lease.ticket ? structuredClone(current.lease.ticket) : undefined;
@@ -29,16 +59,17 @@ export async function invokeMasterStorage(request: Record<string, unknown>): Pro
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     filename = fileURLToPath(new URL("../../../../scripts/negi_master_storage_guard.py", import.meta.url));
   }
-  const info = await lstat(filename); check(info.isFile() && !info.isSymbolicLink());
+  const sources = JSON.stringify(await masterStorageHelperSources(dirname(filename))) + "\n";
+  check(Buffer.byteLength(sources) <= 150000);
   const output = await new Promise<string>((accept, reject) => {
-    const child = spawn("python", ["-B", filename], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, PYTHONIOENCODING: "utf-8" } });
+    const child = spawn("python", ["-I", "-B", "-c", bootstrap], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: masterStorageChildEnv() });
     let stdout = "", size = 0, failure: Error | null = null;
     const timer = setTimeout(() => { failure = new MasterStorageHeldError(); child.kill(); }, 10000);
     child.stdout.setEncoding("utf8");child.stderr.resume();
     child.stdout.on("data", (chunk: string) => { size += Buffer.byteLength(chunk); if (size > 24000) { failure = new MasterStorageHeldError(); child.kill(); } else stdout += chunk; });
     child.on("error", error => { failure = error; });child.stdin.on("error", error => { failure ??= error; });
     child.on("close", code => { clearTimeout(timer); if (failure || code !== 0) reject(failure ?? new MasterStorageHeldError()); else accept(stdout); });
-    child.stdin.end(input);
+    child.stdin.end(sources + input);
   });
   const result: unknown = JSON.parse(output);
   check(result && typeof result === "object" && !Array.isArray(result) && JSON.stringify(result) + "\n" === output);

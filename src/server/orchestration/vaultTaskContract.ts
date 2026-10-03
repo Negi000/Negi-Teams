@@ -1,3 +1,4 @@
+import { withoutControlPlaneEnv } from "../controlPlaneEnv.ts";
 // Read-only bridge from the Phase 3 Task export to the single-task runner.
 // No process/model is started. The exporter is the semantic validator; this
 // bridge rejects a stale source snapshot or a changed/dirty Git checkout.
@@ -64,14 +65,14 @@ function bundledScript(name: string): string {
 }
 function gitCheckoutState(checkout: string): CheckoutState {
   const top = execFileSync("git", ["rev-parse", "--show-toplevel"],
-    { cwd: checkout, encoding: "utf8", windowsHide: true }).trim();
+    { cwd: checkout, encoding: "utf8", windowsHide: true, env: withoutControlPlaneEnv() }).trim();
   if (resolve(top).toLowerCase() !== resolve(checkout).toLowerCase()) {
     throw new Error("Task Contract cwd must be the Git checkout root");
   }
   const head = execFileSync("git", ["rev-parse", "HEAD"],
-    { cwd: checkout, encoding: "utf8", windowsHide: true }).trim();
+    { cwd: checkout, encoding: "utf8", windowsHide: true, env: withoutControlPlaneEnv() }).trim();
   const dirty = execFileSync("git", ["status", "--porcelain", "--untracked-files=all"],
-    { cwd: checkout, encoding: "utf8", windowsHide: true }).trim().length > 0;
+    { cwd: checkout, encoding: "utf8", windowsHide: true, env: withoutControlPlaneEnv() }).trim().length > 0;
   return { head, dirty };
 }
 function currentVaultExport(vault: string, id: string, project: string): unknown {
@@ -79,7 +80,7 @@ function currentVaultExport(vault: string, id: string, project: string): unknown
   return JSON.parse(execFileSync("python", [exporter, "--vault", vault,
     "--id", id, "--project", project, "--stdout-json"],
   { encoding: "utf8", windowsHide: true, maxBuffer: 2_000_000,
-    env: { ...process.env, PYTHONIOENCODING: "utf-8" } }));
+    env: { ...withoutControlPlaneEnv(), PYTHONIOENCODING: "utf-8" } }));
 }
 function compileContextPack(vault: string, contract: VaultTaskContract,
                             role: "astra" | "sol", maxChars: number, knowledgeProofDirectory?: string,
@@ -92,7 +93,7 @@ function compileContextPack(vault: string, contract: VaultTaskContract,
     ...(knowledgeProofDirectory ? ["--knowledge-proof-dir", knowledgeProofDirectory] : []),
     ...(contextCacheDirectory ? ["--cache-dir", contextCacheDirectory] : [])],
   { encoding: "utf8", windowsHide: true, maxBuffer: maxChars * 4 + 4096,
-    env: { ...process.env, PYTHONIOENCODING: "utf-8" } });
+    env: { ...withoutControlPlaneEnv(), PYTHONIOENCODING: "utf-8" } });
   if (content.length > maxChars) throw new Error("Context Pack exceeds configured character limit");
   const match = content.match(/<!-- manifest: (\{[^\r\n]*\}); estimated_tokens=\d+ -->\r?\n?$/);
   const manifest = match ? object(JSON.parse(match[1])) : null;
@@ -138,9 +139,9 @@ async function savePack(directory: string, runId: string, role: "astra" | "sol",
 }
 export function changedGitPaths(checkout: string): string[] {
   const tracked = execFileSync("git", ["diff", "--name-only", "--no-renames", "-z", "HEAD"],
-    { cwd: checkout, windowsHide: true }).toString("utf8");
+    { cwd: checkout, windowsHide: true, env: withoutControlPlaneEnv() }).toString("utf8");
   const untracked = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "-z"],
-    { cwd: checkout, windowsHide: true }).toString("utf8");
+    { cwd: checkout, windowsHide: true, env: withoutControlPlaneEnv() }).toString("utf8");
   return [...new Set((tracked + untracked).split("\0").filter(Boolean))].sort();
 }
 export function pathsOutsideScope(changed: string[], allowedPaths: string[]): string[] {

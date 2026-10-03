@@ -1,9 +1,9 @@
 // .env をリポジトリルートから最初に読み込む（他 import が module-level で process.env を読む前に適用）。
-import { loadedEnvKeys } from "./env.ts";
+import { dotenvKeys, loadedEnvKeys } from "./env.ts";
 import { createServer, type IncomingMessage } from "node:http";
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { dirname, isAbsolute, join, extname, normalize } from "node:path";
+import { dirname, isAbsolute, join, extname, normalize, relative, sep } from "node:path";
 import { WebSocketServer, WebSocket } from "ws";
 import {
   Registry,
@@ -63,6 +63,8 @@ import { LocalReviewService } from "./orchestration/reviewService.ts";
 import { createReviewHttp } from "./orchestration/reviewHttp.ts";
 import { LocalKnowledgeService } from "./orchestration/knowledgeService.ts";
 import { createKnowledgeHttp } from "./orchestration/knowledgeHttp.ts";
+import { LocalPolicyService } from "./orchestration/policyService.ts";
+import { createPolicyHttp } from "./orchestration/policyHttp.ts";
 import { LocalIntegrationReviewService } from "./orchestration/integrationReviewService.ts";
 import { LocalTaskService,preflightClosureForStartup } from "./orchestration/taskService.ts";
 import { createTaskHttp } from "./orchestration/taskHttp.ts";
@@ -220,6 +222,22 @@ if(projectConfiguration&&bootConfiguration){
 }
 const taskApi=createTaskHttp(taskService,authConfig,taskAuthoringService!==null,integrationExecutionService!==null);
 const knowledgeApi = createKnowledgeHttp(knowledgeService, authConfig);
+let policyService: LocalPolicyService | null = null;
+if (process.env.NEGI_POLICY_CONFIG && authConfig.token && !executionHeld() &&
+    process.env.NEGI_POLICY_SIGNING_SECRET && process.env.NEGI_POLICY_SIGNING_SECRET.length >= 32 &&
+    !dotenvKeys().some(key => key.toUpperCase() === "NEGI_POLICY_SIGNING_SECRET")) {
+  try {
+    const writableRoots = [process.cwd(), process.env.EBI_DEFAULT_CWD ?? process.cwd(),
+      ...(taskService?.knowledgeRegistrations().flatMap(row => [row.vault, row.checkout]) ?? []),
+      ...(reviewService?.knowledgeWritableRoots() ?? [])];
+    const configPath = await realpath(process.env.NEGI_POLICY_CONFIG);
+    const roots = await Promise.all(writableRoots.map(root => realpath(root)));
+    if (roots.some(root => { const rel = relative(root, configPath);
+      return rel === "" || !isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`); })) throw Error("Policy config is model-writable");
+    policyService = await LocalPolicyService.open(await readServiceConfig(configPath), roots, process.env.NEGI_POLICY_SIGNING_SECRET);
+  } catch { /* Only policy use is held; existing explicit Task profiles remain available. */ }
+}
+const policyApi = createPolicyHttp(policyService, authConfig, process.env.NEGI_POLICY_CONFIG ? "held" : "unconfigured");
 const reviewApi = createReviewHttp(reviewService, authConfig);
 // spawn する対象コマンド。claude が PATH に無い環境では EBI_COMMAND=bash 等で fallback。
 const COMMAND = process.env.EBI_COMMAND ?? "claude";
@@ -939,6 +957,7 @@ const httpServer = createServer(async (req, res) => {
   }
   if (await reviewApi(req, res, url)) return;
   if (await knowledgeApi(req, res, url)) return;
+  if (await policyApi(req, res, url)) return;
   if (await taskAuthoringApi(req, res, url)) return;
   if (await conversationApi(req, res, url)) return;
   if (await integrationApi(req, res, url)) return;

@@ -1,3 +1,4 @@
+import { withoutControlPlaneEnv } from "../controlPlaneEnv.ts";
 // Authenticated review feedback -> candidate -> explicit, separately signed use.
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
@@ -112,7 +113,7 @@ export class LocalKnowledgeService {
     if (!script) throw new Error("Bundled Knowledge writer missing");
     const result = await exec("python", [script, "--vault", vault, "--proof-dir", this.proofDirectory, command,
       ...(requestId ? ["--request-id", requestId] : [])], { windowsHide: true, timeout: 20_000,
-      maxBuffer: 4_000_000, env: { ...process.env, PYTHONIOENCODING: "utf-8" } });
+      maxBuffer: 4_000_000, env: { ...withoutControlPlaneEnv(), PYTHONIOENCODING: "utf-8" } });
     return JSON.parse(result.stdout);
   }
   private async entries(): Promise<Entry[]> {

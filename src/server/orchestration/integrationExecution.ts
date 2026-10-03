@@ -1,6 +1,7 @@
 // Authenticated selection -> separate worktree -> the existing scheduler and
 // integration verifier. No model turn, branch update, push or human acceptance.
 import { createHash } from "node:crypto";
+import { withoutControlPlaneEnv } from "../controlPlaneEnv.ts";
 import { execFile } from "node:child_process";
 import { lstat, mkdir, open, readFile, readdir, realpath, unlink } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
@@ -21,7 +22,7 @@ import type { ConfigurationAdmission } from "./projectConfiguration.ts";
 const exec = promisify(execFile), hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const idPattern = /^integration-[a-f0-9-]{36}$/;
 async function git(cwd: string, args: string[]) {
-  return (await exec("git", ["--no-replace-objects", ...args], { cwd, windowsHide: true, timeout: 20_000, maxBuffer: 200_000 })).stdout.trim();
+  return (await exec("git", ["--no-replace-objects", ...args], { cwd, env: withoutControlPlaneEnv(), windowsHide: true, timeout: 20_000, maxBuffer: 200_000 })).stdout.trim();
 }
 async function common(cwd: string) {
   const path = await realpath(await git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]));

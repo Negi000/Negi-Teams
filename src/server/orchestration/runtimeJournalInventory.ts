@@ -1,3 +1,4 @@
+import { withoutControlPlaneEnv } from "../controlPlaneEnv.ts";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstat } from "node:fs/promises";
@@ -52,7 +53,7 @@ export class RuntimeJournalInventory {
       const info = await lstat(filename); check(info.isFile() && !info.isSymbolicLink(), "fixed helper unavailable");
       const input = JSON.stringify({ action, root: this.root, context: this.context, ...frozen, storageTicket: masterStorageTicket(this.root) }) + "\n";
       check(Buffer.byteLength(input) <= 8_000_000, "input too large");
-      const child = spawn("python", ["-B", filename], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, PYTHONIOENCODING: "utf-8" } });
+      const child = spawn("python", ["-B", filename], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: { ...withoutControlPlaneEnv(), PYTHONIOENCODING: "utf-8" } });
       const output = await observeRuntimeHelper(child,input,["preview","audit","auditScheduler"].includes(action));
       const value: unknown = JSON.parse(output);
       check(value && typeof value === "object" && !Array.isArray(value) && JSON.stringify(value) + "\n" === output, "noncanonical helper result");
