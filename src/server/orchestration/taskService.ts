@@ -435,10 +435,16 @@ export class LocalTaskService {
       return state;
     };
     if (preflight) await readState();
-    return { config: structuredClone(run.config), configSha256: run.configSha256, readState,
+    return { config: structuredClone(run.config), configSha256: run.configSha256, resultStorage:this.resultSourceStorageRegistration(),readState,
       readManifest: async () => { await readState(); return structuredClone((await this.ensureReview(run))!); } };
   }
+  resultSourceStorageRegistration(): Readonly<TaskStorageRegistration> | null {
+    return this.runtimeInventory?Object.freeze({root:join(this.root,"master-conversations"),
+      turnRoot:join(this.root,"master-turns"),schedulerPath:this.scheduler.path}):null;
+  }
   async connectReviews(service: LocalReviewService): Promise<void> {
+    const registration=this.resultSourceStorageRegistration();
+    if(registration)service.bindResultSourceStorage(registration,operation=>this.runtimeInventory!.withStorage(operation));
     await service.registerWritableRoots(this.runs.map((run) => run.config.checkout));
     this.reviews = service;
     for (const run of this.runs) await this.ensureReview(run);

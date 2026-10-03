@@ -45,7 +45,9 @@ export class LocalIntegrationReviewService {
         const contextKey = taskCatalog + "\0" + reviewCatalog;
         let context = contexts.get(contextKey);
         if (!context) {
-          context = await LocalTaskService.open(await json(taskCatalog), undefined, storage);
+          const catalog=await json(taskCatalog);
+          reviews.assertResultSourceStorage(storage.storage==="indexed"?await LocalTaskService.inspectStorageRegistration(catalog):null);
+          context = await LocalTaskService.open(catalog, undefined, storage);
           contexts.set(contextKey, context);
           await context.connectReviews(await LocalReviewService.open(await json(reviewCatalog)));
         }
@@ -64,6 +66,15 @@ export class LocalIntegrationReviewService {
   }
   /** Trusted callers can supply authenticated source readers without a second catalog. */
   static async register(options: IntegrationReviewOptions[], reviews: LocalReviewService, authoring?:LocalTaskAuthoringService|null): Promise<void> {
+    // Validate the whole registry before publishing any review or binding a callback.
+    const assertStorage=(item:IntegrationReviewOptions)=>{
+      for(const source of item.sources){
+        reviews.assertResultSourceStorage(source.resultStorage);
+        if(source.resultStorage&&source.resultStorage.schedulerPath!==item.scheduler.path)
+          throw Error("Integration scheduler must share the review result storage registration");
+      }
+    };
+    for(const item of options)assertStorage(item);
     for (const item of options) {
       await reviews.registerWritableRoots([item.checkout, ...item.sources.flatMap(source => [source.config.checkout, source.config.vault])]);
       const path = join(item.outputDir, "integration-review-manifest.json");
@@ -91,7 +102,7 @@ export class LocalIntegrationReviewService {
         throw new Error("Integration source presentation differs from its pinned artifact");
       await reviews.registerPinnedResult(manifest.review, item.id, join(item.outputDir, "integration-review-result.md"));
       reviews.bindCurrentCheck(manifest.review.id, async () => {
-        try { await verifyIntegrationReview(item, manifest); }
+        try { assertStorage(item);await verifyIntegrationReview(item, manifest); }
         catch (cause) { throw new Error("統合成果または元Taskの状態が、表示した固定版と一致しません。受入を保留しています。", { cause }); }
       });
       reviews.bindIntegrationDetails(manifest.review.id, { id: item.id, baseSha: item.baseSha,

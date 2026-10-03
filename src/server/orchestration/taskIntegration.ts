@@ -6,6 +6,7 @@ import { chmod, copyFile, lstat, mkdir, open, readFile, realpath, unlink } from 
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { FileScheduler } from "./scheduler.ts";
 import type { TaskSnapshot } from "./singleTask.ts";
+import type { TaskStorageRegistration } from "./taskService.ts";
 import { verifyTaskReviewCheckout, type TaskReviewManifest } from "./taskReviewArtifact.ts";
 import { assertVaultRunOutputPaths, type VaultRunConfig } from "./vaultRunConfig.ts";
 import { changedGitPaths, pathsOutsideScope } from "./vaultTaskContract.ts";
@@ -25,6 +26,8 @@ function safePath(path: string): boolean {
 export interface IntegrationSource {
   config: VaultRunConfig;
   configSha256: string;
+  // Trusted runtime metadata; never read from a Task contract or model/browser input.
+  readonly resultStorage: Readonly<TaskStorageRegistration> | null;
   // The caller must use its authenticated ledger reader, including any approval verifier.
   readState: () => Promise<TaskSnapshot>;
   // Catalog services supply the latest pinned revision; legacy sources use A.

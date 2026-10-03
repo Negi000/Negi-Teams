@@ -42,7 +42,7 @@ export async function fixture(collision: boolean, run: (options: TaskIntegration
       await append({ type: "submit", work: { id: name, parentId: null, dependencies: [], role: "sol",
         checkout: sourceCheckout, checkoutMode: "write", resources: [], reserveUsd: 0 } });
       await scheduler.claim(name, `${name}:synthetic-dispatch`);
-      sources.push({ config, configSha256: hash(name), readState: async () => { throw new Error("Not verified yet"); } });
+      sources.push({ config, configSha256: hash(name), resultStorage:null,readState: async () => { throw new Error("Not verified yet"); } });
     }
     assert.equal((await scheduler.read()).state?.entries.filter((item) => item.status === "running").length, 2);
     await Promise.all(sources.map(async (source) => {

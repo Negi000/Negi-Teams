@@ -37,6 +37,11 @@ export interface SingleTaskRunOptions {
     Promise<{ outcome: "passed" | "failed" | "unknown"; evidenceRef: string }>;
 }
 
+const verificationResponsibility =
+  `検証の担当: Solのターン終了後、ランナーが固定検証を呼び出して証拠を台帳に保存します。\n` +
+  `検証コマンドが提示されていなければ推測・追加実行せず、その検証はランナーの結果待ちと報告してください。\n` +
+  `契約が実装前の検証や停止を明示している場合は、その条件を守ってください。検証合格や人間受入を自己申告で確定しないでください。\n`;
+
 function promptForAstra(contract: ContractRef, context: string | undefined): string {
   return `次の固定された契約について、Solへ渡せる短い実行計画を作ってください。\n` +
     `モデル作業の追加起動・subagent・別モデルCLI・新規チャット作成は行わず、この一件を直接扱ってください。\n` +
@@ -45,6 +50,7 @@ function promptForAstra(contract: ContractRef, context: string | undefined): str
       `変更可能パス: ${contract.scope.allowedPaths.join(" / ")}\n` : "") +
     (contract.invariants ? `不変条件: ${contract.invariants.join(" / ")}\n` : "") +
     (contract.verification ? `必要な検証: ${contract.verification.join(" / ")}\n` : "") +
+    verificationResponsibility +
     (contract.escalation ? `差戻し条件: ${contract.escalation.join(" / ")}\n` : "") +
     `参照: ${contract.vaultId} v${contract.version} sha256=${contract.sha256}\n` +
     `基準SHA: ${contract.baseSha}\n不明な点は不明と記してください。` +
@@ -58,6 +64,7 @@ function promptForSol(contract: ContractRef, plan: string, context: string | und
       `変更可能パス: ${contract.scope.allowedPaths.join(" / ")}\n` : "") +
     (contract.invariants ? `不変条件: ${contract.invariants.join(" / ")}\n` : "") +
     (contract.verification ? `必要な検証: ${contract.verification.join(" / ")}\n` : "") +
+    verificationResponsibility +
     (contract.escalation ? `差戻し条件: ${contract.escalation.join(" / ")}\n` : "") +
     `参照: ${contract.vaultId} v${contract.version} sha256=${contract.sha256}\n` +
     `基準SHA: ${contract.baseSha}\nAstraの計画:\n${plan}` +

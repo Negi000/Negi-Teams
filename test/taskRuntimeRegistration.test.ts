@@ -112,6 +112,25 @@ test("registered Task, owner/5 Master, integration execution and restored integr
     assert.deepEqual((await inventory.audit()).head, before);assert.deepEqual(f.calls(), { astra: 0, sol: 2 });
     const restoredReview = await reviews.snapshot(result.reviewId);
     assert.equal(restoredReview.canAccept, true, restoredReview.integrityError ?? "Restored integration review unavailable");
+    // Integration decisions reread source Tasks under the same native root.
+    const accepted=await reviews.accept(result.reviewId,restoredReview.artifactSha256,randomUUID());
+    assert.equal(accepted.status,"accepted");assert.equal(accepted.integrityError,null);
+    const revoked=await reviews.revoke(result.reviewId,restoredReview.artifactSha256,randomUUID(),"Synthetic callback/lock verification");
+    assert.equal(revoked.status,"revoked");assert.equal(revoked.integrityError,null);
+    for(const id of ids)assert.equal((await tasks.snapshot(id)).acceptedBy,null);
+    assert.equal((await inventory.audit()).state,"clean");assert.deepEqual(f.calls(),{astra:0,sol:2});
+    // A Task decision also runs connectReviews' listener -> publishResult -> signed scheduler read.
+    const sourceReviewId=(await tasks.snapshot(ids[0])).reviewId!;
+    const sourceReview=await reviews.snapshot(sourceReviewId);
+    const sourceAccepted=await reviews.accept(sourceReviewId,sourceReview.artifactSha256,randomUUID());
+    assert.equal(sourceAccepted.status,"accepted");assert.equal(sourceAccepted.integrityError,null);
+    assert.ok((await tasks.snapshot(ids[0])).acceptedBy);
+    assert.ok((await tasks.resultNotifications()).some(notice=>notice.runId===ids[0]&&notice.status==="accepted"));
+    const sourceRevoked=await reviews.revoke(sourceReviewId,sourceReview.artifactSha256,randomUUID(),"Synthetic result-listener reentry");
+    assert.equal(sourceRevoked.status,"revoked");assert.equal(sourceRevoked.integrityError,null);
+    assert.equal((await tasks.snapshot(ids[0])).status,"review_revoked");
+    assert.ok((await tasks.resultNotifications()).some(notice=>notice.runId===ids[0]&&notice.status==="review_revoked"));
+    assert.equal((await inventory.audit()).state,"clean");assert.deepEqual(f.calls(),{astra:0,sol:2});
     await assert.rejects(new FileScheduler(f.config.schedulerPath).read(), /requires its journal writer/);
   } finally { await restored?.close();await integrations?.close();await tasks?.close();await f.close(); }
 });

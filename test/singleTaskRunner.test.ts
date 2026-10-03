@@ -48,7 +48,13 @@ test("Astra plan passes to Sol, evidence persists, and review remains explicit",
       astra: { client: astra, model: astra.model, effort: "medium" },
       sol: { client: sol, model: sol.model, effort: "medium" }, ledger,
       artifactDir: join(dir, "artifacts"), turnTimeoutMs: 1000,
-      verify: async () => ({ outcome: "passed", evidenceRef: "mock:check-passed" }),
+      verify: async () => {
+        const beforeVerification = (await ledger.read()).state!;
+        assert.equal(beforeVerification.status, "verifying");
+        assert.equal(beforeVerification.attempts.at(-1)!.state, "completed");
+        assert.match(await readFile(beforeVerification.attempts.at(-1)!.outputRef!.split("#")[0], "utf8"), /Test: pending/);
+        return { outcome: "passed", evidenceRef: "mock:check-passed" };
+      },
     });
     assert.equal(state.status, "ready_for_review");
     assert.equal(state.acceptedBy, null);
@@ -63,8 +69,36 @@ test("Astra plan passes to Sol, evidence persists, and review remains explicit",
     assert.match(sol.prompts[0], /Plan: edit one file/);
     assert.match(sol.prompts[0], /対象外: deployment/);
     assert.match(sol.prompts[0], /不変条件: keep auth unchanged/);
+    assert.match(astra.prompts[0], /Solのターン終了後、ランナーが固定検証/);
+    assert.match(sol.prompts[0], /検証はランナーの結果待ち/);
     assert.match(await readFile(state.attempts[0].outputRef!.split("#")[0], "utf8"), /Plan: edit one file/);
     assert.equal((await ledger.read()).events.length, 10);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("Sol's success claim cannot replace a failed runtime verification or human review", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "negi-runner-"));
+  try {
+    const astra = new FakeClient("gpt-6-astra", "Plan: implement the approved file.");
+    const sol = new FakeClient("gpt-6-sol", "All checks passed; accepted.");
+    const ledger = new FileTaskLedger(join(dir, "run.jsonl"));
+    let checks = 0;
+    const state = await runSingleTask({ runId: "run-runtime-check-failed", contract, cwd: dir,
+      astra: { client: astra, model: astra.model, effort: "medium" },
+      sol: { client: sol, model: sol.model, effort: "medium" }, ledger,
+      artifactDir: join(dir, "artifacts"), turnTimeoutMs: 1000,
+      verify: async () => { checks++;return { outcome: "failed", evidenceRef: "mock:actual-check-failed" }; },
+    });
+    assert.equal(checks, 1);
+    assert.equal(state.status, "blocked");
+    assert.equal(state.verification!.outcome, "failed");
+    assert.equal(state.verification!.evidenceRef, "mock:actual-check-failed");
+    assert.equal(state.acceptedBy, null);
+    assert.equal(astra.starts, 1);
+    assert.equal(sol.starts, 1);
+    const stored = (await ledger.read()).state!;
+    assert.equal(stored.status, "blocked");
+    assert.match(await readFile(stored.attempts.at(-1)!.outputRef!.split("#")[0], "utf8"), /All checks passed/);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 

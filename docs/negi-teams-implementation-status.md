@@ -2,6 +2,14 @@
 
 2026-10-03（JST）。基準は `NEGI_TEAMS_MASTER_PLAN.ja.md` のPhase 0〜8と `REQUIREMENTS_TRACEABILITY.ja.md`。この表は実装・合成テスト・実モデル観測・人間受入を分ける。Git管理外の実行証拠も参照しており、実装差分の公開を全Phaseの完了宣言とは扱わない。
 
+## 2026-10-03追加: 固定検証と元Astraへの結果配送
+
+[実装・検証・残る条件](negi-teams-verification-handoff.md)。Sol終了後にランナーが固定検証を呼び出す担当を入力に明示し、modelの成功申告と機械検証・人間受入を区別した。結果更新とMaster入力の保存保護の順序をnative→reviewへ統一し、同一保存登録の統合レビューを照合する。異種native rootの同時統合は未実装の残条件として維持する。
+
+独立した実Codex 0.160.0 QAは、Astra案1件→画面で確定・開始→Sol実装1回→固定検証passed→M3レビュー・結果カード→同じAstraの明示入力に通知添付・回答→再起動後completed保持まで確認した。人間受入は未実施、追加Task・再送なし。観察script最後の一覧API項目誤認でexit1だった原記録を保持し、元111ファイルSHA不変・dispatch 0の追加読取でTask詳細、使用枠0、clean native auditを確認した。観察script全体の成功やproduction releaseとして扱わない。
+
+独立再レビュー修正後の最終関連9ファイル88/88成功、失敗/取消/skip 0（866575.5366ms、actual exit0）。型検査・ビルド・保存された実成果の追加読取もactual exit0で、実行中のsrc/scripts/testのSHAは一致した。先行73件/19件を合算しない。全73要件・Phase0〜8の全体ゴールはACTIVE。
+
 ## 2026-10-03追加: 契約案の元会話へ結果を返す
 
 [契約案を作った会話への結果通知](negi-teams-master-task-tools.md#2026-10-03追加-契約案を作った会話への結果通知)を通常のTask/統括へ接続した。Task画面から開始した事実はbrowserとして保持し、署名済み契約承認の作成元を別に照合する。同じ会話へMaterial 3の通知と参照を表示し、次の明示入力に現在と一致する固定結果を一度だけ渡す。通知だけではturnを起動せず、人間受入も行わない。legacy Masterでも別threadの通知を混ぜない。

@@ -103,6 +103,13 @@ async function boundedFile(path: string, maximum: number): Promise<Buffer> {
   if (bytes.length > maximum) throw new Error("Registered review file grew beyond its limit");
   return bytes;
 }
+function resultStorageIdentity(registration: { root:string;turnRoot:string;schedulerPath:string }): string {
+  if(![registration.root,registration.turnRoot,registration.schedulerPath].every(value=>typeof value==="string"&&isAbsolute(value)))
+    throw Error("Review result storage registration must be absolute");
+  // Match masterStorageGuard: canonical casing remains significant on Windows.
+  const canonical=(value:string)=>resolve(value);
+  return JSON.stringify({root:canonical(registration.root),turnRoot:canonical(registration.turnRoot),schedulerPath:canonical(registration.schedulerPath)});
+}
 function receiptRef(id: string): string { return `user:http-review:${id}`; }
 function receiptId(ref: string): string | null {
   return ref.match(/^user:http-review:([0-9a-f-]{36})$/i)?.[1].toLowerCase() ?? null;
@@ -114,8 +121,29 @@ function pendingAgentCorrection(state: ReviewState): boolean {
 }
 
 export class LocalReviewService {
+  private resultSourceStorage: { identity: string; withStorage: <T>(operation:()=>Promise<T>)=>Promise<T> } | null = null;
+  private resultSourceStarted = false;
+  /** Trusted composition only. Bind before source operations; never switch roots. */
+  bindResultSourceStorage(registration: { root:string;turnRoot:string;schedulerPath:string },
+    withStorage: <T>(operation:()=>Promise<T>)=>Promise<T>): void {
+    const identity=resultStorageIdentity(registration);
+    if(this.resultSourceStorage?.identity===identity)return;
+    if(this.resultSourceStorage||this.resultSourceStarted)throw Error("Review result storage cannot change after source operations");
+    this.resultSourceStorage={identity,withStorage};
+  }
+  /** Validate trusted integration readers before entering any source/native guard. */
+  assertResultSourceStorage(registration: { root:string;turnRoot:string;schedulerPath:string } | null): void {
+    if(registration===undefined)throw Error("Integration source requires explicit review result storage registration");
+    const identity=registration===null?null:resultStorageIdentity(registration);
+    if(identity!==(this.resultSourceStorage?.identity??null))
+      throw Error("Integration source must share the review result storage registration");
+  }
   async withResultSource<T>(operation:()=>Promise<T>):Promise<T> {
-    try{return await withResultSourceLock(this.proofs.root,operation)}
+    this.resultSourceStarted=true;
+    const run=()=>withResultSourceLock(this.proofs.root,operation);
+    // Native storage must precede the source gate in every Task and review path.
+    // Both guards support nested calls from the owning asynchronous operation.
+    try{return await (this.resultSourceStorage?this.resultSourceStorage.withStorage(run):run())}
     catch(error){if(error instanceof ResultSourceBusyError)throw new ReviewDecisionBusyError();throw error}
   }
   private async decisionLock<T>(id:string,operation:()=>Promise<T>):Promise<T> {

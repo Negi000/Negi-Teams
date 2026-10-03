@@ -188,7 +188,8 @@ try{
     }else if(setupStartup&&taskService)taskAuthoringService=await LocalTaskAuthoringService.open(setupStartup.authoring,taskService);
     if(integrationConfigPath){
       if(!reviewService)throw Error("Integration review requires authenticated reviews");
-      integrationReviewService=await LocalIntegrationReviewService.open(await readServiceConfig(integrationConfigPath),reviewService,taskAuthoringService);
+      integrationReviewService=await LocalIntegrationReviewService.open(await readServiceConfig(integrationConfigPath),reviewService,taskAuthoringService,
+        taskStorageForStartup(storageMode,{saved:!!setupStartup,legacyConfigured:legacyProjectConfiguration}));
     }
     if(knowledgeConfigPath){
       if(!taskService||!reviewService)throw Error("Knowledge requires authenticated Tasks and reviews");
