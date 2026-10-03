@@ -10,11 +10,15 @@ import ctypes
 from ctypes import wintypes
 import hashlib
 import json
+import marshal
 import os
 from pathlib import Path
 import re
 import stat
 import sys
+
+_LOADED_MODULE_CODE_SHA = hashlib.sha256(marshal.dumps(sys._getframe().f_code)).hexdigest()
+_LOADED_SOURCE_SHA = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 
 def regular(info, directory=False):

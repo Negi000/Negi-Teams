@@ -10,11 +10,16 @@ import argparse
 import hashlib
 import hmac
 import json
+import marshal
 import os
 from pathlib import Path
 import re
+import sys
 
 import negi_vault as vault
+
+_LOADED_MODULE_CODE_SHA = hashlib.sha256(marshal.dumps(sys._getframe().f_code)).hexdigest()
+_LOADED_SOURCE_SHA = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 UUID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
 HEX = re.compile(r"[0-9a-f]{64}")

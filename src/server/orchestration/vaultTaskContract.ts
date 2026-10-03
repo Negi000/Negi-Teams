@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, open, readFile, realpath } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import type { ContractRef } from "./singleTask.ts";
@@ -82,13 +82,15 @@ function currentVaultExport(vault: string, id: string, project: string): unknown
     env: { ...process.env, PYTHONIOENCODING: "utf-8" } }));
 }
 function compileContextPack(vault: string, contract: VaultTaskContract,
-                            role: "astra" | "sol", maxChars: number, knowledgeProofDirectory?: string): string {
+                            role: "astra" | "sol", maxChars: number, knowledgeProofDirectory?: string,
+                            contextCacheDirectory?: string): string {
   const script = bundledScript("negi_vault.py");
   const content = execFileSync("python", [script, "--vault", vault, "pack",
     "--project", contract.project, "--role", role, "--query", contract.objective,
     "--require", contract.vaultId, "--max-chars", String(maxChars), "--stdout",
     ...(contract.taskClass ? ["--task-class", contract.taskClass] : []),
-    ...(knowledgeProofDirectory ? ["--knowledge-proof-dir", knowledgeProofDirectory] : [])],
+    ...(knowledgeProofDirectory ? ["--knowledge-proof-dir", knowledgeProofDirectory] : []),
+    ...(contextCacheDirectory ? ["--cache-dir", contextCacheDirectory] : [])],
   { encoding: "utf8", windowsHide: true, maxBuffer: maxChars * 4 + 4096,
     env: { ...process.env, PYTHONIOENCODING: "utf-8" } });
   if (content.length > maxChars) throw new Error("Context Pack exceeds configured character limit");
@@ -252,10 +254,22 @@ export async function runSingleTaskFromVault(options: Omit<SingleTaskRunOptions,
   snapshotPath: string;
   maxContextChars?: number;
   knowledgeProofDirectory?: string;
+  contextCacheDirectory?: string;
 }) {
   const contract = await loadVaultTaskContract(options.vaultDirectory, options.snapshotPath, options.cwd);
   const vault = await realpath(resolve(options.vaultDirectory));
   const checkout = await realpath(resolve(options.cwd));
+  let contextCacheDirectory: string | undefined;
+  if (options.contextCacheDirectory) {
+    const raw = resolve(options.contextCacheDirectory);
+    const parent = await realpath(dirname(raw));
+    const actual = existsSync(raw) ? await realpath(raw) : join(parent, basename(raw));
+    if ((existsSync(raw) && (await lstat(raw)).isSymbolicLink()) ||
+        actual === vault || actual === checkout || inside(vault, actual) || inside(actual, vault) ||
+        inside(checkout, actual) || inside(actual, checkout))
+      throw new Error("Context cache must be separate from Vault and model checkout");
+    contextCacheDirectory = raw;
+  }
   if (options.knowledgeProofDirectory) {
     const raw = resolve(options.knowledgeProofDirectory), proof = await realpath(raw);
     if ((await lstat(raw)).isSymbolicLink() || proof === vault || inside(vault, proof) ||
@@ -266,7 +280,8 @@ export async function runSingleTaskFromVault(options: Omit<SingleTaskRunOptions,
   if (!Number.isSafeInteger(maxChars) || maxChars < 1000 || maxChars > 64_000) {
     throw new Error("Context Pack character limit invalid");
   }
-  const compile = (role: "astra" | "sol") => compileContextPack(vault, contract, role, maxChars, options.knowledgeProofDirectory);
+  const compile = (role: "astra" | "sol") => compileContextPack(vault, contract, role, maxChars,
+    options.knowledgeProofDirectory, contextCacheDirectory);
   const astraContext = compile("astra");
   const solContext = compile("sol");
   const out = await artifactDirectory(options.artifactDir, vault, checkout);

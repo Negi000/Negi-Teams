@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "negi_vault.py"
+sys.path.insert(0, str(MODULE_PATH.parent))
 SPEC = importlib.util.spec_from_file_location("negi_vault", MODULE_PATH)
 vault = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = vault

@@ -7,17 +7,20 @@ network service, Obsidian process, or the existing ebi-team runtime.
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from dataclasses import dataclass
 from datetime import date
 import hashlib
 import json
+import marshal
 import os
 from pathlib import Path
 import re
 import sys
 import tempfile
 
+_LOADED_MODULE_CODE_SHA = hashlib.sha256(marshal.dumps(sys._getframe().f_code)).hexdigest()
+_LOADED_SOURCE_SHA = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 COMPILER_VERSION = "phase2-3"
 DIRECTORIES = (
@@ -155,10 +158,7 @@ def parse_note(data: bytes, path: Path, relative: str) -> Note:
     for key in LIST_FIELDS:
         if len(props[key]) != len(set(props[key])):
             raise VaultError(f"{path}: {key}に重複がある")
-    for reference in props["source_refs"]:
-        local = Path(reference.split("#", 1)[0])
-        if local.is_absolute() and not local.is_file():
-            raise VaultError(f"{path}: ローカル出典が見つからない: {reference}")
+    validate_local_references(props, path)
     if any(role not in {"astra", "sol", "luna"} for role in props["roles"]):
         raise VaultError(f"{path}: rolesが不正")
     if "task_class" in props and (props["kind"] != "Task" or not isinstance(props["task_class"], str) or
@@ -176,6 +176,14 @@ def parse_note(data: bytes, path: Path, relative: str) -> Note:
         if props["id"].casefold() in source_ids or len(source_ids) != len(set(source_ids)):
             raise VaultError(f"{path}: Lessonの根拠IDが重複または自己参照")
     return Note(path, relative, props, "".join(lines[end + 1:]), sha256(data))
+
+
+def validate_local_references(properties, path):
+    # This input depends on the current filesystem, not the note's byte checksum.
+    for reference in properties["source_refs"]:
+        local = Path(reference.split("#", 1)[0])
+        if local.is_absolute() and not local.is_file():
+            raise VaultError(f"{path}: ローカル出典が見つからない: {reference}")
 
 
 def vault_root(raw: str) -> Path:
@@ -196,12 +204,26 @@ def _safe_note_path(root: Path, path: Path) -> bool:
     return True
 
 
-def load_notes(root: Path) -> dict[str, Note]:
+def load_notes(root: Path, cache=None, allow_private: bool = False) -> dict[str, Note]:
     notes: dict[str, Note] = {}
     for path in sorted(root.rglob("*.md")):
         if not _safe_note_path(root, path):
             continue
-        note = parse_note(path.read_bytes(), path, path.relative_to(root).as_posix())
+        if path.stat().st_size > MAX_NOTE_BYTES:
+            raise VaultError(f"ノートの上限超過: {path}")
+        raw = path.read_bytes()
+        relative, checksum = path.relative_to(root).as_posix(), sha256(raw)
+        inputs = {"path": relative, "sha256": checksum, "allow_private": allow_private}
+        stored = cache.get("l1", inputs) if cache is not None else None
+        if (isinstance(stored, dict) and set(stored) == {"properties", "body"} and
+                isinstance(stored["properties"], dict) and isinstance(stored["body"], str) and
+                isinstance(stored["properties"].get("id"), str)):
+            note = Note(path, relative, stored["properties"], stored["body"], checksum)
+            validate_local_references(note.properties, path)
+        else:
+            note = parse_note(raw, path, relative)
+            if cache is not None and (allow_private or note.properties["sensitivity"] != "private"):
+                cache.put("l1", inputs, {"properties": note.properties, "body": note.body})
         key = note.id.casefold()
         if key in notes:
             raise VaultError(f"ID重複: {note.id} / {notes[key].relative} / {note.relative}")
@@ -371,6 +393,90 @@ def build_pack(notes: dict[str, Note], project: str, role: str, query: str,
         if len(trial) <= max_chars:
             selected, mandatory, pack = trial_selected, trial_mandatory, trial
     return pack
+
+
+def compiler_fingerprint() -> str:
+    import negi_knowledge, negi_context_cache, negi_recover_writer
+    identities = [(__file__, _LOADED_MODULE_CODE_SHA, _LOADED_SOURCE_SHA),
+                  *((module.__file__, module._LOADED_MODULE_CODE_SHA, module._LOADED_SOURCE_SHA)
+                    for module in (negi_knowledge, negi_context_cache, negi_recover_writer))]
+    # Bind actual loaded module code, not successor bytes edited on disk. Rehashing
+    # disk alone could label a running A compiler's output with new B semantics.
+    for path, _code, source in identities:
+        if sha256(Path(path).read_bytes()) != source:
+            raise VaultError("Context Packの処理版が読み込み後に変化した。再起動が必要")
+    return sha256(json.dumps({"version": COMPILER_VERSION, "python": sys.version,
+        "code": {Path(path).name: code for path, code, _source in identities}},
+        sort_keys=True).encode())
+
+
+def source_fingerprint(root: Path) -> dict[str, str]:
+    result = {}
+    for path in sorted(root.rglob("*.md")):
+        if _safe_note_path(root, path):
+            if path.stat().st_size > MAX_NOTE_BYTES:
+                raise VaultError(f"ノートの上限超過: {path}")
+            result[path.relative_to(root).as_posix()] = sha256(path.read_bytes())
+    return result
+
+
+def authority_fingerprint(authority, notes):
+    return {"directory": os.path.normcase(str(authority.directory)) if authority is not None else None,
+            "lessons": {key: bool(authority.allows(note)) if authority is not None else not managed_knowledge_note(note)
+                        for key, note in sorted(notes.items()) if note.properties["kind"] == "Lesson"}}
+
+
+def compile_current_pack(root: Path, project: str, role: str, query: str,
+                         required_ids: list[str], max_chars: int, allow_private: bool = False,
+                         task_class: str | None = None, knowledge_proof_dir: str | None = None,
+                         cache_directory: str | None = None):
+    """Return exact fresh semantics; a cache can only reuse the same current snapshot."""
+    from negi_knowledge import KnowledgeAuthority
+    from negi_context_cache import ContextCache, CachePathError, CacheUnavailable, digest
+    processor = compiler_fingerprint()
+    with ExitStack() as boundary:
+        cache = None
+        stats = {"enabled": False}
+        if cache_directory:
+            try:
+                cache = boundary.enter_context(ContextCache(cache_directory, root, processor))
+                stats = {"enabled": True, "counts": cache.counts}
+            except CachePathError as error:
+                raise VaultError(str(error)) from error
+            except (CacheUnavailable, OSError, ValueError):
+                # Partial registration, contention or unsupported OS never promotes
+                # old bytes. Sources still undergo the full compilation and fences.
+                stats = {"enabled": False, "reason": "unavailable"}
+        notes = load_notes(root, cache, allow_private)
+        before = {note.relative: note.sha256 for note in notes.values()}
+        authority = KnowledgeAuthority(knowledge_proof_dir, root) if knowledge_proof_dir else None
+        permissions = authority_fingerprint(authority, notes)
+        epoch = digest({"sources": before, "authority": permissions, "processor": processor,
+                        "allow_private": allow_private})
+        inputs = {"epoch": epoch, "project": project, "role": role, "query": query,
+                  "required": sorted({item.casefold() for item in required_ids}), "max_chars": max_chars,
+                  "allow_private": allow_private, "task_class": task_class}
+        content = cache.get("l2", inputs) if cache is not None else None
+        hit = isinstance(content, str) and content.startswith(PACK_MARKER) and len(content) <= max_chars
+        if not hit:
+            content = build_pack(notes, project, role, query, required_ids, max_chars,
+                                 allow_private, task_class, authority)
+        # Read current source bytes and verify the signed authority again, including
+        # pending revocation where the Vault note has not yet been rewritten.
+        after_authority = KnowledgeAuthority(knowledge_proof_dir, root) if knowledge_proof_dir else None
+        for note in notes.values():
+            validate_local_references(note.properties, note.path)
+        if (source_fingerprint(root) != before or compiler_fingerprint() != processor or
+                authority_fingerprint(after_authority, notes) != permissions):
+            raise VaultError("Context Packの作成中に正本・承認・処理版が変化した。再読が必要")
+        if cache is not None:
+            try:
+                cache.prune(epoch)
+                if not hit:
+                    cache.put("l2", inputs, content, epoch)
+            except (CacheUnavailable, OSError, ValueError):
+                stats["maintenance_skipped"] = True
+        return content, stats
 
 
 def _atomic_write(path: Path, data: bytes, before_replace=None) -> None:
@@ -554,6 +660,8 @@ def main(argv=None) -> int:
     packing.add_argument("--allow-private", action="store_true")
     packing.add_argument("--task-class")
     packing.add_argument("--knowledge-proof-dir")
+    packing.add_argument("--cache-dir", help="Vault外のローカル派生cache（Windows。破損時は正本から再作成）")
+    packing.add_argument("--cache-stats", action="store_true", help="本文を含めないcache計数をstderrへ出力")
     pack_destination = packing.add_mutually_exclusive_group(required=True)
     pack_destination.add_argument("--out")
     pack_destination.add_argument("--stdout", action="store_true")
@@ -583,7 +691,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     try:
         root = vault_root(args.vault)
-        notes = load_notes(root)
+        notes = load_notes(root) if args.command != "pack" else None
         if args.command == "validate":
             print(f"検証成功: {len(notes)} notes / {root}")
         elif args.command == "search":
@@ -599,10 +707,11 @@ def main(argv=None) -> int:
                 raise VaultError(f"IDがない: {args.id}")
             print(note.path.read_text(encoding="utf-8-sig"), end="")
         elif args.command == "pack":
-            from negi_knowledge import KnowledgeAuthority
-            authority = KnowledgeAuthority(args.knowledge_proof_dir, root) if args.knowledge_proof_dir else None
-            content = build_pack(notes, args.project, args.role, args.query,
-                                 args.require, args.max_chars, args.allow_private, args.task_class, authority)
+            content, stats = compile_current_pack(root, args.project, args.role, args.query,
+                args.require, args.max_chars, args.allow_private, args.task_class,
+                args.knowledge_proof_dir, args.cache_dir)
+            if args.cache_stats:
+                print(json.dumps({"context_cache": stats}, sort_keys=True), file=sys.stderr)
             if args.stdout:
                 sys.stdout.write(content)
             else:

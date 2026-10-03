@@ -1,5 +1,7 @@
 # Negi-Teams Phase 2: 最小Vault連携
 
+2026-10-03追加: [Context Packの再利用と知識の失効](negi-teams-context-cache.md)を通常の登録Taskへ接続した。以下の初期CLI記録を保持し、L1/L2の現在条件・署名・処理版とWindows保存境界を追加して確認する。
+
 `scripts/negi_vault.py` は明示したローカルObsidian VaultのMarkdownを直接読む。既存のebi-team実行経路、認証、MCP、Codex設定は変更しない。モデル、Jev、ネットワークへの送信は行わない。後続のPhase 3ではオフラインの単一run台帳を追加したが、このVault CLIだけではrun起動・スケジューラ・Task Contract固定を行わない。
 
 ## 所有権と対象

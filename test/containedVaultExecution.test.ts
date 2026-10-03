@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -93,10 +93,17 @@ test("normal Vault Astra to Sol execution persists all Job receipts before settl
           timeoutMs: 5000 }] };
       const prepared = await prepareVaultRun(config), scheduler = new FileScheduler(config.schedulerPath);
       await submitVaultRun(prepared, scheduler);
-      const task = await executeVaultRun(prepared, scheduler);
+      const cache = join(root, "context-cache");
+      const task = await executeVaultRun(prepared, scheduler, undefined, {
+        contextCacheDirectory: cache, onApproval: () => { throw new Error("unexpected approval"); },
+        verifyApproval: async () => false });
       assert.equal(task.status, "ready_for_review"); assert.equal(task.acceptedBy, null);
       assert.deepEqual(task.attempts.map(a => [a.role, a.state]), [["astra", "completed"], ["sol", "completed"]]);
       assert.equal(task.verification?.outcome, "passed");
+      assert.equal((await readFile(join(cache, "cache-signing-key"))).length, 32);
+      const namespace = (await readdir(cache)).find(name => /^[0-9a-f]{64}$/.test(name))!;
+      const entries = await readdir(join(cache, namespace));
+      assert.equal(entries.filter(name => name.startsWith("l2-")).length, 2);
       assert.equal((await scheduler.read()).state!.entries[0].status, "verified");
       assert.equal(git(["rev-parse", "HEAD"]), head);
       assert.equal(await readFile(join(checkout, "docs", "base.txt"), "utf8"), "fixture\n");

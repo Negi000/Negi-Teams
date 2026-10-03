@@ -83,6 +83,7 @@ async function fixture(run: (data: {
           ledger: new FileTaskLedger(join(config.outputDir, "run.jsonl")), turnTimeoutMs: 1000,
           astra: { client: fake(config.astra.model), ...config.astra }, sol: { client: fake(config.sol.model), ...config.sol },
           knowledgeProofDirectory: hooks?.knowledgeProofDirectory,
+          contextCacheDirectory: hooks?.contextCacheDirectory,
           verify: async () => ({ outcome: "passed", evidenceRef: "synthetic:next-context" }) });
         await scheduler.append({ key: `${config.runId}:settle`, at: new Date().toISOString(), action: {
           type: "settle", workId: config.runId, outcome: "verified", evidenceRef: "synthetic:next-context", actualCostUsd: null } });
@@ -104,6 +105,7 @@ async function fixture(run: (data: {
     const service = await LocalKnowledgeService.open({ storageRoot: proof }, tasks, reviews);
     const pack = (taskClass?: string, authority = true) => execFileSync("python", [compiler, "--vault", vault,
       "pack", "--project", "fixture", "--role", "sol", "--query", "根拠", "--require", "TASK-NEXT", "--stdout",
+      "--cache-dir", join(dir, "task-state", "context-cache"),
       ...(taskClass ? ["--task-class", taskClass] : []), ...(authority ? ["--knowledge-proof-dir", proof] : [])],
       { encoding: "utf8", windowsHide: true, env: { ...process.env, PYTHONIOENCODING: "utf-8" } });
     await run({ dir, vault, checkout, proof, service, tasks, reviews, reviewConfig, catalog, artifactSha256, pack, prompts,
@@ -181,6 +183,28 @@ test("active edits require reapproval; source edits, old-byte rollback, forged r
     const data = JSON.parse(await readFile(receipt, "utf8")); data.receipt.data.op = "activate";
     await writeFile(receipt, JSON.stringify(data));
     assert.throws(() => f.pack("code-attribution"), /Knowledge/);
+  });
+});
+
+test("warm context cache withholds a signed pending revocation before the active note is replaced", async () => {
+  await fixture(async f => {
+    let row = await candidate(f);
+    row = await f.service.decide(row.id, "activate", { requestId: randomUUID(), expectedSha256: row.sha256 });
+    const active = await readFile(join(f.vault, "40_Lessons", `${row.id}.md`));
+    assert.match(f.pack("code-attribution"), /根拠として関数とファイルを記す/);
+    assert.match(f.pack("code-attribution"), /根拠として関数とファイルを記す/);
+    const lock = join(f.vault, ".negi-writer.lock");
+    await writeFile(lock, "synthetic-owned-lock\n");
+    try {
+      await assert.rejects(f.service.decide(row.id, "deprecate", { requestId: randomUUID(),
+        expectedSha256: row.sha256, reason: "作成途中でも失効を優先する" }), /Writer|lock/);
+      assert.deepEqual(await readFile(join(f.vault, "40_Lessons", `${row.id}.md`)), active);
+      assert.doesNotMatch(f.pack("code-attribution"), /NT-LESSON-/);
+      assert.doesNotMatch(f.pack("code-attribution"), /NT-LESSON-/);
+    } finally { await unlink(lock); }
+    row = (await f.service.list())[0];
+    assert.equal((await f.service.retry(row.id, row.sha256)).status, "deprecated");
+    assert.doesNotMatch(f.pack("code-attribution"), /NT-LESSON-/);
   });
 });
 

@@ -117,14 +117,21 @@ test("Vault-backed synthetic run blocks a Sol change outside the Task scope", as
       const packageFile = join(checkout, "package.json");
       await writeFile(packageFile, (await readFile(packageFile, "utf8")) + "\n");
     };
-    const state = await runSingleTaskFromVault({ runId: "run-scope", vaultDirectory: vault,
+    const scopeOptions = { runId: "run-scope", vaultDirectory: vault,
+      contextCacheDirectory: join(dir, "context-cache"),
       snapshotPath: snapshot, cwd: checkout,
       astra: { client: fake("gpt-6-astra", "Plan one change"), model: "gpt-6-astra", effort: "medium" },
       sol: { client: fake("gpt-6-sol", "Work finished", solWrite), model: "gpt-6-sol", effort: "medium" },
       ledger: new FileTaskLedger(join(dir, "run.jsonl")), artifactDir: join(dir, "artifacts"),
       turnTimeoutMs: 1000,
       verify: async () => { verified = true; return { outcome: "passed" as const, evidenceRef: "mock:passed" }; },
-    });
+    } satisfies Parameters<typeof runSingleTaskFromVault>[0];
+    for (const cache of [vault, join(vault, "cache"), checkout, join(checkout, "cache"), dir]) {
+      await assert.rejects(runSingleTaskFromVault({ ...scopeOptions, contextCacheDirectory: cache }),
+        /Context cache must be separate/);
+    }
+    assert.deepEqual(prompts, {});
+    const state = await runSingleTaskFromVault(scopeOptions);
     assert.equal(state.status, "blocked");
     assert.equal(verified, false);
     assert.match(state.verification?.evidenceRef ?? "", /package\.json/);
@@ -137,6 +144,7 @@ test("Vault-backed synthetic run blocks a Sol change outside the Task scope", as
       await writeFile(readme, (await readFile(readme, "utf8")) + "\nLocal fixture change.\n");
     };
     const allowedState = await runSingleTaskFromVault({ runId: "run-allowed", vaultDirectory: vault,
+      contextCacheDirectory: join(dir, "context-cache"),
       snapshotPath: snapshot, cwd: allowedCheckout,
       astra: { client: fake("gpt-6-astra", "Plan one change"), model: "gpt-6-astra", effort: "medium" },
       sol: { client: fake("gpt-6-sol", "Work finished", allowedWrite), model: "gpt-6-sol", effort: "medium" },
@@ -168,6 +176,7 @@ test("Vault-backed synthetic run blocks a Sol change outside the Task scope", as
     };
     const solPromptCount = prompts["gpt-6-sol"].length;
     const changedState = await runSingleTaskFromVault({ runId: "run-changed-context", vaultDirectory: vault,
+      contextCacheDirectory: join(dir, "context-cache"),
       snapshotPath: snapshot, cwd: changedCheckout,
       astra: { client: fake("gpt-6-astra", "Plan one change", changeLesson),
         model: "gpt-6-astra", effort: "medium" },

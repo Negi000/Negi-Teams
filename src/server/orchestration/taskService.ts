@@ -944,6 +944,7 @@ export class LocalTaskService {
             Date.now()+prepared.contract.limits.timeLimitMinutes*60_000):undefined,
           onCapacityReleased: () => this.pump(),
           knowledgeProofDirectory: this.knowledgeProofDirectory,
+          contextCacheDirectory: join(this.root, "context-cache"),
           verifyApproval: ({ event, state }) => this.verifyOperationDecision(this.registered(id), event, state),
           onApproval: (approval, decide) => {
             if (!this.approvals.has(id)) this.approvals.set(id, new Map());

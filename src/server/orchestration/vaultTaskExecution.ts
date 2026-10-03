@@ -29,6 +29,7 @@ export interface TaskExecutionHooks {
   executionOwner?: TaskExecutionOwner;
   admit?:TaskAdmissionGuard;
   knowledgeProofDirectory?: string;
+  contextCacheDirectory?: string;
   onApproval: (approval: TaskOperationApproval,
     decide: (allow: boolean, approvalRef: string, at: string, requestId: string) => Promise<void>) => void;
   verifyApproval: ReconciliationVerifier;
@@ -157,6 +158,7 @@ export async function executeVaultRun(prepared: PreparedVaultRun, scheduler: Fil
         }
         return await runSingleTaskFromVault({ ...options,
           knowledgeProofDirectory: hooks?.knowledgeProofDirectory,
+          contextCacheDirectory: hooks?.contextCacheDirectory,
           astra: { client: astra?.client ?? null as never, ...config.astra }, sol: { client: sol.client, ...config.sol },
           expectedModelProvider: "openai",
           onProviderBound: async (bound) => {
