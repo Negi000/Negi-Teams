@@ -2,6 +2,12 @@
 
 2026-10-03（JST）。基準は `NEGI_TEAMS_MASTER_PLAN.ja.md` のPhase 0〜8と `REQUIREMENTS_TRACEABILITY.ja.md`。この表は実装・合成テスト・実モデル観測・人間受入を分ける。Git管理外の実行証拠も参照しており、実装差分の公開を全Phaseの完了宣言とは扱わない。
 
+## 2026-10-03追加: native調査の保留とMaterialの読取継続
+
+[Luna調査の開始保留](negi-teams-luna-tasks.md#2026-10-03追記-native調査の開始を保留する)。Codex 0.160.0の設定再読込競合を私有CODEX_HOMEの実CLIで再現し、model turn0・元設定不変・Job終了を確認した。検査後の未知MCP起動を防ぐ強制policyが未対応のため、native研究のprepare/execute/clientと旧scheduled helperは実行枠・成果作成前に無条件holdする。通常write、metadata照合、保存済み成果のレビューは維持する。独立監査の2指摘を修正後に未解決の具体的指摘はなかった。
+
+通常TaskのM3画面は開始不可の理由を先に示し、同じTaskの更新中もpane・契約開閉・focusを保持する。最終GUI8case、明暗1440/375/320px、48px、横超過/console/page error0、HTTP409と要求/owner未作成、scheduler不変、通常Taskへの切替を確認した。関連51件は47成功・4件PENDING skip・失敗0、型/build成功。全件試験は途中停止のため全成功へ換算しない。実model研究・強制policy・approved Policyの通常接続、実機/人の受入とPhase0–8全体は未完。ゴールはACTIVE。
+
 ## 2026-10-03追加: Material 3の細幅と状態案内
 
 [狭い画面の見出しとTaskの状態案内](negi-teams/material3-expressive-ui.md#2026-10-03-狭い画面の見出しとtaskの状態案内)。共通の見出し/操作/chipをカード内で折り返し、スマホの作業段階を2列へ調整した。Taskでは現在の状態と次の操作を先に読み、内部の記録は展開して確認する。Task/原因変更時は閉じ、同じ記録の更新では展開を保持する。

@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { AppServerTransport } from "./appServerTransport.ts";
-import { RESEARCH_DISABLED_FEATURES, researchThreadConfig } from "./researchToolPolicy.ts";
+import { RESEARCH_DISABLED_FEATURES, assertResearchDispatchIsolation, researchThreadConfig } from "./researchToolPolicy.ts";
 
 type RecordValue = Record<string, unknown>;
 function record(value: unknown): RecordValue | null {
@@ -279,6 +279,7 @@ export class CodexAppServerClient {
     this.requireInitialized();
     if(options.readOnlyContract && (options.sandbox!=="read-only"||options.resident||options.dynamicTools?.length))
       throw Error("Research thread must be read-only without resident or dynamic tool authority");
+    if(options.readOnlyContract)assertResearchDispatchIsolation();
     if ((this.identity && this.identity.threadId !== oldThreadId) || this.threadRequestPending || this.needsReconciliation || !options.cwd || !options.model) {
       throw new Error("thread already started, uncertain, or options missing");
     }
@@ -407,7 +408,7 @@ export class CodexAppServerClient {
     this.turnRequestPending = true;
     this.dynamicCalls.clear();
     try {
-      if(this.researchCwd)await this.assertResearchToolAuthority(this.researchCwd,identity.threadId);
+      if(this.researchCwd)assertResearchDispatchIsolation();
       const result = record(await this.transport.request("turn/start", {
         threadId: identity.threadId, input: [{ type: "text", text, text_elements: [] }], effort,
       }));

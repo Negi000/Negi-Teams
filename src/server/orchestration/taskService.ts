@@ -88,6 +88,7 @@ export interface TaskRunView {
   astra: VaultRunConfig["astra"]; sol: VaultRunConfig["sol"];
   taskMode?:"read_only_research"; luna?:VaultRunConfig["luna"];
   status: string; canStart: boolean; canStop: boolean; live: boolean;
+  startHoldReason?: string;
   executionPhase: ScheduledPhase | null;
   stopRequested: boolean; error: string | null; verificationOutcome: string | null;
   acceptedBy: string | null; attempts: Array<{ role: string; model: string;
@@ -892,6 +893,13 @@ export class LocalTaskService {
     if(!request&&!entry&&!state&&!this.closing)try{startError=await this.startChecks.get(id)?.()??null}
     catch{startError="開始条件を照合できません。契約案の状態を確認してください。"}
     if(run.config.taskMode==="read_only_research"&&!this.reviews)startError="調査成果のレビューを準備してから開始してください。";
+    // The default native composition must expose its hold before creating an
+    // execution request. Trusted synthetic runtimes can still exercise review
+    // flows; the unconditional native prepare/execute/client gates own safety.
+    const nativeResearch=run.config.taskMode==="read_only_research"&&
+      (this.runtime.prepare===prepareVaultRun||this.runtime.execute===executeVaultRun);
+    const startHoldReason=nativeResearch&&!request&&!entry&&!state?
+      "Lunaの調査は準備中のため、まだ開始できません。契約と保存済みの成果は確認できます。":null;
     return { id, title: run.title, configSha256: run.configSha256,
       project: run.contract.project as string, objective: run.contract.objective as string,
       taskId: run.contract.vaultId as string, version: run.contract.version as number,
@@ -900,7 +908,8 @@ export class LocalTaskService {
       outOfScope: scope?.out ?? [], invariants: run.contract.invariants as string[] ?? [],
       verification: run.contract.verification as string[], astra: run.config.astra, sol: run.config.sol,
       ...(run.config.taskMode==="read_only_research"?{taskMode:run.config.taskMode,luna:run.config.luna}:{}),
-      status, executionPhase: entry?.phase ?? null, canStart: !request && !entry && !state && !this.closing && !startError,
+      status, executionPhase: entry?.phase ?? null, canStart: !request && !entry && !state && !this.closing && !startError && !startHoldReason,
+      ...(startHoldReason?{startHoldReason}:{}),
       canStop: Boolean(active || entry?.status === "queued"), live: Boolean(active || preparing && !error),
       stopRequested: active?.controller.signal.aborted ?? false,
       error: closedProjection&&!preflightClosed ? "終了判断の署名記録を照合できません。元の記録を保持して保存状態を確認してください。" :

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -33,7 +33,10 @@ function client(model: string, hold: Promise<void> = Promise.resolve()) {
   };
 }
 
-test("two independent read-only roles can run within two global slots", async () => {
+// These historical mock execution cases await an enforced native MCP policy.
+// They are pending, not evidence that research dispatch is currently available.
+const researchPending="Codex 0.160.0 has no process-local enforced empty MCP allowlist";
+test("two independent read-only roles can run within two global slots", {skip:researchPending}, async () => {
   const dir = await mkdtemp(join(tmpdir(), "negi-read-slots-"));
   try {
     const one = join(dir, "astra"), two = join(dir, "luna"), out = join(dir, "out");
@@ -75,7 +78,7 @@ test("two independent read-only roles can run within two global slots", async ()
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
-test("provider error leaves the read-only slot for reconciliation", async () => {
+test("provider error leaves the read-only slot for reconciliation", {skip:researchPending}, async () => {
   const dir = await mkdtemp(join(tmpdir(), "negi-read-error-"));
   try {
     const checkout = join(dir, "luna");
@@ -96,7 +99,7 @@ test("provider error leaves the read-only slot for reconciliation", async () => 
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
-test("opt-in dispatch pins one signed version while rollback affects the next turn; explicit profiles win", { skip: process.platform !== "win32" }, async () => {
+test("opt-in dispatch pins one signed version while rollback affects the next turn; explicit profiles win", { skip: researchPending }, async () => {
   const fixture = await policyFixture();
   try {
     const service = await LocalPolicyService.open(fixture.config, [fixture.checkout], fixture.secret);
@@ -137,7 +140,7 @@ test("opt-in dispatch pins one signed version while rollback affects the next tu
   } finally { await rm(fixture.directory, { recursive: true, force: true }); }
 });
 
-test("policy evidence failure stops dispatch without weakening read-only scheduler boundaries", async () => {
+test("policy evidence failure stops dispatch without weakening read-only scheduler boundaries", {skip:researchPending}, async () => {
   const dir = await mkdtemp(join(tmpdir(), "negi-read-policy-error-"));
   try {
     const checkout = join(dir, "checkout"); await mkdir(checkout);
@@ -151,4 +154,26 @@ test("policy evidence failure stops dispatch without weakening read-only schedul
       prompt: "Read-only", artifactDir: join(dir, "out"), timeoutMs: 1000, verify: async () => true }), /altered evidence/);
     assert.equal(provider.turns, 0); assert.equal((await scheduler.read()).state!.entries[0].status, "needs_reconciliation");
   } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("scheduled research is held for every role before claims, policy selection, artifacts or provider calls",async()=>{
+  const dir=await mkdtemp(join(tmpdir(),"negi-read-isolation-hold-"));
+  try{
+    const checkout=join(dir,"checkout"),out=join(dir,"out");await mkdir(checkout);
+    const scheduler=new FileScheduler(join(dir,"scheduler.jsonl"));
+    await scheduler.append(event("configure",{type:"configure",maxConcurrent:2,budgetUsd:0}));
+    for(const role of ["astra","sol","luna"] as const)await scheduler.append(event("submit-"+role,{type:"submit",work:{
+      id:role,parentId:null,dependencies:[],role,checkout,checkoutMode:"read",resources:[],reserveUsd:0}}));
+    const before=await readFile(scheduler.path);let policies=0,providerCalls=0;
+    for(const role of ["astra","sol","luna"] as const){
+      const provider={...client("gpt-6-"+role),initialize:async()=>{providerCalls++}};
+      await assert.rejects(runScheduledReadOnlyTurn({scheduler,dispatchKey:"dispatch-"+role,workId:role,client:provider,
+        cwd:checkout,model:"gpt-6-"+role,effort:"low",prompt:"Read the fixed scope",artifactDir:out,timeoutMs:1000,
+        approvedPolicy:{select:async()=>{policies++;return null}},verify:async()=>{throw Error("Must not verify")}}),/process-local MCP policy is not enforced/);
+      assert.equal(provider.turns,0);
+    }
+    assert.equal(providerCalls,0);assert.equal(policies,0);
+    assert.deepEqual(await readFile(scheduler.path),before);
+    assert.equal(await access(out).then(()=>true,()=>false),false);
+  }finally{await rm(dir,{recursive:true,force:true})}
 });

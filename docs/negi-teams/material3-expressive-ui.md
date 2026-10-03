@@ -2,6 +2,16 @@
 
 ユーザーの2026-10-01の追加要件。Phase 0–8の目的を維持し、元のebi-team UIから画面構造と操作の流れを作り変える。
 
+## 2026-10-03: 調査の開始保留と更新中の読取
+
+[native調査の権限競合](../negi-teams-luna-tasks.md#2026-10-03追記-native調査の開始を保留する)を実CLIで確認したため、開始前の現在地に「Lunaの調査は準備中のため、まだ開始できません。契約と保存済みの成果は確認できます。」を表示する。開始操作を隠し、内部原因は通常本文へ出さない。契約を読む操作と保存済み成果の確認は使える。通常Taskへ切り替えると、そのTaskの開始可否と案内に戻る。
+
+同じTaskを手動更新するとpaneが一度非表示になり、更新中に操作した契約の開閉とfocusが失われる問題もブラウザで観測した。同じTaskの読取中はcurrentとpaneを保持し、更新後も契約の開閉を保つ。別Task、対象不明、読み込み失敗の扱いと、照合確認の失効は維持する。
+
+最終compiled通常server、Cookie認証、一時Git/Vault、モデル未起動でGUI8case成功。ライト/ダークは実際のtheme操作と背景RGBで確認し、1440×1000・375×812・320×780でURL/title、空白/overlayなし、横超過なし、48px操作、下部navと案内の非重複、キーボード開閉と更新中の保持を確認した。直接HTTPの開始409、要求/owner未作成、scheduler不変、通常Taskの開始可表示とresearchへ戻る案内も確認した。console error/warning・page error0。最終320px darkと1440px light画像を直接確認し、編集した2ソースのSHA不変、私有server/browser終了を確認した。
+
+Browser plugin not availableのため既存Playwrightを使用した。初期QAのselector/cleanup誤り、更新中のfocus喪失を検出した失敗は最終成功に換算しない。script/画像/ログは公開差分外に保持する。実機safe-area/仮想キーボード、人の使いやすさの受入、実model調査と強制policyは残る。
+
 ## 2026-10-03: 狭い画面の見出しとTaskの状態案内
 
 0c0610bの画面を改めて操作すると、320pxの「まず、目的を統括へ」が横の操作に押されて細く折り返し、受入取消後の通常本文に内部の操作IDが表示されていた。共通の見出しを折り返せる配置にして、長い見出し・chip・操作もカード内に収めた。スマホの作業段階は2列で「計画・調査」を読み、PCの4列と一覧/詳細は維持する。[Material 3 Expressive](https://m3.material.io/)の色・形・type・motionを用いる既存の共有tokens上で調整した。

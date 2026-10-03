@@ -42,7 +42,7 @@ function basic(request: Record<string, unknown>): unknown {
   }
 }
 
-test("research thread pins never approval and disabled sandbox networking and rejects provider relaxation",async()=>{
+test("research native dispatch remains held even with clean metadata and a conforming provider reply",async()=>{
   const options={cwd:"E:/repo",model:"gpt-6-astra",sandbox:"read-only" as const,readOnlyContract:true as const};
   for(const response of [{approvalPolicy:"never",sandbox:{type:"readOnly",networkAccess:false}},
     {approvalPolicy:"on-request",sandbox:{type:"readOnly",networkAccess:false}},
@@ -53,11 +53,12 @@ test("research thread pins never approval and disabled sandbox networking and re
       request.method==="thread/start"?{...basic(request) as object,...response}:basic(request));
     try{
       await f.client.initialize();await f.client.discoverModels();
-      if(response.approvalPolicy==="never"&&response.sandbox?.type==="readOnly"&&response.sandbox.networkAccess===false)
-        assert.equal((await f.client.startThread(options)).threadId,"thread-a");
-      else {await assert.rejects(f.client.startThread(options),/different sandbox/);assert.equal(f.client.dispatchBlocked,true);}
-      const params=f.messages.find(m=>m.method==="thread/start")!.params as Record<string,unknown>;
-      assert.equal(params.approvalPolicy,"never");assert.deepEqual(params.config,researchThreadConfig());
+      await f.client.assertResearchToolAuthority(options.cwd);
+      const before=f.messages.length;
+      await assert.rejects(f.client.startThread(options),/process-local MCP policy is not enforced/);
+      assert.equal(f.messages.length,before);
+      assert.equal(f.messages.some(m=>m.method==="thread/start"||m.method==="turn/start"),false);
+      assert.equal(f.client.currentThread,null);
     }finally{f.client.close()}
   }
   const f=fakeServer(basic);
@@ -69,19 +70,19 @@ test("research thread pins never approval and disabled sandbox networking and re
   }finally{f.client.close()}
 });
 
-test("research refuses inherited external tool config, nonempty/partial inventory and late changes before any turn",async()=>{
+test("research metadata inspection rejects inherited external tool config, partial inventory and late changes",async()=>{
   const clean=researchThreadConfig(),options={cwd:"E:/repo",model:"gpt-6-astra",sandbox:"read-only" as const,readOnlyContract:true as const};
   const configs=[{}, {...clean,mcp_servers:{unsafe:{command:"must-not-start"}}}, {...clean,web_search:"live"},
     {...clean,features:{...clean.features,plugins:true}},{...clean,features:{}}];
   for(const config of configs){
     const f=fakeServer(request=>request.method==="config/read"?{config}:basic(request));
-    try{await f.client.initialize();await f.client.discoverModels();await assert.rejects(f.client.startThread(options),/external tool authority/);
+    try{await f.client.initialize();await f.client.discoverModels();await assert.rejects(f.client.assertResearchToolAuthority(options.cwd),/external tool authority/);
       assert.equal(f.messages.some(m=>m.method==="mcpServerStatus/list"||m.method==="thread/start"||m.method==="turn/start"),false);
     }finally{f.client.close()}
   }
   for(const inventory of [{data:[{name:"unexpected"}],nextCursor:null},{data:[],nextCursor:"more"},{data:[]}]){
     const f=fakeServer(request=>request.method==="config/read"?{config:clean}:request.method==="mcpServerStatus/list"?inventory:basic(request));
-    try{await f.client.initialize();await f.client.discoverModels();await assert.rejects(f.client.startThread(options),/inventory is not empty/);
+    try{await f.client.initialize();await f.client.discoverModels();await assert.rejects(f.client.assertResearchToolAuthority(options.cwd),/inventory is not empty/);
       assert.equal(f.messages.some(m=>m.method==="thread/start"||m.method==="turn/start"),false);
     }finally{f.client.close()}
   }
@@ -89,9 +90,10 @@ test("research refuses inherited external tool config, nonempty/partial inventor
   const f=fakeServer(request=>request.method==="config/read"?{config:changed?{...clean,mcp_servers:{late:{command:"must-not-start"}}}:clean}:
     request.method==="mcpServerStatus/list"?{data:[],nextCursor:null}:
     request.method==="thread/start"?{...basic(request) as object,approvalPolicy:"never",sandbox:{type:"readOnly",networkAccess:false}}:basic(request));
-  try{await f.client.initialize();await f.client.discoverModels();await f.client.startThread(options);changed=true;
-    await assert.rejects(f.client.startTurn("research","medium"),/external tool authority/);
-    assert.equal(f.client.dispatchBlocked,true);assert.equal(f.messages.filter(m=>m.method==="thread/start").length,1);
+  try{await f.client.initialize();await f.client.discoverModels();await f.client.assertResearchToolAuthority(options.cwd);changed=true;
+    await assert.rejects(f.client.assertResearchToolAuthority(options.cwd),/external tool authority/);
+    await assert.rejects(f.client.startThread(options),/process-local MCP policy/);
+    assert.equal(f.messages.some(m=>m.method==="thread/start"),false);
     assert.equal(f.messages.some(m=>m.method==="turn/start"),false);
   }finally{f.client.close()}
 });

@@ -2,6 +2,20 @@
 
 2026-10-03。Phase 4の限定実装。信頼済みのresearch設定を通常Taskと契約案へ接続し、Material 3 Expressiveで作成・担当表示・専用成果レビュー・署名付き受入/取消を扱えるようにした。全体完成・実Policy採用・実モデルの調査成功を表すものではない。
 
+## 2026-10-03追記: native調査の開始を保留する
+
+現在のCodex CLI 0.160.0では、researchのモデル実行を開始できない。`thread/start`内部でuser/project設定を再読込し、MCP tableを再帰mergeしてからruntimeを起動するため、直前のconfig/inventory検査だけでは未知MCPの追加を防げない。既知のMCP名を個別に無効化する案も採用しない。
+
+私有CODEX_HOMEに認証をコピーせず、空のauthority検査成功後に私有configだけへmarkerを書くMCPを追加した。実CLIのread-only/never/network=false thread作成でもmarkerが作られた。model turn0・authコピー0・私有auth.jsonなし・元configのSHA不変・Job activeProcesses0を確認し、同じ条件での安全な開始とは扱わない。
+
+`assertResearchDispatchIsolation`でprepare、prepared実行、clientのresearch thread/turn、旧scheduled read-only helperを無条件に保留する。通常Taskでは要求記録より先に開始不可を表示し、直接HTTP開始も409で拒否する。owner/実行枠/成果を作る前の停止を検証した。既存の差分を作るTask、成果の署名付きレビュー、受入/取消、読み取りだけのprovider照合は維持する。完全な合成runtimeでの検証をnative開始許可に換算しない。
+
+解除条件は、各processの`thread/start`に未知MCPを含む空allowlistを強制し、設定変更を挟む実CLI試験でmarker未作成を証明できること。Windows release 0.160.0にはrun単位のmanaged requirements注入の公開入口を確認できなかった。system pathはKnown Folder APIで解決するためPROGRAMDATA env変更でも分離されず、isolated homeだけではsystem/cloud設定を除外できない。普段の設定・認証やmachine-global requirementsを変更して解除しない。
+
+根拠は公式[Codex rust-v0.160.0](https://github.com/openai/codex/tree/rust-v0.160.0)、`app-server/src/request_processors/thread_processor.rs:1341`、`app-server/src/config_manager.rs:446`、`config/src/merge.rs:57`、`core/src/session/mcp_runtime.rs:281`、`config/src/loader/mod.rs:797`。以下は先行実装と合成試験の記録として保持する。
+
+関連の最終51件は47成功・4件PENDING skip・失敗0。4件は旧scheduled helperの成功/provider failure/Policy pin経路であり、強制policy導入時に再有効化する。通常writeのWindows Job終了証拠を含む試験は成功した。全リポジトリ試験は監査が途中で停止したため完走成功とは扱わない。Material画面の最終検証は[共通UIの記録](negi-teams/material3-expressive-ui.md#2026-10-03-調査の開始保留と更新中の読取)に示す。実model調査、approved Policyの通常選択、全73要件の完成は引き続き未完。
+
 ## 固定契約と実行設定
 
 activeなVault Taskのfrontmatterに `task_class: read_only_research` を明示する。通常と同じ目的・対象/対象外・参照対象パス・不変条件・受入条件・検証・差戻し条件・基準SHA・試行数/期限を必要とし、現在の原文とexportの一致、cleanなGit基準を実行直前に照合する。

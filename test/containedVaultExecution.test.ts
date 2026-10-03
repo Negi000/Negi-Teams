@@ -77,7 +77,7 @@ function note(id: string, kind: string, body: string, extra = "") {
     `version: 1\nupdated: 2026-10-02\nsensitivity: local\nsource_refs:\n  - user:fixture\n${extra}---\n${body}\n`;
 }
 
-for(const research of [false,true])test(research?"Vault Astra to Luna is read-only, automatically denies escalation and persists every native exit":"normal Vault Astra to Sol execution persists all Job receipts before settling its lease",
+for(const research of [false,true])test(research?"Vault native research is held before provider or scheduler side effects":"normal Vault Astra to Sol execution persists all Job receipts before settling its lease",
   { skip: process.platform !== "win32", timeout: 60_000 }, async () => {
     const root = await mkdtemp(join(tmpdir(), "negi-contained-vault-"));
     try {
@@ -117,6 +117,15 @@ for(const research of [false,true])test(research?"Vault Astra to Luna is read-on
         verification: [{ requirement: "check result", program: process.execPath,
           args: ["-e", research?"require('node:assert/strict').equal(require('node:fs').readFileSync('docs/base.txt','utf8'),'fixture\\n')":"require('node:assert/strict').equal(require('node:fs').readFileSync('docs/result.txt','utf8'),'fixture complete\\n')"],
           timeoutMs: 5000 }] };
+      if(research){
+        await assert.rejects(prepareVaultRun(config),/process-local MCP policy is not enforced/);
+        for(const path of [config.schedulerPath,config.outputDir,join(root,"methods.log")])
+          await assert.rejects(readFile(path),{code:"ENOENT"});
+        assert.equal(git(["status","--porcelain","--untracked-files=all"]),"");
+        assert.equal(git(["rev-parse","HEAD"]),head);
+        assert.equal(await readFile(join(checkout,"docs","base.txt"),"utf8"),"fixture\n");
+        return;
+      }
       const prepared = await prepareVaultRun(config), scheduler = new FileScheduler(config.schedulerPath);
       await submitVaultRun(prepared, scheduler);
       const cache = join(root, "context-cache");

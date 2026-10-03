@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { AppServerProcess } from "../master/appServerProcess.ts";
 import { boundedAppServerArgs, researchAppServerArgs, subscriptionChildEnv } from "../master/boundedAppServer.ts";
-import { RESEARCH_CODEX_VERSION } from "../master/researchToolPolicy.ts";
+import { RESEARCH_CODEX_VERSION, assertResearchDispatchIsolation } from "../master/researchToolPolicy.ts";
 import { FileScheduler } from "./scheduler.ts";
 import { FileTaskLedger, type ReconciliationVerifier, type TaskSnapshot, type TaskRole } from "./singleTask.ts";
 import type { CodexApprovalRequest } from "../master/appServerClient.ts";
@@ -51,6 +51,7 @@ export interface TaskExecutionHooks {
 }
 
 export async function prepareVaultRun(raw: VaultRunConfig): Promise<PreparedVaultRun> {
+  if(raw.taskMode==="read_only_research")assertResearchDispatchIsolation();
   const registered=await canonicalVaultRunRegistration(raw);
   const executionConfigSha256=hash(JSON.stringify({config:registered,snapshotSha256:hash(await readFile(registered.snapshot))}));
   const config = { ...registered, executable: await realpath(registered.executable) };
@@ -98,6 +99,7 @@ export async function executeVaultRun(prepared: PreparedVaultRun, scheduler: Fil
   const { config, contract } = prepared;
   assertVaultWorkerContract(config,contract);
   const workerProfile=vaultWorker(config),research=workerProfile.role==="luna";
+  if(research)assertResearchDispatchIsolation();
   // One deadline covers both roles and verification, not a fresh budget per turn.
   const deadline = AbortSignal.timeout(contract.limits.timeLimitMinutes * 60_000);
   const deadlineAtMs = Date.now() + contract.limits.timeLimitMinutes * 60_000;

@@ -4,6 +4,7 @@ import { mkdir, open, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { CodexAppServerClient, CodexTurnObservation } from
   "../master/appServerClient.ts";
+import { assertResearchDispatchIsolation } from "../master/researchToolPolicy.ts";
 import { FileScheduler, type SchedulerAction } from "./scheduler.ts";
 import type { ReadOnlyPolicySource, ReadOnlyPolicySelection } from "./policyService.ts";
 
@@ -46,6 +47,7 @@ export async function runScheduledReadOnlyTurn(options: ScheduledReadOnlyTurnOpt
       !Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1) {
     throw new Error("bounded read-only turn options invalid");
   }
+  assertResearchDispatchIsolation();
   const cwd = await realpath(resolve(options.cwd));
   const artifactDir = resolve(options.artifactDir);
   await mkdir(artifactDir, { recursive: true });
@@ -94,7 +96,7 @@ export async function runScheduledReadOnlyTurn(options: ScheduledReadOnlyTurnOpt
     try { await file.writeFile(selection, "utf8"); await file.sync(); } finally { await file.close(); }
     selectionRef = `${selectionPath}#sha256=${createHash("sha256").update(selection).digest("hex")}`;
     const thread = await options.client.startThread({ cwd, model,
-      sandbox: "read-only", instructions: "Work within the prompt. Do not edit files or spawn agents." });
+      sandbox: "read-only", readOnlyContract: true, instructions: "Work within the prompt. Do not edit files or spawn agents." });
     if (thread.rerouted || thread.resolvedModel !== model)
       throw new Error("read-only model rerouted");
     threadId = thread.threadId;
