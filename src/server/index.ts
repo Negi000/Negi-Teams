@@ -77,6 +77,7 @@ import { createProjectSetupHttp } from "./orchestration/projectSetupHttp.ts";
 import { startConfirmedSetupMaster } from "./orchestration/projectSetupStartup.ts";
 import { LocalStorageConsole } from "./orchestration/storageConsole.ts";
 import { createStorageHttp } from "./orchestration/storageHttp.ts";
+import { parseStorageMode, taskStorageForStartup, type StorageMode } from "./orchestration/storageStartup.ts";
 import { ChatAttachmentStore, MAX_ATTACHMENTS_PER_TURN } from "./chatAttachments.ts";
 import { shareChatImage } from "./chatImages.ts";
 import { configureFixedEbiLog, fixedEbiLogPath, logFixedEbi } from "./fixedEbiLog.ts";
@@ -125,6 +126,8 @@ const legacyProjectConfiguration=Boolean(process.env.NEGI_TASK_CONFIG||process.e
 if(process.env.NEGI_SETUP_ROOT&&!authConfig.token)throw Error("NEGI_SETUP_ROOT requires EBI_AUTH_TOKEN");
 const storageMaintenance=process.env.NEGI_STORAGE_MAINTENANCE==="1";
 if(storageMaintenance&&!authConfig.token)throw Error("Storage maintenance requires EBI_AUTH_TOKEN");
+let storageMode:StorageMode="legacy",storageModeInvalid=false;
+try{storageMode=parseStorageMode(process.env.NEGI_STORAGE_MODE)}catch{storageModeInvalid=true}
 let projectSetup:LocalProjectSetup|null=null,projectConfiguration:LocalProjectConfiguration|null=null;
 let bootConfiguration:ProjectConfiguration|null=null,configurationStartupHeld=false;
 try{
@@ -149,7 +152,8 @@ let integrationExecutionService:LocalIntegrationExecutionService|null=null;
 let knowledgeService:LocalKnowledgeService|null=null;
 let taskCatalog:unknown=null,storageStartupHeld=false;
 const executionHeld=()=>configurationStartupHeld||storageStartupHeld||storageMaintenance||!!setupStartup&&!setupModelsVerified;
-const storageHost=()=>({maintenance:storageMaintenance,executionHeld:executionHeld(),startupError:setupActivationError});
+const storageHost=()=>({maintenance:storageMaintenance&&!storageModeInvalid,executionHeld:executionHeld(),startupError:setupActivationError,
+  storageMode:storageModeInvalid?"invalid" as const:storageMode,indexedSetupAvailable:!!setupStartup&&!configurationStartupHeld&&!legacyProjectConfiguration});
 let storageConsole:LocalStorageConsole|null=null;
 const readServiceConfig=async(path:string,limit=256_000)=>{
   if(!isAbsolute(path)||!authConfig.token)throw Error("Service requires an absolute config path and EBI_AUTH_TOKEN");
@@ -163,12 +167,19 @@ try{
   if(taskCatalog){
     storageConsole=new LocalStorageConsole({...await LocalTaskService.inspectStorageRegistration(taskCatalog),
       masterId:setupStartup?"negi-master":process.env.NEGI_STORAGE_MASTER_ID??"negi-master"},storageHost);
-    if(!storageMaintenance)await storageConsole.assertLegacyExecutionAllowed();
+    if(storageModeInvalid)throw Error("Storage startup mode invalid");
+    if(!storageMaintenance){
+      taskStorageForStartup(storageMode,{saved:!!setupStartup,legacyConfigured:legacyProjectConfiguration});
+      if(storageMode==="indexed")await storageConsole.assertIndexedExecutionAllowed(setupStartup!.config.checkout);
+      else await storageConsole.assertLegacyExecutionAllowed();
+    }
   }
   if(!storageMaintenance&&!configurationStartupHeld){
+    if(storageModeInvalid||storageMode==="indexed"&&!taskCatalog)throw Error("Storage startup registration missing");
     const reviews=reviewConfigPath?await readServiceConfig(reviewConfigPath):setupStartup?.reviews;
     if(reviews)reviewService=await LocalReviewService.open(reviews);
-    if(taskCatalog)taskService=await LocalTaskService.open(taskCatalog);
+    if(taskCatalog)taskService=await LocalTaskService.open(taskCatalog,undefined,
+      taskStorageForStartup(storageMode,{saved:!!setupStartup,legacyConfigured:legacyProjectConfiguration}));
     if(taskService&&reviewService)await taskService.connectReviews(reviewService);
     if(process.env.NEGI_TASK_AUTHORING_CONFIG){
       if(!taskService)throw Error("Task authoring requires authenticated Tasks");
@@ -975,7 +986,7 @@ const wss = new WebSocketServer({
 wss.on("connection", (ws) => {
   clients.add(ws);
   // 接続直後にサーバ能力（監督が有効か）を送る。クライアントはこれで要約 UI の出し分けをする。
-  send(ws, { type: "capabilities", supervisor: supervisor.enabled, reviews: reviewService !== null, tasks: taskService !== null,taskAuthoring:taskAuthoringService!==null&&setupModelsVerified,projectSetup:!!authConfig.token });
+  send(ws, { type: "capabilities", supervisor: storageMode!=="indexed"&&supervisor.enabled, reviews: reviewService !== null, tasks: taskService !== null,taskAuthoring:taskAuthoringService!==null&&setupModelsVerified,projectSetup:!!authConfig.token,managedTasksOnly:storageMode==="indexed" });
   // master が ui:"chat" なら、registry より**先に** state と直近の会話を送る。
   // クライアントは「chatState を受けた id＝chat モードの master」と判定して xterm ペインを
   // 作らない分岐に入るので、registry を先に送ると一瞬だけ PTY ペインが生えてしまう。
@@ -1260,6 +1271,7 @@ async function handleSpawn(ws: WebSocket, msg: SpawnMessage): Promise<void> {
  */
 async function spawnAgent(params: GeneralizedSpawnParams): Promise<string> {
   if(executionHeld())throw Error("保存・起動条件を確認できないため開始を保留しています。");
+  if(storageMode==="indexed")throw Error("このワークスペースでは、作業画面から契約を確認して担当を開始してください。");
   const cwd = params.cwd && params.cwd.trim() ? params.cwd.trim() : DEFAULT_CWD;
 
   // 役割（EBI_ROLES）を解決する。後方互換: asEngineer=true は role="engineer" と等価。
@@ -1798,6 +1810,7 @@ async function summarizeAgent(
   id: string,
 ): Promise<{ ok: true; text: string } | { ok: false; reason: string }> {
   if(executionHeld())return {ok:false,reason:"保存・起動条件の確認中のため要約を保留しています。"};
+  if(storageMode==="indexed")return {ok:false,reason:"このワークスペースでは統括チャットから確認してください。"};
   const agent = registry.get(id);
   if (!agent) return { ok: false, reason: `agent が見つかりません: ${id}` };
   return supervisor.summarize(agent.getScrollback());
@@ -1845,7 +1858,7 @@ async function startFixedEbi(): Promise<void> {
       await projectConfiguration!.admit(bootConfiguration!.hash,()=>startMasterChatSession(spec,{...codexMasterLaunchOptions({model:spec.launch.model,extraArgs:[]},
         {...process.env,EBI_CODEX_READ_ONLY_MASTER:"1",EBI_CODEX_APP_SERVER_EXE:config.executable,EBI_CODEX_MASTER_EFFORT:config.astra.effort}),requiredModels:setupStartup!.requiredModels}));
       setupModelsVerified=true;
-      broadcast({type:"capabilities",supervisor:supervisor.enabled,reviews:reviewService!==null,tasks:taskService!==null,taskAuthoring:taskAuthoringService!==null,projectSetup:!!authConfig.token});
+      broadcast({type:"capabilities",supervisor:storageMode!=="indexed"&&supervisor.enabled,reviews:reviewService!==null,tasks:taskService!==null,taskAuthoring:taskAuthoringService!==null,projectSetup:!!authConfig.token,managedTasksOnly:storageMode==="indexed"});
       return;
     }
     // master には役割別 MCP config を spawn 直前に自動付与する（config への手書きを不要にし、
@@ -1883,7 +1896,7 @@ async function startFixedEbi(): Promise<void> {
       });
     }
   } catch (err) {
-    if(setupStartup)setupActivationError="担当モデル・ログイン・起動設定を確認できないため保留しています。現在の設定とサーバーの起動状態を確認してください。";
+    if(setupStartup&&!storageMaintenance&&!storageStartupHeld&&!configurationStartupHeld)setupActivationError="担当モデル・ログイン・起動設定を確認できないため保留しています。現在の設定とサーバーの起動状態を確認してください。";
     console.warn(`[ebi-team] 固定エビ config の読み込みに失敗（動的エビのみで継続）:`, err);
   }
 }

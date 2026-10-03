@@ -172,7 +172,7 @@ export class Workbench {
       (!query || `${t.title} ${t.project ?? ""} ${t.id}`.toLocaleLowerCase().includes(query)))
       .sort((a,b) => Number(taskNeedsAttention(b)) - Number(taskNeedsAttention(a)) || Number(a.status === "accepted") - Number(b.status === "accepted"));
     for (const t of rows) container.append(this.row(t.title, [t.project, t.resultRevisionCount ? `修正版 ${t.resultRevisionCount}` : null].filter(Boolean).join(" · "), `/tasks?run=${encodeURIComponent(t.id)}`, "task", taskStatusLabels[t.status] ?? t.status, taskNeedsAttention(t)));
-    if (!rows.length) this.empty(container, this.tasks.length ? "該当する作業はありません" : "登録されたTaskはありません", this.tasks.length ? "検索条件を変更してください。" : "VaultのTask契約と実行カタログを登録してください。");
+    if (!rows.length) this.empty(container, this.tasks.length ? "該当する作業はありません" : "登録されたTaskはありません", this.tasks.length ? "検索条件を変更してください。" : this.capabilities?.taskAuthoring ? "新しいTaskから依頼と条件を確認してください。統括チャットでも相談できます。" : "VaultのTask契約と実行カタログを登録してください。");
   }
   private renderTeam(): void {
     const container = this.node("wb-team-list"); container.replaceChildren();

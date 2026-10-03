@@ -371,6 +371,8 @@ export interface CapabilitiesMessage {
   tasks?: boolean;
   taskAuthoring?: boolean;
   projectSetup?: boolean;
+  /** Managed Task workflow; direct PTY additions are unavailable. */
+  managedTasksOnly?: boolean;
 }
 
 /** ダッシュボード: エビ 1 体分の使用状況（cost/context/model）。 */

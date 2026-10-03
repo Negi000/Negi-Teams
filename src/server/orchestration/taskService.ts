@@ -149,7 +149,8 @@ export class LocalTaskService {
   private constructor(private readonly root: string, private readonly runs: CatalogRun[],
     private readonly scheduler: FileScheduler, private readonly runtime: Runtime,
     private readonly operationProofs: HumanReviewProofStore, private readonly resultStore: TaskResultStore,
-    private readonly reconciliation: LocalTaskReconciliation, private readonly indexedRuntime: boolean) {
+    private readonly reconciliation: LocalTaskReconciliation, private readonly indexedRuntime: boolean,
+    private readonly runtimeInventory: RuntimeJournalInventory | null) {
     resultStore.subscribe(results => this.resultListener?.(results.filter(n =>
       runs.some(run => run.config.runId === n.runId && run.configSha256 === n.configSha256))));
   }
@@ -210,7 +211,7 @@ export class LocalTaskService {
     await scheduler.ensureSubscriptionConfiguration(capacity);
     const results = await TaskResultStore.open(join(root, "task-results"));
     const reconciliation=await LocalTaskReconciliation.open(join(root,"reconciliation-proofs"),runtime.inspectProvider);
-    return new LocalTaskService(root, runs, scheduler, runtime, operationProofs, results,reconciliation,inventory !== null);
+    return new LocalTaskService(root, runs, scheduler, runtime, operationProofs, results,reconciliation,inventory !== null,inventory);
   }
   /** Internal services share this exact writer, including its fixed runtime journal. */
   registeredScheduler(path: string): FileScheduler {
@@ -504,7 +505,11 @@ export class LocalTaskService {
   }
   private reconciliationSource(run:CatalogRun){
     return {config:run.config,configSha256:run.configSha256,snapshotSha256:run.snapshotSha256,
-      ledger:this.ledger(run),scheduler:this.scheduler,isActive:()=>this.active.has(run.config.runId)||this.closing};
+      ledger:this.ledger(run),scheduler:this.scheduler,isActive:()=>this.active.has(run.config.runId)||this.closing,
+      assertStorage:async()=>{
+        if(this.runtimeInventory&&(await this.runtimeInventory.audit()).state!=="clean")
+          throw Error("Task inspection storage requires reconciliation");
+      }};
   }
   async inspectReconciliation(id:string,configSha256:string,requestId:string):Promise<TaskReconciliationView>{
     const run=this.registered(id);if(configSha256!==run.configSha256)throw Error("Task reconciliation target changed");

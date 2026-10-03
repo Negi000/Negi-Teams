@@ -132,6 +132,7 @@ let activeId: string | null = new URLSearchParams(location.search).get("view") =
 let pendingSelectId: string | null = null;
 // 監督・要約機能が有効か（サーバの capabilities = サブスク claude CLI の有無で決まる）。
 let supervisorEnabled = false;
+let managedTasksOnly = false;
 
 /** 現在 active な viewer レコード（activeId が viewer id のとき）。無ければ null。 */
 function activeViewer(): ViewerRecord | null {
@@ -265,6 +266,10 @@ function handleServerMessage(msg: ServerMessage): void {
       addNotice("system", `エラー: ${msg.text}`);
       break;
     case "capabilities":
+      managedTasksOnly = Boolean(msg.managedTasksOnly);
+      for (const id of ["open-spawn", "open-spawn-mobile"]) document.getElementById(id)!.hidden = managedTasksOnly;
+      if (managedTasksOnly && spawnDialog.open) spawnDialog.close();
+      stage.querySelector(".empty")?.remove();renderEmpty();
       document.getElementById("nav-review")!.setAttribute("aria-disabled", String(!msg.reviews));
       document.getElementById("nav-task")!.setAttribute("aria-disabled", String(!msg.tasks));
       for (const [id, available] of [["nav-review", msg.reviews], ["nav-task", msg.tasks]] as const) document.getElementById(id)!.tabIndex = available ? 0 : -1;
@@ -469,12 +474,13 @@ function renderEmpty(): void {
       div.className = "empty";
       const title = document.createElement("h1"), copy = document.createElement("p"), actions = document.createElement("div");
       title.textContent = "チーム";
-      copy.textContent = "接続した担当はいません。担当を追加するか、作業一覧からTaskを確認してください。";
+      copy.textContent = managedTasksOnly ? "統括の接続を確認してください。作業一覧からTaskを確認できます。" : "接続した担当はいません。担当を追加するか、作業一覧からTaskを確認してください。";
       actions.className = "md-actions";
       const add = document.createElement("button"), overview = document.createElement("button");
       add.textContent = "担当を追加"; add.className = "md-primary"; add.onclick = () => spawnDialog.showModal();
       overview.textContent = "作業一覧を開く"; overview.className = "md-tonal"; overview.onclick = () => setActive(OVERVIEW_ID);
-      actions.append(add, overview); div.append(title, copy, actions);
+      if (!managedTasksOnly) actions.append(add);
+      actions.append(overview); div.append(title, copy, actions);
       stage.appendChild(div);
     }
   } else {

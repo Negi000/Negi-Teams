@@ -1,5 +1,5 @@
 // Explicit browser reconciliation. Inspecting never resumes a Task or releases a claim.
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { lstat, open, readFile, realpath, unlink } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative } from "node:path";
@@ -19,6 +19,7 @@ const byteHash=(value:Buffer|string)=>createHash("sha256").update(value).digest(
 export interface TaskReconciliationSource {
   config:VaultRunConfig;configSha256:string;snapshotSha256:string;
   ledger:FileTaskLedger;scheduler:FileScheduler;isActive:()=>boolean;
+  assertStorage?: ()=>Promise<void>;
 }
 export interface TaskReconciliationDossier {
   runId:string;configSha256:string;snapshotSha256:string;
@@ -184,7 +185,7 @@ export class LocalTaskReconciliation {
     if(!isReviewRequestId(intent.requestId)||!isReviewRequestId(intent.inspectionId)||! /^[0-9a-f]{64}$/.test(intent.dossierSha256)||Object.keys(intent).length!==3)
       throw Error("Task recovery intent invalid");return intent;
   }
-  private async sameLocalArtifacts(source:TaskReconciliationSource,dossier:TaskReconciliationDossier):Promise<boolean>{
+  private async sameLocalArtifacts(source:TaskReconciliationSource,dossier:TaskReconciliationDossier,includeCheckout=true):Promise<boolean>{
     const state=(await source.ledger.read()).state;
     const owner=await inspectTaskExecutionOwner(source.config.outputDir,source.config.runId,source.configSha256,`${source.config.runId}:dispatch`);
     // Historical signed previews lack the new derived job projection. Their raw
@@ -192,11 +193,37 @@ export class LocalTaskReconciliation {
     const {jobExit,...historicalOwner}=owner;void jobExit;
     return !source.isActive()&&Boolean(state&&await storedContract(source,state)===dossier.authoritySha256)&&
       reconciliationHash(dossier.owner.jobExit===undefined?historicalOwner:owner)===reconciliationHash(dossier.owner)&&
-      reconciliationHash(await checkoutFacts(source.config,dossier.contract.scope?.allowedPaths??[]))===reconciliationHash(dossier.checkout)&&
+      (!includeCheckout||reconciliationHash(await checkoutFacts(source.config,dossier.contract.scope?.allowedPaths??[]))===reconciliationHash(dossier.checkout))&&
       reconciliationHash(await artifactFacts(source.config,dossier.attempt))===reconciliationHash(dossier.artifact);
   }
   async inspect(source:TaskReconciliationSource,requestId:string):Promise<TaskReconciliationView>{
     if(!isReviewRequestId(requestId))throw Error("Task inspection request invalid");
+    return this.locked(source,requestId,()=>this.inspectLocked(source,requestId));
+  }
+  private async inStorage<T>(source:TaskReconciliationSource,operation:()=>Promise<T>):Promise<T>{
+    // Scheduler reads/appends own the native runtime guard. Git, provider RPC
+    // and proof scans must not hold it while other claims are completing.
+    await source.assertStorage?.();return operation();
+  }
+  /** A retained Task already occupies its scheduler claim. Serialize its
+   * read-only provider inspection without blocking other Tasks' journal writes.
+   * A crash leaves this record held; no PID guess or automatic lock removal. */
+  private async locked<T>(source:TaskReconciliationSource,requestId:string,operation:()=>Promise<T>):Promise<T>{
+    const path=join(source.config.outputDir,"reconciliation.lock"),lock=await open(path,"wx",0o600);
+    const identity=await lock.stat(),bytes=JSON.stringify({schema:"negi-task-inspection-owner/1",id:randomUUID(),requestId,
+      runId:source.config.runId,configSha256:source.configSha256,pid:process.pid,at:new Date().toISOString()})+"\n";
+    let published=false;
+    try{await lock.writeFile(bytes);await lock.sync();published=true;return await operation()}
+    finally{
+      await lock.close();
+      if(published){const current=await lstat(path);
+        if(current.isSymbolicLink()||!current.isFile()||current.dev!==identity.dev||current.ino!==identity.ino||
+          (await regular(path,32000))?.toString("utf8")!==bytes)throw Error("Task inspection owner changed; preserve the lock");
+        await unlink(path);
+      }
+    }
+  }
+  private async inspectLocked(source:TaskReconciliationSource,requestId:string):Promise<TaskReconciliationView>{
     const pending=await this.intent(source);
     if(pending){const original=await this.proofs.read(pending.inspectionId);
       if(!original||original.caseId!==source.config.runId||original.data.configSha256!==source.configSha256||original.artifactSha256!==pending.dossierSha256)
@@ -208,14 +235,18 @@ export class LocalTaskReconciliation {
       return view;}
     const old=await this.proofs.read(requestId);
     if(old){if(old.caseId!==source.config.runId||old.data.configSha256!==source.configSha256)throw Error("Inspection identity reused");return this.view(old)}
-    const dossier=await localDossier(source);
+    const dossier=await this.inStorage(source,()=>localDossier(source));
     if(dossier.attempt.threadId&&dossier.attempt.turnId){
       try{dossier.provider=await this.inspectProvider(source.config,dossier.attempt.threadId,dossier.attempt.turnId)}
       catch{dossier.providerError="プロバイダーの保存状態を取得できません。ログインと接続を確認してください。"}
     }
-    const receipt=await this.proofs.create({id:requestId,action:"task-inspect",caseId:source.config.runId,runId:source.config.runId,
-      artifactSha256:reconciliationHash(dossier),verificationRef:null,data:{configSha256:source.configSha256,dossier:JSON.stringify(dossier)}});
-    return this.view(receipt);
+    return this.inStorage(source,async()=>{
+      if(reconciliationHash(await localDossier(source))!==reconciliationHash(withoutProvider(dossier)))
+        throw Error("Task facts changed while inspecting provider");
+      const receipt=await this.proofs.create({id:requestId,action:"task-inspect",caseId:source.config.runId,runId:source.config.runId,
+        artifactSha256:reconciliationHash(dossier),verificationRef:null,data:{configSha256:source.configSha256,dossier:JSON.stringify(dossier)}});
+      return this.view(receipt);
+    });
   }
   verifier(source:Pick<TaskReconciliationSource,"config"|"configSha256">):ReconciliationVerifier{
     return async({event,state,events})=>{
@@ -234,8 +265,7 @@ export class LocalTaskReconciliation {
   async close(source:TaskReconciliationSource,requestId:string,inspectionId:string,dossierSha256:string):Promise<void>{
     if(!isReviewRequestId(requestId)||!isReviewRequestId(inspectionId)||source.isActive())throw Error("Task close request unavailable");
     requestId=requestId.toLowerCase();inspectionId=inspectionId.toLowerCase();
-    const lockPath=join(source.config.outputDir,"reconciliation.lock"),lock=await open(lockPath,"wx",0o600);
-    try{
+    return this.locked(source,requestId,async()=>{
       const original=await this.proofs.read(inspectionId);
       if(!original||original.caseId!==source.config.runId||original.data.configSha256!==source.configSha256||original.artifactSha256!==dossierSha256)
         throw Error("Task inspection changed");
@@ -246,13 +276,17 @@ export class LocalTaskReconciliation {
       let receipt=await this.proofs.read(requestId);
       if(receipt){if(receipt.action!=="task-close"||receipt.caseId!==source.config.runId||receipt.artifactSha256!==dossierSha256||
         receipt.data.inspectionId!==inspectionId||receipt.data.configSha256!==source.configSha256)throw Error("Task close request identity reused")}
-      else{
-        const current=await localDossier(source);
+      let fresh:ProviderTurnEvidence|null=null;
+      if(!receipt){
+        const current=await this.inStorage(source,()=>localDossier(source));
         if(reconciliationHash(current)!==reconciliationHash(withoutProvider(dossier)))throw Error("Task facts changed after inspection");
-        const fresh=await this.inspectProvider(source.config,dossier.attempt.threadId!,dossier.attempt.turnId!);
+        fresh=await this.inspectProvider(source.config,dossier.attempt.threadId!,dossier.attempt.turnId!);
         if(reasons({...dossier,provider:fresh}).length||fresh.status!==dossier.provider?.status||
           reconciliationHash(fresh.processSafety)!==reconciliationHash(dossier.provider?.processSafety))throw Error("Provider terminal state changed");
-        // Re-pin after the provider read; a later host write must not be hidden by a saved observation.
+      }
+      await this.inStorage(source,async()=>{
+      if(!receipt){
+        // Re-pin after the provider read and a fresh runtime audit.
         if(source.isActive()||reconciliationHash(await localDossier(source))!==reconciliationHash(withoutProvider(dossier)))
           throw Error("Task facts changed while checking provider");
         if(!intent){const f=await open(join(source.config.outputDir,"recovery-close.json"),"wx",0o600);
@@ -272,8 +306,11 @@ export class LocalTaskReconciliation {
           return !source.isActive()&&reconciliationHash(entry)===reconciliationHash(dossier.scheduler.entry)&&
             reconciliationHash(current.events.slice(0,dossier.scheduler.count))===dossier.scheduler.sha256&&
             ledger.events.at(-1)?.key===key&&ledger.state?.status==="stopped"&&
-            await this.sameLocalArtifacts(source,dossier);
+            // The checkout was rechecked above. The scheduler guard protects
+            // saved execution facts, not external edits to the checkout.
+            await this.sameLocalArtifacts(source,dossier,false);
         });
-    }finally{await lock.close();await unlink(lockPath)}
+      });
+    });
   }
 }

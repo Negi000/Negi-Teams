@@ -2,6 +2,12 @@
 
 ユーザーの2026-10-01の追加要件。Phase 0–8の目的を維持し、元のebi-team UIから画面構造と操作の流れを作り変える。
 
+## 2026-10-03: 保存の登録から通常の作業へ
+
+[登録した保存先からの通常起動](../negi-teams-indexed-startup.md)を接続した。登録完了、起動条件の確認中/保留、通常起動を区別し、確認できた場合は「作業一覧へ」を表示する。管理者向け起動設定はdetailsに収め、通常の依頼画面には持ち込まない。保存状態のカードに28pxの丸みとPC/スマホの余白を付け、通信失敗時は古い次の操作を隠す。登録済み担当を使う構成では、開始できないPTY追加・独立要約を表示しない。
+
+Chrome/Chromium1440/375/320px、明暗、48px、reduced motion、キーボード、保存確認→作業一覧→統括チャット→合成送信1回→再読み込み→新しいTaskを確認した。空Taskの案内は「新しいTask」とチャットから依頼を確認する文へ切り替えた。送信bottom712px < 下部ナビtop740px、横超過なし。意図したGET失敗1件の回復後に予期しないconsole/page errorは0。実モデル品質、実機safe-area/キーボード、人の受入、全Phaseの完成は別の残条件である。
+
 ## 2026-10-02: 端末操作の共通デザインとCtrl状態
 
 チーム画面の端末ヘッダー、担当・接続先のchip、終了操作、スマホの入力補助を共通のMaterial tokensへ揃えた。端末本文のANSI出力は従来の黒背景で保持する。スマホは8キーを4列・2行へ並べ、48px以上の操作領域と下部navigationとの余白を確保する。Ctrlは`aria-pressed`とtonalな選択状態、矢印はキー名、Ctrl+Cは中断キーとして説明する。Web上の48pxは本UIの設計値であり、Androidの48dpと実機の物理寸法を同一視しない（[Androidのtouch target guidance](https://support.google.com/accessibility/android/answer/7101858?hl=en-GB)）。

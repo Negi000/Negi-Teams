@@ -14,6 +14,8 @@ export interface StorageDecision {
 }
 export interface StorageConsoleState {
   maintenance: boolean; executionHeld: boolean; startupError: string | null;
+  storageMode?: "legacy" | "indexed" | "invalid";
+  indexedSetupAvailable?: boolean;
 }
 const operations: readonly StorageOperation[] = ["authority-initialize", "stage-adopt", "runtime-adopt", "database-recover"];
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -30,7 +32,7 @@ export function checkedStorageDecision(raw: unknown): StorageDecision {
 }
 
 /** Fixed server registration. Neither paths nor a storage mode come from HTTP.
- * Normal execution remains disabled after adoption; this console never starts,
+ * Adoption remains separate from normal server startup; this console never starts,
  * dispatches, retries or reports completion of a provider operation. */
 export class LocalStorageConsole {
   readonly registrationSha256: string;
@@ -53,6 +55,16 @@ export class LocalStorageConsole {
     await new MasterConversationAuthority({ ...this.registration,
       scheduler: new FileScheduler(this.registration.schedulerPath) }).assertStorageCompatible();
   }
+  /** Validate the exact registered Master before any Task state is opened.
+   * Pending/unknown work stays held; startup never adopts, repairs or resends. */
+  async assertIndexedExecutionAllowed(cwd: string) {
+    await this.requireExistingAuthority();
+    const bootstrap = await this.bootstrap.status();
+    if (!["ready", "existing"].includes(bootstrap.state)) throw Error("Storage preparation requires reconciliation");
+    await new MasterConversationAuthority({ ...this.registration,
+      scheduler: new FileScheduler(this.registration.schedulerPath),
+      stageStorage: "indexed", runtimeStorage: "indexed" }).assertStartupSafe(cwd);
+  }
   private async requireExistingAuthority() {
     const root = await lstat(this.registration.root), key = await lstat(join(this.registration.root, "signing-key.json"));
     if (!root.isDirectory() || root.isSymbolicLink() || !key.isFile() || key.isSymbolicLink()) throw Error("Existing storage authority required");
@@ -67,10 +79,11 @@ export class LocalStorageConsole {
       try { const result = await this.stage.audit();stage = { state: result.state, artifactCount: result.artifactCount }; } catch {}
       try { const result = await this.runtime.audit();runtime = { state: result.state, artifactCount: result.artifactCount }; } catch {}
     }
-    const state = this.host();
+    const state = this.host(), bootstrap = await this.bootstrap.status();
     return { ...state, registration: this.registration, registrationSha256: this.registrationSha256,
       stage: { ...stage, scope: "master" as const, masterId: this.registration.masterId },
-      runtime: { ...runtime, scope: "root" as const }, bootstrap: await this.bootstrap.status(),
+      runtime: { ...runtime, scope: "root" as const }, bootstrap,
+      registrationReady: ["ready", "existing"].includes(bootstrap.state) && stage.state === "clean" && runtime.state === "clean",
       applying: this.applying, canApply: state.maintenance && state.executionHeld && !this.applying };
   }
   async preview(operation: StorageOperation) {

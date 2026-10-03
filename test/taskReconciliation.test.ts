@@ -17,6 +17,7 @@ import { inspectTaskExecutionOwner } from "../src/server/orchestration/taskExecu
 import type { VaultRunConfig } from "../src/server/orchestration/vaultRunConfig.ts";
 import type { VaultTaskContract } from "../src/server/orchestration/vaultTaskContract.ts";
 import { WindowsProcessTree } from "../src/server/master/windowsProcessTree.ts";
+import { LocalStorageConsole } from "../src/server/orchestration/storageConsole.ts";
 
 const git=(cwd:string,args:string[])=>execFileSync("git",args,{cwd,windowsHide:true,stdio:["ignore","pipe","pipe"]}).toString().trim();
 async function fixture(operation:(f:Awaited<ReturnType<typeof setup>>)=>Promise<void>,verificationUnknown=false){const f=await setup(verificationUnknown);try{await operation(f)}finally{f.release();await f.service.close();await rm(f.root,{recursive:true,force:true})}}
@@ -72,6 +73,31 @@ async function start(f:Awaited<ReturnType<typeof setup>>,live=false){
   const until=Date.now()+5000;for(;;){const view=await f.service.snapshot(v.id);if(view.status==="needs_reconciliation"&&(live||!view.live))return view;
     if(Date.now()>until)throw Error("Fixture did not settle");await new Promise(resolve=>setTimeout(resolve,10))}
 }
+test("indexed inspection serializes one Task, permits other scheduler writes during provider read and rejects stale facts",{skip:process.platform!=="win32"},async()=>fixture(async f=>{
+  const original=await start(f);await f.service.close();
+  const registration={...await LocalTaskService.inspectStorageRegistration(f.catalog),masterId:"negi-master"};
+  const storage=new LocalStorageConsole(registration,()=>({maintenance:true,executionHeld:true,startupError:null}));
+  for(const operation of ["authority-initialize","stage-adopt","runtime-adopt"] as const){const p=await storage.preview(operation);await storage.apply(p.decision)}
+  let release!:()=>void,entered!:()=>void,calls=0;
+  const gate=new Promise<void>(accept=>{release=accept}),observed=new Promise<void>(accept=>{entered=accept});
+  const tasks=await LocalTaskService.open(f.catalog,{...f.runtime,inspectProvider:async(...args:Parameters<typeof f.runtime.inspectProvider>)=>{
+    calls++;entered();await gate;return f.runtime.inspectProvider(...args);
+  }},{storage:"indexed"});
+  try{
+    const inspection=tasks.inspectReconciliation(original.id,original.configSha256,randomUUID());
+    // Attach the expected rejection before running the concurrent operations.
+    const result=assert.rejects(inspection,/Task facts changed while inspecting/);
+    await observed;
+    await assert.rejects(tasks.inspectReconciliation(original.id,original.configSha256,randomUUID()),{code:"EEXIST"});assert.equal(calls,1);
+    const scheduler=tasks.registeredScheduler(f.config.schedulerPath);
+    await scheduler.append({key:"other-task-capacity",at:new Date().toISOString(),action:{type:"set_capacity",capacity:{maxConcurrent:2,planners:1,workers:1},sourceRef:"user:fixture"}});
+    // Reaching this write before releasing the provider proves the root guard
+    // was not retained over the read RPC; no wall-clock sleep assertion needed.
+    release();await result;
+    assert.equal((await scheduler.read()).state!.entries[0].status,"needs_reconciliation");
+    assert.equal(calls,1);assert.equal((await tasks.snapshot(original.id)).status,"needs_reconciliation");
+  }finally{release();await tasks.close()}
+}));
 test("unknown verification after completed Sol remains inspectable without enabling close",async()=>fixture(async f=>{
   f.setStatus("completed");const v=await start(f),before=await readFile(join(f.checkout,"docs/result.txt"));
   assert.equal((await new FileTaskLedger(join(f.config.outputDir,"run.jsonl")).read()).state?.status,"blocked");
