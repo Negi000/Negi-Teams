@@ -16,6 +16,7 @@ import {
   tokenMatches,
   parseCookie,
   loadAuthConfig,
+  loginPageHtml,
   type AuthConfig,
 } from "../src/server/auth.ts";
 
@@ -122,6 +123,29 @@ test("parseCookie: 非該当 → null", () => {
 });
 test("parseCookie: ヘッダ無し → null", () => {
   assert.equal(parseCookie(undefined, "ebi_auth"), null);
+});
+test("parseCookie: 壊れたpercent encodingは認証失敗として扱う", () => {
+  assert.equal(parseCookie("ebi_auth=%GG", "ebi_auth"), null);
+  assert.equal(authorize(fakeReq({ remoteAddress: "10.0.0.5",
+    headers: { cookie: "ebi_auth=%GG" } }), false, TOKEN).ok, false);
+});
+
+test("login画面は共有tokenをJavaScript保存領域へ複製しない", () => {
+  const html = loginPageHtml();
+  assert.match(html, /localStorage\.removeItem\("ebi_auth_token"\)/);
+  assert.doesNotMatch(html, /localStorage\.(?:getItem|setItem)|sessionStorage|indexedDB/);
+  assert.match(html, /fetch\("\/login"/);
+});
+
+test("login return path is limited to local task and review pages", () => {
+  assert.match(loginPageHtml("/reviews"), /location.href = "\/reviews"/);
+  assert.match(loginPageHtml("/tasks"), /location.href = "\/tasks"/);
+  assert.ok(loginPageHtml("/tasks?run=saved-task.1").includes('location.href = "/tasks?run=saved-task.1"'));
+  for(const path of ['/tasks?run=x&next=https://outside.example','/tasks?run=";alert(1)//','/tasks?run=x#fragment'])
+    assert.match(loginPageHtml(path),/location.href = "\/"/);
+  for(const path of ["/setup","/storage","/task-plans","/integrations"])assert.ok(loginPageHtml(path).includes(`location.href = "${path}"`));
+  for(const path of ["//outside.example/setup","/setup?next=https://outside.example","/setup\";alert(1)//"])assert.match(loginPageHtml(path),/location.href = "\/"/);
+  assert.match(loginPageHtml("https://outside.example/"), /location.href = "\/"/);
 });
 
 // ===== loadAuthConfig =====

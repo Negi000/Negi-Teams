@@ -1,5 +1,7 @@
 node_modules/
 dist/
+__pycache__/
+*.pyc
 .ebi-team/
 *.log
 .DS_Store
@@ -7,6 +9,8 @@ ebi-team.config.json
 .claude/
 .env
 !.env.sample
+.playwright-cli/
+output/playwright/
 
 # imagegen エビの生成物置き場（採否前の作業置き場・コミットしない）
 tmp/images/

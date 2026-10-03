@@ -1,9 +1,9 @@
 // .env をリポジトリルートから最初に読み込む（他 import が module-level で process.env を読む前に適用）。
-import { loadedEnvKeys } from "./env.ts";
+import { dotenvKeys, loadedEnvKeys } from "./env.ts";
 import { createServer, type IncomingMessage } from "node:http";
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { dirname, join, extname, normalize } from "node:path";
+import { dirname, isAbsolute, join, extname, normalize, relative, sep } from "node:path";
 import { WebSocketServer, WebSocket } from "ws";
 import {
   Registry,
@@ -56,6 +56,30 @@ import {
   applyMasterUiOverride,
 } from "./fixedEbi.ts";
 import { MasterSession, sanitizeReplyRef } from "./master/session.ts";
+import { CodexAppServerBrain } from "./master/codexAppServerBrain.ts";
+import { registeredTaskTools } from "./orchestration/taskDispatchTools.ts";
+import { codexMasterLaunchOptions } from "./master/codexMasterLaunch.ts";
+import { LocalReviewService } from "./orchestration/reviewService.ts";
+import { createReviewHttp } from "./orchestration/reviewHttp.ts";
+import { LocalKnowledgeService } from "./orchestration/knowledgeService.ts";
+import { createKnowledgeHttp } from "./orchestration/knowledgeHttp.ts";
+import { LocalPolicyService } from "./orchestration/policyService.ts";
+import { createPolicyHttp } from "./orchestration/policyHttp.ts";
+import { LocalIntegrationReviewService } from "./orchestration/integrationReviewService.ts";
+import { LocalTaskService,preflightClosureForStartup } from "./orchestration/taskService.ts";
+import { createTaskHttp } from "./orchestration/taskHttp.ts";
+import { LocalTaskAuthoringService } from "./orchestration/taskAuthoring.ts";
+import { createTaskAuthoringHttp } from "./orchestration/taskAuthoringHttp.ts";
+import { createConversationHttp } from "./orchestration/conversationHttp.ts";
+import { LocalIntegrationExecutionService } from "./orchestration/integrationExecution.ts";
+import { createIntegrationHttp } from "./orchestration/integrationHttp.ts";
+import { LocalProjectSetup } from "./orchestration/projectSetup.ts";
+import { LocalProjectConfiguration, type ConfigurationAdmission, type ProjectConfiguration } from "./orchestration/projectConfiguration.ts";
+import { createProjectSetupHttp } from "./orchestration/projectSetupHttp.ts";
+import { startConfirmedSetupMaster } from "./orchestration/projectSetupStartup.ts";
+import { LocalStorageConsole } from "./orchestration/storageConsole.ts";
+import { createStorageHttp } from "./orchestration/storageHttp.ts";
+import { parseStorageMode, taskStorageForStartup, type StorageMode } from "./orchestration/storageStartup.ts";
 import { ChatAttachmentStore, MAX_ATTACHMENTS_PER_TURN } from "./chatAttachments.ts";
 import { shareChatImage } from "./chatImages.ts";
 import { configureFixedEbiLog, fixedEbiLogPath, logFixedEbi } from "./fixedEbiLog.ts";
@@ -99,6 +123,124 @@ const HOST = process.env.EBI_HOST ?? "127.0.0.1";
 // 未設定なら token=null（＝非 loopback からのアクセスは全拒否の安全側デフォルト）。
 // loopback（母艦ローカル・内部 MCP 呼び）は token の有無に関わらず常に無認証で通す。
 const authConfig = loadAuthConfig();
+const legacyProjectConfiguration=Boolean(process.env.NEGI_TASK_CONFIG||process.env.NEGI_REVIEW_CONFIG||
+  process.env.NEGI_TASK_AUTHORING_CONFIG||process.env.NEGI_INTEGRATION_CONFIG||process.env.NEGI_KNOWLEDGE_CONFIG);
+if(process.env.NEGI_SETUP_ROOT&&!authConfig.token)throw Error("NEGI_SETUP_ROOT requires EBI_AUTH_TOKEN");
+const storageMaintenance=process.env.NEGI_STORAGE_MAINTENANCE==="1";
+if(storageMaintenance&&!authConfig.token)throw Error("Storage maintenance requires EBI_AUTH_TOKEN");
+let storageMode:StorageMode="legacy",storageModeInvalid=false;
+try{storageMode=parseStorageMode(process.env.NEGI_STORAGE_MODE)}catch{storageModeInvalid=true}
+let projectSetup:LocalProjectSetup|null=null,projectConfiguration:LocalProjectConfiguration|null=null;
+let bootConfiguration:ProjectConfiguration|null=null,configurationStartupHeld=false;
+try{
+  projectSetup=process.env.NEGI_SETUP_ROOT&&!legacyProjectConfiguration?
+    await LocalProjectSetup.open(process.env.NEGI_SETUP_ROOT,[process.cwd()]):null;
+  projectConfiguration=projectSetup?await LocalProjectConfiguration.open(projectSetup):null;
+}catch{configurationStartupHeld=true;}
+try{bootConfiguration=await projectConfiguration?.current()??null}catch{configurationStartupHeld=true;}
+let setupStartup:Awaited<ReturnType<LocalProjectConfiguration["startup"]>>|null=null;
+if(bootConfiguration)try{setupStartup=await projectConfiguration!.startup(bootConfiguration)}catch{configurationStartupHeld=true;}
+let setupModelsVerified=!setupStartup&&!configurationStartupHeld;
+let setupActivationError:string|null=configurationStartupHeld?"設定・作業場所の起動条件を確認できません。プロジェクト設定で保存状態を確認してください。":null;
+const reviewConfigPath = process.env.NEGI_REVIEW_CONFIG;
+let reviewService: LocalReviewService | null = null;
+const taskConfigPath = process.env.NEGI_TASK_CONFIG;
+let taskService: LocalTaskService | null = null;
+let taskAuthoringService:LocalTaskAuthoringService|null=null;
+const integrationConfigPath = process.env.NEGI_INTEGRATION_CONFIG;
+let integrationReviewService: LocalIntegrationReviewService | null = null;
+const knowledgeConfigPath = process.env.NEGI_KNOWLEDGE_CONFIG;
+let integrationExecutionService:LocalIntegrationExecutionService|null=null;
+let knowledgeService:LocalKnowledgeService|null=null;
+let taskCatalog:unknown=null,storageStartupHeld=false;
+const executionHeld=()=>configurationStartupHeld||storageStartupHeld||storageMaintenance||!!setupStartup&&!setupModelsVerified;
+const storageHost=()=>({maintenance:storageMaintenance&&!storageModeInvalid,executionHeld:executionHeld(),startupError:setupActivationError,
+  storageMode:storageModeInvalid?"invalid" as const:storageMode,indexedSetupAvailable:!!setupStartup&&!configurationStartupHeld&&!legacyProjectConfiguration});
+let storageConsole:LocalStorageConsole|null=null;
+const readServiceConfig=async(path:string,limit=256_000)=>{
+  if(!isAbsolute(path)||!authConfig.token)throw Error("Service requires an absolute config path and EBI_AUTH_TOKEN");
+  const bytes=await readFile(path);if(bytes.length>limit)throw Error("Service config exceeds local size limit");
+  return JSON.parse(bytes.toString("utf8")) as unknown;
+};
+try{
+  // Capture the trusted catalog before opening any runtime service, so its
+  // read-only maintenance registration survives a later storage failure.
+  taskCatalog=taskConfigPath?await readServiceConfig(taskConfigPath):setupStartup?.tasks??null;
+  if(taskCatalog){
+    storageConsole=new LocalStorageConsole({...await LocalTaskService.inspectStorageRegistration(taskCatalog),
+      masterId:setupStartup?"negi-master":process.env.NEGI_STORAGE_MASTER_ID??"negi-master"},storageHost);
+    if(storageModeInvalid)throw Error("Storage startup mode invalid");
+    if(!storageMaintenance){
+      taskStorageForStartup(storageMode,{saved:!!setupStartup,legacyConfigured:legacyProjectConfiguration});
+      if(storageMode==="indexed")await storageConsole.assertIndexedExecutionAllowed(setupStartup!.config.checkout);
+      else await storageConsole.assertLegacyExecutionAllowed();
+    }
+  }
+  if(!storageMaintenance&&!configurationStartupHeld){
+    if(storageModeInvalid||storageMode==="indexed"&&!taskCatalog)throw Error("Storage startup registration missing");
+    const reviews=reviewConfigPath?await readServiceConfig(reviewConfigPath):setupStartup?.reviews;
+    if(reviews)reviewService=await LocalReviewService.open(reviews);
+    if(taskCatalog)taskService=await LocalTaskService.open(taskCatalog,undefined,
+      {...taskStorageForStartup(storageMode,{saved:!!setupStartup,legacyConfigured:legacyProjectConfiguration}),
+        ...preflightClosureForStartup(process.env.NEGI_PREFLIGHT_CLOSURE)});
+    if(taskService&&reviewService)await taskService.connectReviews(reviewService);
+    if(process.env.NEGI_TASK_AUTHORING_CONFIG){
+      if(!taskService)throw Error("Task authoring requires authenticated Tasks");
+      taskAuthoringService=await LocalTaskAuthoringService.open(await readServiceConfig(process.env.NEGI_TASK_AUTHORING_CONFIG),taskService);
+    }else if(setupStartup&&taskService)taskAuthoringService=await LocalTaskAuthoringService.open(setupStartup.authoring,taskService);
+    if(integrationConfigPath){
+      if(!reviewService)throw Error("Integration review requires authenticated reviews");
+      integrationReviewService=await LocalIntegrationReviewService.open(await readServiceConfig(integrationConfigPath),reviewService,taskAuthoringService,
+        taskStorageForStartup(storageMode,{saved:!!setupStartup,legacyConfigured:legacyProjectConfiguration}));
+    }
+    if(knowledgeConfigPath){
+      if(!taskService||!reviewService)throw Error("Knowledge requires authenticated Tasks and reviews");
+      knowledgeService=await LocalKnowledgeService.open(await readServiceConfig(knowledgeConfigPath,16_000),taskService,reviewService);
+    }
+    if(taskAuthoringService&&taskService&&reviewService)integrationExecutionService=await LocalIntegrationExecutionService.open(taskAuthoringService,taskService,reviewService);
+  }
+}catch{
+  storageStartupHeld=true;setupModelsVerified=false;
+  // Await started service work before discarding it; do not retry or reopen.
+  for(const service of [integrationExecutionService,integrationReviewService,taskService])try{await service?.close()}catch{}
+  taskService=null;taskAuthoringService=null;reviewService=null;integrationExecutionService=null;integrationReviewService=null;knowledgeService=null;
+  setupActivationError="保存状態・実行設定を確認できないため開始を保留しています。保存状態の画面で元の記録を確認してください。";
+}
+const storageApi=createStorageHttp(storageConsole,authConfig,storageHost);
+const taskAuthoringApi=createTaskAuthoringHttp(taskAuthoringService,authConfig);
+const conversationApi=createConversationHttp(taskService,taskAuthoringService,authConfig);
+const projectSetupApi=createProjectSetupHttp(projectSetup,authConfig,()=>({legacyConfigured:legacyProjectConfiguration,
+  active:!!setupStartup&&!executionHeld()&&!!taskAuthoringService&&!!masterSession&&masterSession.state!=="stopped"&&masterSession.state!=="starting",activationError:setupActivationError,bootHash:bootConfiguration?.hash}),projectConfiguration);
+const integrationApi=createIntegrationHttp(integrationExecutionService,authConfig);
+if(projectConfiguration&&bootConfiguration){
+  const admission:ConfigurationAdmission=operation=>{
+    if(executionHeld())throw Error("保存・担当モデルの起動条件を確認できないため保留しています。");
+    return projectConfiguration.admit(bootConfiguration.hash,operation);
+  };
+  taskService?.bindConfigurationAdmission(admission);taskAuthoringService?.bindConfigurationAdmission(admission);
+  integrationExecutionService?.bindConfigurationAdmission(admission);
+}
+const taskApi=createTaskHttp(taskService,authConfig,taskAuthoringService!==null,integrationExecutionService!==null);
+const knowledgeApi = createKnowledgeHttp(knowledgeService, authConfig);
+let policyService: LocalPolicyService | null = null;
+if (process.env.NEGI_POLICY_CONFIG && authConfig.token && !executionHeld() &&
+    process.env.NEGI_POLICY_SIGNING_SECRET && process.env.NEGI_POLICY_SIGNING_SECRET.length >= 32 &&
+    !dotenvKeys().some(key => key.toUpperCase() === "NEGI_POLICY_SIGNING_SECRET")) {
+  try {
+    const writableRoots = [process.cwd(), process.env.EBI_DEFAULT_CWD ?? process.cwd(),
+      ...(taskService?.knowledgeRegistrations().flatMap(row => [row.vault, row.checkout]) ?? []),
+      ...(taskAuthoringService?.policyWritableRoots() ?? []),
+      ...(reviewService?.knowledgeWritableRoots() ?? [])];
+    const configPath = await realpath(process.env.NEGI_POLICY_CONFIG);
+    const roots = await Promise.all(writableRoots.map(root => realpath(root)));
+    if (roots.some(root => { const rel = relative(root, configPath);
+      return rel === "" || !isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`); })) throw Error("Policy config is model-writable");
+    policyService = await LocalPolicyService.open(await readServiceConfig(configPath), roots, process.env.NEGI_POLICY_SIGNING_SECRET);
+  } catch { /* Only policy use is held; existing explicit Task profiles remain available. */ }
+}
+const policyApi = createPolicyHttp(policyService, authConfig, process.env.NEGI_POLICY_CONFIG ? "held" : "unconfigured");
+if(policyService)taskService?.connectResearchPolicy(policyService);
+const reviewApi = createReviewHttp(reviewService, authConfig);
 // spawn する対象コマンド。claude が PATH に無い環境では EBI_COMMAND=bash 等で fallback。
 const COMMAND = process.env.EBI_COMMAND ?? "claude";
 // config 由来のバックエンド既定（top-level "defaultBackend" / "backends"）。
@@ -392,9 +534,23 @@ function observeContextGuard(ebiId: string): void {
 // MasterSession で動く。ui 未指定/terminal のときはこの変数が null のままで、
 // 既存の PTY 経路と**完全に同一**の外形になる（設計書 §6.1）。
 let masterSession: MasterSession | null = null;
+taskService?.subscribeResults(results => {
+  broadcast({ type: "taskResults", results: results.slice(-20).reverse() });
+  for (const result of results) masterSession?.notifyTaskResult(result);
+});
+if (taskService) {
+  try { await taskService.recoverResultNotifications(); }
+  catch { broadcast({ type: "notice", id: "task-results", text: "Taskの結果通知を復元できません。Task画面で現在の状態を確認してください。" }); }
+}
 
 /** MasterSession を作って起動し、registry へ chat 配送先として登録する。 */
-async function startMasterChatSession(spec: FixedEbiSpec): Promise<void> {
+async function startMasterChatSession(spec: FixedEbiSpec, setupOptions?:ReturnType<typeof codexMasterLaunchOptions>): Promise<void> {
+  if(configurationStartupHeld||storageStartupHeld||storageMaintenance)throw Error("Storage or configuration requires reconciliation before starting a Master");
+  const codexReadOnly = setupOptions ?? (spec.brain === "codex"
+    ? codexMasterLaunchOptions({ model: spec.launch.model, extraArgs: spec.extraArgs })
+    : null);
+  if (codexReadOnly && !taskService)
+    throw new Error("Codex chat master requires NEGI_TASK_CONFIG for shared turn admission");
   // config の args に --mcp-config を手書きしている場合はそちらを尊重する
   //（applyMasterMcpConfig と同じ方針。二重指定を作らない）。
   const hasManualMcp = spec.extraArgs.includes("--mcp-config");
@@ -403,17 +559,23 @@ async function startMasterChatSession(spec: FixedEbiSpec): Promise<void> {
     brainId: spec.brain,
     cwd: spec.launch.cwd,
     model: spec.launch.model,
-    permissionMode: spec.permissionMode,
+    permissionMode: codexReadOnly ? "plan" : spec.permissionMode,
     systemPrompt: spec.launch.systemPrompt ?? null,
-    mcpConfigPath: hasManualMcp ? null : ROLE_MCP_CONFIG.master,
-    extraArgs: spec.extraArgs,
+    mcpConfigPath: codexReadOnly || hasManualMcp ? null : ROLE_MCP_CONFIG.master,
+    extraArgs: codexReadOnly ? [] : spec.extraArgs,
     logPath: MASTER_CHAT_LOG_PATH,
+    registeredConversations: Boolean(codexReadOnly && storageMode === "indexed"),
+    ...(codexReadOnly ? { createBrain: () => new CodexAppServerBrain({ ...codexReadOnly,
+      admission: taskService!.masterTurnAdmission(spec.id, storageMode === "indexed" ? { resident: true } : undefined),
+      ...(storageMode === "indexed" ? { conversations: taskService!.masterConversationAuthority(spec.id), masterId: spec.id } : {}),
+      ...(taskService ? { taskTools: registeredTaskTools(taskService, spec.id,taskAuthoringService?{
+        service:taskAuthoringService,planner:{model:spec.launch.model??"",effort:codexReadOnly.effort}}:undefined) } : {}) }) } : {}),
     handlers: {
       onEvent: (id, envelope) => {
         broadcast({ type: "chatEvent", id, seq: envelope.seq, ts: envelope.ts, event: envelope.event });
       },
       onState: (id, state, pending) => {
-        broadcast({ type: "chatState", id, state, pending });
+        broadcast({ type: "chatState", id, state, pending, threadId: masterSession?.currentThreadId ?? null });
         // registry の status（idle/busy）にも写るので一覧を更新する。
         broadcastRegistry();
       },
@@ -449,16 +611,43 @@ async function startMasterChatSession(spec: FixedEbiSpec): Promise<void> {
     cwd: spec.launch.cwd,
     args: spec.extraArgs,
   });
-  await session.start();
+  if(setupOptions)await startConfirmedSetupMaster(session);else await session.start();
+  if (taskService) {
+    try {
+      for (const result of await taskService.resultNotifications()) session.notifyTaskResult(result);
+    } catch {
+      broadcast({ type: "notice", id: session.id, text: "Taskの結果通知を復元できません。Task画面で現在の状態を確認してください。" });
+    }
+  }
 }
 
 /** 接続直後の chat 復元（state ＋ 直近の会話）。chat master が居ないときは何もしない。 */
 function sendChatSnapshot(ws: WebSocket): void {
   const session = masterSession;
   if (!session) return;
-  send(ws, { type: "chatState", id: session.id, state: session.state, pending: session.pendingCount });
+  send(ws, { type: "chatState", id: session.id, state: session.state, pending: session.pendingCount, threadId: session.currentThreadId });
   const snap = session.snapshot();
-  send(ws, { type: "chatSnapshot", id: session.id, events: snap.events, hasMore: snap.hasMore });
+  send(ws, { type: "chatSnapshot", id: session.id, events: snap.events, hasMore: snap.hasMore, threadId: session.currentThreadId });
+}
+
+const conversationRequestsInFlight = new Set<string>();
+async function sendConversationStatus(ws: WebSocket, id: string, requestId: string, fallback?: string): Promise<void> {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(requestId) ||
+      storageMode !== "indexed" || !storageConsole?.supportsMaster(id)) {
+    send(ws, { type: "error", text: "会話の確認要求または登録が不正です。" }); return;
+  }
+  try {
+    const { result, ownerPending } = await storageConsole.conversationStatus(requestId);
+    send(ws, { type: "chatConversationResult", id, requestId,
+      state: !result ? (ownerPending || conversationRequestsInFlight.has(id + ":" + requestId) ? "attention" : "missing") : result.stage === "completed" && !result.exclusionHeld ? "completed" :
+        result.stage === "cancelled" && !result.exclusionHeld ? "cancelled" : "attention",
+      oldThreadId: result?.request.oldThreadId ?? null, newThreadId: result?.identity?.threadId ?? null,
+      reason: result?.reason ?? fallback ?? (!result ? ownerPending || conversationRequestsInFlight.has(id + ":" + requestId)
+        ? "会話の作成を確認しています。同じ要求IDを保持しています。" : "会話の作成記録はありません。現在の会話を確認してください。" : null) });
+  } catch {
+    send(ws, { type: "chatConversationResult", id, requestId, state: "attention", oldThreadId: null, newThreadId: null,
+      reason: "会話の作成結果を照合できません。同じ要求を保持して確認してください。自動では再作成しません。" });
+  }
 }
 
 /** chat 系 WS メッセージの宛先解決。id 違い/未起動は error を返して null。 */
@@ -721,7 +910,7 @@ const httpServer = createServer(async (req, res) => {
   // GET /login: トークン入力ページを返す。POST /login: 照合して Cookie を発行する。
   if (urlPath === "/login" && (req.method ?? "GET") === "GET") {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-    res.end(loginPageHtml());
+    res.end(loginPageHtml(url.searchParams.get("returnTo") ?? "/"));
     return;
   }
   if (urlPath === "/login" && req.method === "POST") {
@@ -762,6 +951,20 @@ const httpServer = createServer(async (req, res) => {
     return;
   }
 
+  // Reviews require an authenticated browser cookie, even on loopback.
+  if (await storageApi(req, res, url)) return;
+  if (await projectSetupApi(req, res, url)) return;
+  if(executionHeld()&&req.method==="POST"&&!url.pathname.endsWith("/stop")&&(/^\/api\/tasks(?:\/|$)/.test(url.pathname)||/^\/api\/task-plans(?:\/|$)/.test(url.pathname)||/^\/api\/integrations(?:\/|$)/.test(url.pathname))){
+    res.writeHead(503,{"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store"});res.end(JSON.stringify({error:"担当モデルの接続・利用条件を確認できないため、新しい作業を保留しています。プロジェクト設定を確認してください。"}));return;
+  }
+  if (await reviewApi(req, res, url)) return;
+  if (await knowledgeApi(req, res, url)) return;
+  if (await policyApi(req, res, url)) return;
+  if (await taskAuthoringApi(req, res, url)) return;
+  if (await conversationApi(req, res, url)) return;
+  if (await integrationApi(req, res, url)) return;
+  if (await taskApi(req, res, url)) return;
+
   // ---- 認証ゲート（loopback は常に素通り／非 loopback は token 必須）----
   const auth = authorize(req, loopback, authConfig, url.searchParams);
   if (!auth.ok) {
@@ -783,6 +986,10 @@ const httpServer = createServer(async (req, res) => {
   }
 
   // 制御API（/control/*）を最優先で処理する。該当すれば静的配信へは進まない。
+  if(executionHeld()&&urlPath.startsWith("/control/")){
+    res.writeHead(503,{"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store"});
+    res.end(JSON.stringify({error:"保存・起動条件の確認中です。新しい実行・旧ツールの操作を保留しています。"}));return;
+  }
   if (await controlApi(req, res, urlPath, url.searchParams)) return;
   let filePath = join(CLIENT_DIST, normalize(urlPath === "/" ? "/index.html" : urlPath));
   // ディレクトリトラバーサル防止。
@@ -824,11 +1031,12 @@ const wss = new WebSocketServer({
 wss.on("connection", (ws) => {
   clients.add(ws);
   // 接続直後にサーバ能力（監督が有効か）を送る。クライアントはこれで要約 UI の出し分けをする。
-  send(ws, { type: "capabilities", supervisor: supervisor.enabled });
+  send(ws, { type: "capabilities", supervisor: storageMode!=="indexed"&&supervisor.enabled, reviews: reviewService !== null, tasks: taskService !== null,taskAuthoring:taskAuthoringService!==null&&setupModelsVerified,projectSetup:!!authConfig.token,managedTasksOnly:storageMode==="indexed",codexConversations:storageMode==="indexed",conversationAuthority:storageConsole?.registrationSha256 });
   // master が ui:"chat" なら、registry より**先に** state と直近の会話を送る。
   // クライアントは「chatState を受けた id＝chat モードの master」と判定して xterm ペインを
   // 作らない分岐に入るので、registry を先に送ると一瞬だけ PTY ペインが生えてしまう。
   sendChatSnapshot(ws);
+  if (taskService) void taskService.resultNotifications().then(results => send(ws, { type: "taskResults", results: results.slice(0, 20) })).catch(() => {});
   // 接続直後に現在の registry を送る。
   send(ws, { type: "registry", agents: registry.list() });
   // 接続直後に現在の使用状況スナップショットも送る（ダッシュボードの初期表示用）。
@@ -871,6 +1079,9 @@ function idsOf(msg: SubscribeMessage | UnsubscribeMessage): string[] {
 }
 
 function handleClientMessage(ws: WebSocket, msg: ClientMessage): void {
+  if(executionHeld()&&["input","setMode","summarize","chatAnswer"].includes(msg.type)){
+    send(ws,{type:"error",text:"保存・起動条件の確認中です。新しい入力や実行を保留しています。"});return;
+  }
   switch (msg.type) {
     case "spawn": {
       void handleSpawn(ws, msg);
@@ -982,9 +1193,23 @@ function handleClientMessage(ws: WebSocket, msg: ClientMessage): void {
       break;
     }
     case "chatSend": {
+      if (msg.requestId !== undefined && (typeof msg.requestId !== "string" ||
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(msg.requestId))) {
+        send(ws, { type: "error", text: "チャット送信の識別子が不正です" });
+        break;
+      }
+      const report = (accepted: boolean, reason?: string) => {
+        if (msg.requestId) send(ws, { type: "chatSendResult", id: msg.id, requestId: msg.requestId,
+          accepted, ...(reason ? { reason } : {}) });
+        else if (!accepted) send(ws, { type: "error", text: reason ?? "送信できませんでした" });
+      };
+      if(executionHeld()){report(false,"保存・担当モデルの起動条件を確認できないため保留しています。今回の入力は未送信です。");break}
       const session = chatSessionFor(ws, msg.id);
-      if (!session) break;
+      if (!session) { report(false, "統括が起動していません。今回の入力は未送信です。"); break; }
       void (async () => {
+        if(projectConfiguration&&bootConfiguration&&(await projectConfiguration.current())?.hash!==bootConfiguration.hash){
+          report(false,"設定を保存済みです。再起動を確認してください。今回の入力は未送信です。");return;
+        }
         // 添付は「保存済み basename」でしか参照できない（クライアントは任意パスを送れない）。
         // ここで実体を読み直して base64 化し、stream-json の image ブロックに載せる。
         const attachments = (msg.attachments ?? []).slice(0, MAX_ATTACHMENTS_PER_TURN);
@@ -1006,11 +1231,12 @@ function handleClientMessage(ws: WebSocket, msg: ClientMessage): void {
         const r = await session.sendUserText(msg.text, {
           images,
           attachments: resolved,
+          ...(msg.requestId ? { requestId: msg.requestId } : {}),
           ...(replyTo ? { replyTo } : {}),
         });
-        if (!r.accepted) send(ws, { type: "error", text: r.reason ?? "送信できませんでした" });
+        report(r.accepted, r.reason);
       })().catch((err) => {
-        send(ws, { type: "error", text: `送信に失敗しました: ${(err as Error).message}` });
+        report(false, `送信に失敗しました: ${(err as Error).message}`);
       });
       break;
     }
@@ -1024,12 +1250,37 @@ function handleClientMessage(ws: WebSocket, msg: ClientMessage): void {
     }
     case "chatNew": {
       // 「新しい会話」。ヘッドレス CLI に `/clear` が無いので、頭脳プロセスを
-      // `--resume` 無しで起動し直して文脈をリセットする（設計書 §10 Q-3）。
+      // Registered Codex rotates in its resident process; other brains restart.
       const session = chatSessionFor(ws, msg.id);
       if (!session) break;
-      void session.newConversation().catch((err) => {
-        send(ws, { type: "error", text: `新しい会話を開始できませんでした: ${(err as Error).message}` });
-      });
+      const key = msg.id + ":" + msg.requestId;
+      if (storageMode === "indexed" && msg.requestId && conversationRequestsInFlight.has(key)) {
+        void sendConversationStatus(ws, msg.id, msg.requestId); break;
+      }
+      if (storageMode === "indexed" && msg.requestId) conversationRequestsInFlight.add(key);
+      void (async()=>{
+        if (storageMode === "indexed" && taskService && msg.requestId) {
+          const recorded = await taskService.masterConversationAuthority(msg.id).status(msg.requestId);
+          if (recorded) {
+            if (recorded.request.mode !== "rotate" || recorded.request.oldThreadId !== msg.oldThreadId)
+              throw Error("同じ確認要求IDへ別の会話条件を指定できません。");
+            await sendConversationStatus(ws, msg.id, msg.requestId); return;
+          }
+        }
+        if(executionHeld())throw Error("保存・担当モデルの起動条件を確認できないため保留しています。");
+        const request = msg.requestId && msg.oldThreadId ? { requestId: msg.requestId, oldThreadId: msg.oldThreadId } : undefined;
+        if(projectConfiguration&&bootConfiguration)await projectConfiguration.admit(bootConfiguration.hash,()=>session.newConversation(request));
+        else await session.newConversation(request);
+        if (storageMode === "indexed" && msg.requestId) await sendConversationStatus(ws, msg.id, msg.requestId);
+      })().catch(async (err) => {
+        conversationRequestsInFlight.delete(key);
+        if (storageMode === "indexed" && msg.requestId) await sendConversationStatus(ws, msg.id, msg.requestId, (err as Error).message);
+        else send(ws, { type: "error", text: `新しい会話を開始できませんでした: ${(err as Error).message}` });
+      }).finally(() => conversationRequestsInFlight.delete(key));
+      break;
+    }
+    case "chatConversationStatus": {
+      void sendConversationStatus(ws, msg.id, msg.requestId);
       break;
     }
     case "chatAnswer": {
@@ -1085,6 +1336,8 @@ async function handleSpawn(ws: WebSocket, msg: SpawnMessage): Promise<void> {
  * spawned / registry のブロードキャストもここで行い、起動した agent id を返す。
  */
 async function spawnAgent(params: GeneralizedSpawnParams): Promise<string> {
+  if(executionHeld())throw Error("保存・起動条件を確認できないため開始を保留しています。");
+  if(storageMode==="indexed")throw Error("このワークスペースでは、作業画面から契約を確認して担当を開始してください。");
   const cwd = params.cwd && params.cwd.trim() ? params.cwd.trim() : DEFAULT_CWD;
 
   // 役割（EBI_ROLES）を解決する。後方互換: asEngineer=true は role="engineer" と等価。
@@ -1494,6 +1747,7 @@ export type SendMessageResult =
  * 「まだ」= 1 で spawn → 2 で ready 待ち → 3/4 で送信。分岐はこの関数内で完結する。
  */
 async function sendMessage(params: SendMessageParams): Promise<SendMessageResult> {
+  if(executionHeld())throw Error("保存・起動条件を確認できないため送信を保留しています。");
   const { to, message } = params;
   const from = params.from ?? "user";
 
@@ -1621,6 +1875,8 @@ async function sendMessage(params: SendMessageParams): Promise<SendMessageResult
 async function summarizeAgent(
   id: string,
 ): Promise<{ ok: true; text: string } | { ok: false; reason: string }> {
+  if(executionHeld())return {ok:false,reason:"保存・起動条件の確認中のため要約を保留しています。"};
+  if(storageMode==="indexed")return {ok:false,reason:"このワークスペースでは統括チャットから確認してください。"};
   const agent = registry.get(id);
   if (!agent) return { ok: false, reason: `agent が見つかりません: ${id}` };
   return supervisor.summarize(agent.getScrollback());
@@ -1660,6 +1916,17 @@ async function handleSummarize(ws: WebSocket, id: string): Promise<void> {
 async function startFixedEbi(): Promise<void> {
   try {
     const raw = await loadFixedEbi(CONFIG_PATH, { command: COMMAND, backend: BACKEND_ID });
+    if(configurationStartupHeld||storageStartupHeld||storageMaintenance)throw Error("Storage/configuration requires reconciliation before starting any fixed agent");
+    if(setupStartup){
+      if(raw.length)throw Error("Saved project setup conflicts with fixed agents; choose the startup configuration explicitly");
+      const config=setupStartup.config,spec:FixedEbiSpec={id:"negi-master",kind:"master",ui:"chat",brain:"codex",permissionMode:"plan",extraArgs:[],notifySubscribe:false,
+        launch:{command:config.executable,args:[],cwd:config.checkout,model:config.astra.model,backend:"codex",systemPrompt:"Astraとして必須仕様を読み、利用者の目的を契約案へまとめる。Taskの開始は登録済みTaskの操作だけを使う。追加のCLI、別チャット、隠れた子agentを起動しない。"}};
+      await projectConfiguration!.admit(bootConfiguration!.hash,()=>startMasterChatSession(spec,{...codexMasterLaunchOptions({model:spec.launch.model,extraArgs:[]},
+        {...process.env,EBI_CODEX_READ_ONLY_MASTER:"1",EBI_CODEX_APP_SERVER_EXE:config.executable,EBI_CODEX_MASTER_EFFORT:config.astra.effort}),requiredModels:setupStartup!.requiredModels}));
+      setupModelsVerified=true;
+      broadcast({type:"capabilities",supervisor:storageMode!=="indexed"&&supervisor.enabled,reviews:reviewService!==null,tasks:taskService!==null,taskAuthoring:taskAuthoringService!==null,projectSetup:!!authConfig.token,managedTasksOnly:storageMode==="indexed",codexConversations:storageMode==="indexed",conversationAuthority:storageConsole?.registrationSha256});
+      return;
+    }
     // master には役割別 MCP config を spawn 直前に自動付与する（config への手書きを不要にし、
     // dev / 本番のファイル名差分をサーバ側で吸収する）。args に明示があればそちらを優先。
     // master は backend=claude に固定する（config/env で他 backend を既定にしても統括系は落とさない）。
@@ -1695,6 +1962,7 @@ async function startFixedEbi(): Promise<void> {
       });
     }
   } catch (err) {
+    if(setupStartup&&!storageMaintenance&&!storageStartupHeld&&!configurationStartupHeld)setupActivationError="担当モデル・ログイン・起動設定を確認できないため保留しています。現在の設定とサーバーの起動状態を確認してください。";
     console.warn(`[ebi-team] 固定エビ config の読み込みに失敗（動的エビのみで継続）:`, err);
   }
 }
@@ -1846,17 +2114,22 @@ httpServer.listen(PORT, HOST, () => {
   void startFixedEbi();
 });
 
+let shuttingDown = false;
 function shutdown(): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  const operationsClosed = Promise.allSettled([taskService?.close(),
+    integrationExecutionService?.close(), integrationReviewService?.close(),masterSession?.stop()]);
   console.log("\n[ebi-team] 終了処理: 全 agent を kill します");
   // 固定エビの監視を先に止め、kill による exit で再起動が走らないようにする。
   fixedEbi.stop();
   // chat master（PTY を持たない）は registry.killAll() の対象外なので個別に止める。
-  void masterSession?.stop().catch(() => {});
   registry.killAll();
   for (const ws of clients) ws.close();
-  httpServer.close(() => process.exit(0));
-  // close が詰まる場合の保険。
-  setTimeout(() => process.exit(0), 1000);
+  httpServer.close(() => { clearTimeout(closeConnections);void operationsClosed.then(() => process.exit(0)); });
+  // Close only this server's connections after the grace period. A storage
+  // helper may still be committing: elapsed time cannot authorize process exit.
+  const closeConnections=setTimeout(()=>{for(const ws of clients)ws.terminate();httpServer.closeAllConnections();},5000);
 }
 
 process.on("SIGINT", shutdown);

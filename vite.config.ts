@@ -24,6 +24,11 @@ export default defineConfig({
       "/control": {
         target: "http://localhost:8787",
       },
+      "/reviews": { target: "http://localhost:8787" },
+      "/api/reviews": { target: "http://localhost:8787" },
+      "/tasks": { target: "http://localhost:8787" },
+      "/api/tasks": { target: "http://localhost:8787" },
+      "/login": { target: "http://localhost:8787" },
     },
   },
   build: {

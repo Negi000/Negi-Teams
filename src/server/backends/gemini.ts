@@ -22,6 +22,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { EBI_CONTROL_MCP_NAME } from "./claude.ts";
+import { matchesCommandName } from "./commandName.ts";
 import { toGeminiSystemSettings, type GeminiSystemSettings } from "./mcpSpec.ts";
 import { GEMINI_TRAITS } from "./profiles.ts";
 import type {
@@ -266,7 +267,7 @@ export const GEMINI_BACKEND: EbiBackend = {
   defaultCommand: "gemini",
 
   matches(command: string): boolean {
-    return command === "gemini" || command.endsWith("/gemini");
+    return matchesCommandName(command, "gemini");
   },
 
   /**

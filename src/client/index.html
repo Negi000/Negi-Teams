@@ -3,92 +3,71 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <title>ebi-team 🦐 — エビチーム</title>
+    <meta name="theme-color" content="#f7faf3" />
+    <title>Negi-Teams · 作業一覧</title>
+    <link rel="icon" type="image/svg+xml" href="/negi-icon.svg" />
     <link rel="stylesheet" href="./style.css" />
+    <link rel="stylesheet" href="./expressive.css" />
   </head>
-  <body>
-    <header class="topbar">
-      <!-- 狭幅時のみ表示するサイドバー（registry ドロワー）開閉ボタン。 -->
-      <button id="sidebar-toggle" class="sidebar-toggle" title="registry を開閉" aria-label="registry を開閉">☰</button>
-      <h1>🦐 ebi-team <span class="sub">エビチーム</span></h1>
-      <div class="controls">
-        <input id="spawn-cwd" type="text" placeholder="cwd（空ならデフォルト）" />
-        <label class="wt-toggle" title="git worktree を切って隔離 cwd で起動">
-          <input id="spawn-use-worktree" type="checkbox" />
-          worktree
-        </label>
-        <input id="spawn-repo" type="text" placeholder="repo パス（空なら cwd）" class="wt-field" hidden />
-        <input id="spawn-branch" type="text" placeholder="branch（空なら ebi/&lt;id&gt;）" class="wt-field" hidden />
-        <label class="wt-toggle" title="ON にすると spawn 後に自動でそのエビへ表示を切り替える（既定 OFF＝master 等へのフォーカスを維持）">
-          <input id="spawn-follow" type="checkbox" />
-          spawn後に移動
-        </label>
-        <select id="spawn-backend" title="起動するバックエンド（既定＝サーバ側の既定: 役割 → config → env → claude）">
-          <option value="">backend: 既定</option>
-          <option value="claude">🟣 claude</option>
-          <option value="codex">🟢 codex</option>
-          <option value="gemini">🔵 gemini</option>
-        </select>
-        <button id="spawn-btn">＋ エビを追加</button>
-        <span id="conn-status" class="conn">接続中…</span>
+  <body class="negi-ui negi-workspace">
+    <a class="md-skip-link" href="#stage">本文へ</a>
+    <header class="topbar md-topbar">
+      <div id="app-brand"></div>
+      <div class="md-topbar-actions">
+        <span id="conn-status" class="conn" role="status">接続中…</span>
+        <button id="sidebar-toggle" class="sidebar-toggle md-icon-button" title="チーム一覧を開閉" aria-label="チーム一覧を開閉" aria-controls="sidebar" aria-expanded="false">☰</button>
+        <button id="open-spawn" class="md-tonal">＋ 担当を追加</button>
+        <button id="theme-toggle" class="md-icon-button md-theme-toggle" aria-label="テーマを切り替え">◐</button>
       </div>
     </header>
-
-    <main class="layout">
-      <section id="stage" class="stage"><!-- 選択中の agent ペインを単独表示。非表示ペインも DOM 上に残す -->
-        <!-- 使用状況ダッシュボード（REGISTRY 最上段「📊 ダッシュボード」選択時のみ表示）。 -->
-        <div id="dashboard" class="dashboard" hidden></div>
-        <!-- master チャット（ui:"chat" の master 選択時のみ表示。xterm を使わない DOM チャット）。 -->
-        <div id="chat" class="chat" hidden></div>
-        <!-- viewer（読み取り専用 md/txt プレビュー。REGISTRY の viewer 行選択時のみ表示）。 -->
-        <div id="viewer" class="viewer" hidden></div>
-        <!-- 監督・要約パネル（既定 OFF。supervisor 有効かつ要約結果がある時だけ表示） -->
-        <div id="summary-panel" class="summary-panel" hidden>
-          <div class="summary-head">
-            <span class="summary-title">🔍 要約 <span id="summary-agent" class="summary-agent"></span></span>
-            <button id="summary-close" class="summary-close" title="閉じる">✕</button>
+    <div class="md-shell">
+      <nav id="app-navigation" class="md-rail" aria-label="メインナビゲーション"></nav>
+      <main class="layout" data-view="overview">
+        <section id="stage" class="stage" aria-label="作業スペース" tabindex="-1">
+          <div id="workbench" class="overview" hidden></div>
+          <div id="dashboard" class="dashboard" hidden></div>
+          <div id="chat" class="chat" hidden></div>
+          <div id="viewer" class="viewer" hidden></div>
+          <div id="summary-panel" class="summary-panel" hidden>
+            <div class="summary-head"><span class="summary-title">要約 <span id="summary-agent" class="summary-agent"></span></span><button id="summary-close" class="summary-close" aria-label="要約を閉じる">✕</button></div>
+            <div id="summary-body" class="summary-body"></div>
           </div>
-          <div id="summary-body" class="summary-body"></div>
-        </div>
-      </section>
-
-      <!-- 狭幅ドロワー展開時の背景。タップで閉じる（広幅では非表示）。 -->
-      <div id="sidebar-backdrop" class="sidebar-backdrop" hidden></div>
-
-      <aside id="sidebar" class="sidebar">
-        <div class="registry">
-          <h2>registry <span class="h2-hint">クリックで切替</span></h2>
-          <table id="registry-table">
-            <thead>
-              <tr><th>id</th><th>status</th><th>mode</th><th>branch</th><th>cwd</th><th>pid</th></tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </div>
-
-        <div class="log">
-          <h2>notice</h2>
-          <ul id="notice-list"></ul>
-        </div>
-      </aside>
-    </main>
-
-    <!-- ファイルピッカー（ユーザーが自分で md/txt を開くための簡易ブラウザ。既定は非表示）。
-         中身は filePicker.ts が動的に構築する。 -->
-    <div id="file-picker" hidden></div>
-
-    <!-- スマホ用入力補助バー（狭幅時のみ表示）。スマホに無いキーを選択中ペインへ送る。 -->
-    <div id="key-assist" class="key-assist" hidden>
-      <button class="ka-btn" data-key="esc">Esc</button>
-      <button class="ka-btn" data-key="tab">Tab</button>
-      <button class="ka-btn ka-ctrl" data-key="ctrl">Ctrl</button>
-      <button class="ka-btn" data-key="up">↑</button>
-      <button class="ka-btn" data-key="down">↓</button>
-      <button class="ka-btn" data-key="left">←</button>
-      <button class="ka-btn" data-key="right">→</button>
-      <button class="ka-btn" data-key="c-c">^C</button>
+        </section>
+        <div id="sidebar-backdrop" class="sidebar-backdrop" hidden></div>
+        <aside id="sidebar" class="sidebar" aria-label="チーム一覧">
+          <div class="registry">
+            <h2>チームと資料</h2>
+            <table id="registry-table"><thead><tr><th>担当</th><th>状態</th><th>接続</th><th>branch</th><th>cwd</th><th>pid</th></tr></thead><tbody></tbody></table>
+            <button id="open-spawn-mobile" class="md-tonal">＋ 担当を追加</button>
+          </div>
+          <details class="log"><summary>通知</summary><ul id="notice-list"></ul></details>
+        </aside>
+      </main>
+      <div id="key-assist" class="key-assist" role="group" aria-label="選択中の端末の入力補助" hidden>
+        <button class="ka-btn" data-key="esc" aria-label="Escキーを送信">Esc</button>
+        <button class="ka-btn" data-key="tab" aria-label="Tabキーを送信">Tab</button>
+        <button class="ka-btn ka-ctrl" data-key="ctrl" aria-pressed="false" title="次の1文字にCtrl修飾を付ける">Ctrl</button>
+        <button class="ka-btn" data-key="up" aria-label="上矢印キーを送信">↑</button>
+        <button class="ka-btn" data-key="down" aria-label="下矢印キーを送信">↓</button>
+        <button class="ka-btn" data-key="left" aria-label="左矢印キーを送信">←</button>
+        <button class="ka-btn" data-key="right" aria-label="右矢印キーを送信">→</button>
+        <button class="ka-btn" data-key="c-c" aria-label="中断キーを送信（Ctrl+C）" title="選択中の端末へCtrl+Cを送信">Ctrl+C</button>
+      </div>
     </div>
-
+    <dialog id="spawn-dialog" class="md-dialog" aria-labelledby="spawn-title">
+      <header><h2 id="spawn-title">担当を追加</h2><button id="spawn-close" class="md-icon-button md-text" aria-label="閉じる">✕</button></header>
+      <div class="spawn-fields">
+        <label>作業ディレクトリ<input id="spawn-cwd" type="text" placeholder="空欄ならサーバの既定" /></label>
+        <label>接続先<select id="spawn-backend"><option value="">サーバの既定</option><option value="claude">Claude</option><option value="codex">Codex</option><option value="gemini">Gemini</option></select></label>
+        <label class="md-switch-label"><input id="spawn-use-worktree" type="checkbox" />worktreeで作業を隔離する</label>
+        <input id="spawn-repo" aria-label="リポジトリのパス" type="text" placeholder="repo パス（空欄なら作業ディレクトリ）" class="wt-field" hidden />
+        <input id="spawn-branch" aria-label="ブランチ" type="text" placeholder="branch（空欄なら自動生成）" class="wt-field" hidden />
+        <label class="md-switch-label"><input id="spawn-follow" type="checkbox" />起動した担当に表示を切り替える</label>
+      </div>
+      <div class="md-actions"><button id="spawn-btn" class="md-primary">担当を起動</button></div>
+      <p class="muted">選択した接続先で新しいセッションを起動します。</p>
+    </dialog>
+    <div id="file-picker" hidden></div>
     <script type="module" src="./main.ts"></script>
   </body>
 </html>

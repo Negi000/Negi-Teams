@@ -26,6 +26,7 @@ import {
   isImplementedBackendId,
   isKnownBackendId,
   resolveBackendId,
+  resolveBackend,
   resolveIdleThresholdMs,
   toClaudeMcpConfig,
   toCodexConfigArgs,
@@ -33,6 +34,7 @@ import {
   type ControlMcpSpec,
 } from "../src/server/backends/index.ts";
 import { buildSpawnEnv } from "../src/server/agent.ts";
+import { hasControlBridge, supportsChannelInject } from "../src/server/registry.ts";
 
 /** テスト用の中立表現（実運用と同じ形）。 */
 const SPEC: ControlMcpSpec = {
@@ -313,6 +315,21 @@ test("未知 backend の指定は『不正』エラーになる", () => {
   assert.throws(() => resolveBackendId({ explicit: "gpt" }), /backend が不正です: gpt/);
   assert.throws(() => resolveBackendId({ role: "gpt" }), /backend が不正です: gpt/);
   assert.throws(() => resolveBackendId({ env: "gpt" }), /backend が不正です: gpt/);
+});
+
+test("backend resolution recognizes Windows executable paths without substring matches", () => {
+  assert.equal(resolveBackend("C:\\tools\\CODEX.EXE")?.id, "codex");
+  assert.equal(resolveBackend("C:/tools/claude.cmd")?.id, "claude");
+  assert.equal(resolveBackend("/usr/local/bin/gemini")?.id, "gemini");
+  assert.equal(resolveBackend("/tmp/not-codex.exe"), null);
+  assert.equal(resolveBackend("/tmp/codex.exe.backup"), null);
+});
+
+test("delivery honors an explicit backend for a custom executable", () => {
+  const launch = { command: process.execPath, args: ["--mcp-config", "unused"],
+    cwd: ".", model: null, backend: "claude" as const };
+  assert.equal(hasControlBridge({ launch }), true);
+  assert.equal(supportsChannelInject({ launch: { ...launch, backend: "codex" } }), false);
 });
 
 test("backend 未指定なら claude（解決優先度は spawn 引数 > 役割 > config > env）", () => {

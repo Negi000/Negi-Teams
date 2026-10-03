@@ -23,6 +23,7 @@ import type {
 
 /** 画面に並べる 1 アイテム。 */
 export type ChatItem =
+  | { kind: "taskResult"; seq: number; ts: number; result: import("../shared/taskResults.ts").TaskResultSummary }
   | {
       kind: "user";
       seq: number;
@@ -262,6 +263,11 @@ export class ChatTranscript {
       case "notice":
         this.closeStream();
         return this.push({ kind: "notice", seq, ts, level: ev.level, text: ev.text });
+      case "taskResult": {
+        const index = this.items.findIndex(item => item.kind === "taskResult" && item.result.id === ev.result.id);
+        if (index >= 0) { this.items[index] = { kind: "taskResult", seq, ts, result: ev.result }; return { touched: [index], appendedFrom: -1 }; }
+        return this.push({ kind: "taskResult", seq, ts, result: ev.result });
+      }
       case "cleared": {
         // 「新しい会話」の区切り。これより前の表示は捨てる（JSONL には残っている）。
         this.closeStream();
@@ -392,7 +398,7 @@ export const MAX_CHAT_ITEMS = 400;
 
 /** `cleared` の区切り行に出す文言。 */
 export const CLEARED_TEXT =
-  "🆕 新しい会話を開始しました（文脈をリセットしました。これより前の会話は .ebi-team/master-chat.jsonl にのみ残っています）";
+  "新しい会話を開始しました。文脈をリセットし、この画面の表示を切り替えました。";
 
 /** usage から文脈使用率(%)を取り出す（算出できない backend は null）。 */
 export function contextPctOf(usage: MasterChatUsage | null): number | null {
@@ -884,13 +890,13 @@ export function headerMetrics(stats: ChatStats, rl: HeaderRateLimits): HeaderMet
       key: "fiveHour",
       text: `5h ${formatContextPct(rl.fiveHourPct)}`,
       level: metricLevel(rl.fiveHourPct),
-      title: "アカウント 5 時間枠の使用率（全エビ共通）",
+      title: "アカウント 5 時間枠の使用率（全担当で共有）",
     },
     {
       key: "sevenDay",
       text: `週 ${formatContextPct(rl.sevenDayPct)}`,
       level: metricLevel(rl.sevenDayPct),
-      title: "アカウント 7 日枠の使用率（全エビ共通）",
+      title: "アカウント 7 日枠の使用率（全担当で共有）",
     },
   ];
 }

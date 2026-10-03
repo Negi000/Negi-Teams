@@ -13,6 +13,7 @@
 
 import { readdirSync, fstatSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { withoutControlPlaneEnv } from "./controlPlaneEnv.ts";
 
 /** ptmx の major デバイス番号（macOS）。 */
 const PTMX_MAJOR = 15;
@@ -86,6 +87,7 @@ export function readPtmxMax(): number {
     const out = execFileSync("/usr/sbin/sysctl", ["-n", "kern.tty.ptmx_max"], {
       encoding: "utf8",
       timeout: 2000,
+      env: withoutControlPlaneEnv(),
     });
     const n = Number(out.trim());
     return Number.isFinite(n) && n > 0 ? n : DEFAULT_PTMX_MAX;

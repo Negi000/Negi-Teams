@@ -38,7 +38,8 @@ export function parseChatLogLine(line: string): MasterChatEnvelope | null {
   if (typeof ts !== "number" || !Number.isFinite(ts)) return null;
   if (typeof event !== "object" || event === null) return null;
   if (typeof (event as Record<string, unknown>).kind !== "string") return null;
-  return { seq, ts, event: event as MasterChatEnvelope["event"] };
+  return { seq, ts, event: event as MasterChatEnvelope["event"],
+    ...(typeof rec.threadId === "string" || rec.threadId === null ? { threadId: rec.threadId } : {}) };
 }
 
 /**
@@ -80,6 +81,26 @@ export class ChatLog {
 
   currentPath(): string | null {
     return this.path;
+  }
+
+  /** Display evidence only. A truncated/rotated history cannot prove absence. */
+  async boundaryRecorded(requestId: string): Promise<boolean | null> {
+    if (!this.path) return null;
+    await this.chain;
+    let last = 0, found = false, malformed = false;
+    const sequences = new Set<number>();
+    for (const path of [this.path, this.path + ".1"]) {
+      try {
+        const info = await stat(path); if (info.size > this.maxBytes + 4 * 1024 * 1024) return null;
+        for (const line of (await readFile(path, "utf8")).split("\n").filter(Boolean)) {
+          const item = parseChatLogLine(line); if (!item) { malformed = true; continue; }
+          if (!Number.isSafeInteger(item.seq) || item.seq < 1 || sequences.has(item.seq)) malformed = true;
+          sequences.add(item.seq); last = Math.max(last, item.seq);
+          if (item.event.kind === "cleared" && item.event.requestId === requestId) found = true;
+        }
+      } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") return null; }
+    }
+    return found ? true : malformed || sequences.size !== last ? null : false;
   }
 
   /** 1 件追記する（await 不要・best-effort）。 */

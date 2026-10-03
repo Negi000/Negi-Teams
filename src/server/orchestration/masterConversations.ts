@@ -1,0 +1,817 @@
+// Server-owned empty-thread transactions and resident conversation identity.
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { lstat, mkdir, open, readdir, realpath, unlink } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
+import type { CodexThreadIdentity } from "../master/appServerClient.ts";
+import { assertMasterIdleEvidence } from "./masterIdleEvidence.ts";
+import { readMasterTurnArtifact as artifact, verifyMasterTurnDirectory as directory } from "./masterTurnRecords.ts";
+import { FileScheduler } from "./scheduler.ts";
+import { masterOwnerAuxiliary, masterOwnerEvidence, signedMasterOwner, validatedMasterOwner, type MasterOwnerKind, type MasterOwner } from "./masterConversationOwner.ts";
+import { observeWriter, recoverWriter, type WriterOperation } from "./writerRecovery.ts";
+import { guardMasterAdmission, scheduledMasterTurns, type MasterTurnRequest, type MasterTurnLease } from "./masterTurnAdmission.ts";
+import { MasterStorageHeldError, masterStorageTicket, withMasterStorageGuard } from "./masterStorageGuard.ts";
+import { MasterConversationInventory } from "./masterConversationInventory.ts";
+import { RuntimeJournalInventory } from "./runtimeJournalInventory.ts";
+
+type Stage = "requested" | "old_idle" | "start_dispatched" | "bound" | "completed" | "cancelled" | "needs_reconciliation";
+export interface MasterConversationRequest {
+  requestId: string; masterId: string; mode: "start" | "rotate"; oldThreadId: string | null;
+  cwd: string; model: string; effort: string; provider: string | null; settingsSha256: string;
+}
+interface RecordPayload {
+  schemaVersion: "negi-master-conversation/1"; request: MasterConversationRequest;
+  stage: Stage; previousSha256: string | null; identity: CodexThreadIdentity | null;
+  reason: string | null; at: string;
+}
+export interface MasterConversationResult {
+  request: MasterConversationRequest; stage: Stage; identity: CodexThreadIdentity | null; reason: string | null;
+}
+export interface MasterConversationStatus extends MasterConversationResult { exclusionHeld: boolean }
+export interface MasterOwnerRecoveryPreview {
+  ownerId:string; requestId:string; kind:MasterOwnerKind; ownerState:"live"|"dead"|"unknown";
+  ownerSha256:string; proofSha256:string; canRelease:boolean; reason:string|null;
+  recoveryDecisionId?:string|null; recoveryState?:"not_confirmed"|"intent_saved"|"receipt_published"|"storage_pending";
+}
+export interface MasterOwnerRecoveryStatus {
+  decisionId:string;requestId:string;ownerId:string;kind:MasterOwnerKind;ownerSha256:string;proofSha256:string;
+  state:"intent_saved"|"receipt_published"|"owner_released"|"different_owner"|"storage_pending";
+  ownerReleased:boolean;operationComplete:false;
+}
+interface RecoveryPayload {
+  schemaVersion:"negi-master-owner-recovery/1"; masterId:string; decisionId:string; cwdSha256:string;
+  owner:MasterOwner; proofSha256:string; action:"release-owner-only"; at:string;
+}
+interface Operation { path: string; records: RecordPayload[]; bytes: string[] }
+export class MasterConversationHeldError extends Error {
+  constructor(message = "統括の会話または実行記録の照合が必要です。新しい処理は開始していません。") {
+    super(message); this.name = "MasterConversationHeldError";
+  }
+}
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const token = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 200 && !/[\r\n\0]/.test(value);
+const hash = (bytes: string) => createHash("sha256").update(bytes).digest("hex");
+function check(value: unknown, reason: string): asserts value { if (!value) throw Error("Master conversation evidence: " + reason); }
+function inside(root: string, path: string) {
+  const rel = relative(process.platform === "win32" ? root.toLowerCase() : root, process.platform === "win32" ? path.toLowerCase() : path);
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+async function writeNew(path: string, bytes: string) {
+  const file = await open(path, "wx", 0o600);
+  try { await file.writeFile(bytes, "utf8"); await file.sync(); } finally { await file.close(); }
+}
+function validRequest(value: MasterConversationRequest): boolean {
+  return Object.keys(value).length === 9 && uuid.test(value.requestId) && /^[a-zA-Z0-9_-]{1,100}$/.test(value.masterId) &&
+    ["start", "rotate"].includes(value.mode) && (value.mode === "start" ? value.oldThreadId === null : token(value.oldThreadId)) &&
+    typeof value.cwd === "string" && isAbsolute(value.cwd) && token(value.model) && token(value.effort) &&
+    (value.provider === null || token(value.provider)) && /^[0-9a-f]{64}$/.test(value.settingsSha256);
+}
+function validateIdentity(identity: CodexThreadIdentity, request: MasterConversationRequest) {
+  check(identity && Object.keys(identity).length === 5 && token(identity.threadId) && identity.threadId !== request.oldThreadId &&
+    identity.requestedModel === request.model && identity.resolvedModel === request.model && identity.rerouted === false &&
+    token(identity.modelProvider) && (request.provider === null || identity.modelProvider === request.provider), "thread identity or pinned model/provider mismatch");
+}
+function nextStage(previous: Stage | null, next: Stage) {
+  if (previous === null) return next === "requested";
+  if (next === "cancelled") return ["requested", "old_idle"].includes(previous);
+  if (next === "needs_reconciliation") return ["start_dispatched", "bound"].includes(previous);
+  return ({ requested: "old_idle", old_idle: "start_dispatched", start_dispatched: "bound", bound: "completed" } as Partial<Record<Stage, Stage>>)[previous] === next;
+}
+
+export class MasterConversationAuthority {
+  private readonly root: string;
+  private readonly stageInventory: MasterConversationInventory | null;
+  private readonly runtimeInventory: RuntimeJournalInventory | null;
+  private readonly schedulerPath: string;
+  constructor(private readonly options: { root: string; turnRoot: string; masterId: string; scheduler: FileScheduler; onReleased?: () => Promise<void>;
+    stageStorage?: "indexed"; runtimeStorage?: "indexed" }) {
+    check(isAbsolute(options.root) && isAbsolute(options.turnRoot) && /^[a-zA-Z0-9_-]{1,100}$/.test(options.masterId), "server registration invalid");
+    check(options.stageStorage === undefined || options.stageStorage === "indexed", "stage storage registration invalid");
+    check(options.runtimeStorage === undefined || options.runtimeStorage === "indexed" && options.stageStorage === "indexed", "runtime requires indexed stage registration");
+    this.root = resolve(options.root);
+    this.schedulerPath = resolve(options.scheduler.path);
+    this.runtimeInventory = options.runtimeStorage === "indexed" ? new RuntimeJournalInventory({ root: this.root,
+      turnRoot: resolve(options.turnRoot), schedulerPath: this.schedulerPath }) : null;
+    // Construct both writers from this fixed registration. Do not trust a caller
+    // to pair arbitrary scheduler/turn journal callbacks with different roots.
+    this.options = Object.freeze({ ...options, root: this.root, turnRoot: resolve(options.turnRoot),
+      scheduler: this.runtimeInventory ? new FileScheduler(this.schedulerPath, { journal: this.runtimeInventory.schedulerJournal() }) : options.scheduler });
+    this.stageInventory = options.stageStorage === "indexed" ? new MasterConversationInventory({ root: this.root, masterId: options.masterId,
+      recoveryContext: { turnRoot: this.options.turnRoot, schedulerPath: this.schedulerPath } }) : null;
+  }
+
+  private async legacyInventoryAbsent(): Promise<boolean> {
+    const database = this.root + ".inventory.sqlite3";
+    const present = await Promise.all(["", "-journal", "-wal", "-shm", ".recoveries", ".recoveries.pending"].map(async suffix => {
+      try { await lstat(database + suffix); return true; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
+    }));
+    for (const path of [this.root + ".bootstrap-v1.json", this.root + ".bootstrap-v1.json.pending"]) {
+      try { await lstat(path); return false; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    }
+    // Default legacy registrations do not index their writes. Even a valid DB
+    // must not silently admit this older writer. Do not open it
+    // with SQLite: a read could roll back a hot journal before explicit recovery.
+    return present.every(value => !value);
+  }
+
+  private async requireLegacyInventoryAbsent(): Promise<void> {
+    if (!this.runtimeInventory) await new FileScheduler(this.schedulerPath).assertStorageCompatible();
+    try { if (await this.legacyInventoryAbsent()) return; } catch { /* Ambiguous access remains a hold. */ }
+    throw new MasterConversationHeldError("会話の保存記録を照合してください。新しい操作は保留されています。");
+  }
+
+  private async requireStageStorage(): Promise<void> {
+    if (!this.stageInventory) return this.requireLegacyInventoryAbsent();
+    try {
+      if (this.runtimeInventory) check((await this.runtimeInventory.audit()).state === "clean", "runtime intent has not been materialized");
+      else await new FileScheduler(this.schedulerPath).assertStorageCompatible();
+      this.assertIndexedRecoveryContext();
+      check((await this.stageInventory.audit()).state === "clean", "stage intent has not been materialized");
+      this.assertIndexedRecoveryContext();
+    }
+    catch { throw new MasterConversationHeldError("会話の保存記録を照合してください。未完了の保存を保持しています。"); }
+  }
+
+  /** Read-only compatibility gate for process/thread/turn dispatch and leases. */
+  async assertStorageCompatible(): Promise<void> {
+    if (this.runtimeInventory) await this.withStorage(() => this.requireStageStorage()); else await this.requireLegacyInventoryAbsent();
+  }
+  async withStorage<T>(run: () => Promise<T>): Promise<T> {
+    try { return await withMasterStorageGuard(this.root, run, { createIfMissing: this.stageInventory === null }); }
+    catch (error) { if (error instanceof MasterStorageHeldError) throw new MasterConversationHeldError(); throw error; }
+  }
+
+  private async prepare(cwd: string) {
+    if (this.stageInventory) {
+      this.assertIndexedRecoveryContext();
+      // Explicit server registration only. Never bootstrap/migrate a missing DB,
+      // recreate a root/key, or change a legacy authority from a read operation.
+      await this.requireStageStorage();
+      const state = await this.recoveryState(cwd);
+      check(state, "indexed stage authority unavailable");
+      await this.requireStageStorage();
+      return state;
+    }
+    // Check before any mkdir or key creation, including when the entire old
+    // authority disappeared but its independent sibling DB survived.
+    await this.requireLegacyInventoryAbsent();
+    const canonicalCwd = await realpath(resolve(cwd));
+    await directory(dirname(this.root));
+    check(!inside(canonicalCwd, this.root) && !inside(canonicalCwd, this.options.turnRoot) && !inside(canonicalCwd, this.options.scheduler.path), "state must be outside the checkout");
+    await this.requireLegacyInventoryAbsent();
+    await mkdir(this.root, { recursive: true }); await directory(this.root);
+    const entries = await readdir(this.root);
+    check(entries.every(name => ["signing-key.json", "masters"].includes(name)), "unexpected authority entry");
+    let key = await artifact(join(this.root, "signing-key.json"), 1000);
+    if (!key) {
+      if (entries.includes("masters")) { await directory(join(this.root, "masters")); check((await readdir(join(this.root, "masters"))).length === 0, "signing key missing for existing records"); }
+      await this.requireLegacyInventoryAbsent();
+      try { await writeNew(join(this.root, "signing-key.json"), JSON.stringify({ schemaVersion: "negi-master-conversation-key/1", key: randomBytes(32).toString("hex") }) + "\n"); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+      key = await artifact(join(this.root, "signing-key.json"), 1000);
+    }
+    check(key && Object.keys(key.value).length === 2 && key.value.schemaVersion === "negi-master-conversation-key/1" &&
+      typeof key.value.key === "string" && /^[0-9a-f]{64}$/.test(key.value.key), "signing key invalid");
+    await this.requireLegacyInventoryAbsent();
+    const masters = join(this.root, "masters"); await mkdir(masters, { recursive: true }); await directory(masters);
+    await this.requireLegacyInventoryAbsent();
+    const master = join(masters, this.options.masterId); await mkdir(master, { recursive: true }); await directory(master);
+    await this.requireLegacyInventoryAbsent();
+    return { master, key: Buffer.from(key.value.key, "hex"), keyBytes: key.bytes, canonicalCwd };
+  }
+
+  private async withLock<T>(cwd: string, run: (state: Awaited<ReturnType<MasterConversationAuthority["prepare"]>>) => Promise<T>,
+      target?: { kind: MasterOwnerKind; operation: WriterOperation }, detached = false): Promise<T> {
+    if (detached) {
+      const owner = await this.withStorage(() => this.acquireOwnerHeld(cwd, target));
+      try { return await run(owner.state); }
+      finally { await this.withStorage(() => owner.release()); }
+    }
+    return this.withStorage(() => this.withLockHeld(cwd, run, target));
+  }
+
+  private async withLockHeld<T>(cwd: string, run: (state: Awaited<ReturnType<MasterConversationAuthority["prepare"]>>) => Promise<T>,
+      target?: { kind: MasterOwnerKind; operation: WriterOperation }): Promise<T> {
+    const owner = await this.acquireOwnerHeld(cwd, target);
+    try { return await run(owner.state); } finally { await owner.release(); }
+  }
+
+  private async acquireOwnerHeld(cwd: string, target?: { kind: MasterOwnerKind; operation: WriterOperation }) {
+    let state;
+    try { state = await this.prepare(cwd); } catch { throw new MasterConversationHeldError(); }
+    const path = join(state.master, "owner.lock");
+    const kind = target?.kind ?? "inspection";
+    const operation: WriterOperation = target?.operation ?? { domain:"master-conversation", requestId:randomUUID(), hash:hash(JSON.stringify({masterId:this.options.masterId,cwd:state.canonicalCwd,kind})) };
+    const evidenceOptions = { ...this.options, root:this.root, master:state.master };
+    let evidenceSha256:string;
+    try{evidenceSha256 = await masterOwnerEvidence(evidenceOptions,kind,operation.requestId);}catch{throw new MasterConversationHeldError();}
+    const ticket = masterStorageTicket(this.root);
+    check(process.platform === "win32" && ticket?.pid === process.pid, "native owner identity unavailable");
+    const indexed = this.stageInventory ? await this.stageInventory.audit() : null;
+    check(indexed === null || indexed.state === "clean", "indexed owner acquisition is pending");
+    const runtime = this.runtimeInventory ? await this.runtimeInventory.audit() : null;
+    check(runtime === null || runtime.state === "clean", "runtime owner acquisition is pending");
+    const payload = { schema:"negi-master-conversation-owner/3" as const, owner:randomUUID(), pid:process.pid,
+      createdAt:new Date().toISOString(), masterId:this.options.masterId, kind, cwdSha256:hash(state.canonicalCwd), operation, evidenceSha256,
+      processIdentity: { platform: "windows" as const, pid: ticket.pid, startToken: ticket.startToken } };
+    const context = { turnRoot: this.options.turnRoot, schedulerPath: this.schedulerPath };
+    const baseline = indexed ? { head: indexed.head, contextSha256: hash(JSON.stringify(context)) } : null;
+    const bytes = signedMasterOwner(runtime && baseline ? { ...payload, schema: "negi-master-conversation-owner/5", indexed: baseline,
+      runtime: { head: runtime.head, context } } : baseline ? { ...payload, schema:"negi-master-conversation-owner/4", indexed: baseline } : payload,state.key);
+    await this.requireStageStorage();
+    let file;
+    try { file = await open(path, "wx", 0o600); }
+    catch { throw new MasterConversationHeldError("会話の変更または実行受付が進行中か、所有者の照合が必要です。自動では再試行しません。"); }
+    const pinned = await file.stat();
+    let fileClosed = false;
+    let returned = false;
+    try {
+      await file.writeFile(bytes, "utf8"); await file.sync();
+      // The fixed helper uses a protected owner reader that denies WRITE sharing.
+      // Close our writable handle after fsync, before any indexed helper read.
+      if (this.stageInventory) { await file.close(); fileClosed = true; }
+      await this.requireStageStorage();
+      check(evidenceSha256 === await masterOwnerEvidence(evidenceOptions,kind,operation.requestId), "evidence changed before owner admission");
+      if(this.stageInventory)await this.stageInventory.ownerBaseline(hash(bytes));
+      await this.requireStageStorage();
+      returned = true;
+      return { state, release: async () => { try {
+        // An index appearing during this operation makes its owner evidence
+        // part of the required migration/reconciliation. Preserve it.
+        await this.requireStageStorage();
+        if(this.stageInventory)await this.stageInventory.ownerBaseline(hash(bytes));
+        const current = await lstat(path), record = await artifact(path, 8000);
+        check(current.dev === pinned.dev && current.ino === pinned.ino && record?.bytes === bytes, "owner lock replaced; keep hold");
+        await unlink(path); // Remove only this exact live owner; never steal an old lock.
+      } finally { if (!fileClosed) await file.close(); } } };
+    } finally { if (!fileClosed && !returned) await file.close(); }
+  }
+
+  private async readOperation(path: string, key: Buffer): Promise<Operation> {
+    const identity = await directory(path), names = (await readdir(path)).sort();
+    check(uuid.test(path.substring(path.lastIndexOf(process.platform === "win32" ? "\\" : "/") + 1)) && names.length > 0 && names.length <= 5, "operation directory invalid");
+    const operation: Operation = { path, records: [], bytes: [] };
+    for (let index = 0; index < names.length; index++) {
+      const name = names[index]!;
+      check(/^0[0-4]-[a-z_]+\.json$/.test(name) && name.startsWith(`0${index}-`), "noncontiguous journal");
+      const record = await artifact(join(path, name), 24_000);
+      check(record && Object.keys(record.value).length === 2 && record.value.payload && typeof record.value.payload === "object" && !Array.isArray(record.value.payload) &&
+        typeof record.value.signature === "string" && /^[0-9a-f]{64}$/.test(record.value.signature), "signed record shape");
+      const payload = record.value.payload as RecordPayload;
+      const signature = createHmac("sha256", key).update(JSON.stringify(payload)).digest();
+      check(timingSafeEqual(signature, Buffer.from(record.value.signature, "hex")), "record signature mismatch");
+      check(Object.keys(payload).length === 7 && payload.schemaVersion === "negi-master-conversation/1" && payload.request &&
+        validRequest(payload.request) && payload.request.masterId === this.options.masterId && path.endsWith(payload.request.requestId) &&
+        name === `0${index}-${payload.stage}.json` && nextStage(operation.records.at(-1)?.stage ?? null, payload.stage) &&
+        payload.previousSha256 === (operation.bytes.length ? hash(operation.bytes.at(-1)!) : null) &&
+        (index === 0 || isDeepStrictEqual(payload.request, operation.records[0]!.request)) &&
+        typeof payload.at === "string" && Number.isFinite(Date.parse(payload.at)) &&
+        (payload.reason === null || (typeof payload.reason === "string" && payload.reason.length <= 1000)), "journal identity/transition");
+      if (payload.identity) validateIdentity(payload.identity, payload.request);
+      if (["bound", "completed"].includes(payload.stage)) check(payload.identity, "bound identity missing");
+      if (!["bound", "completed", "needs_reconciliation"].includes(payload.stage)) check(payload.identity === null, "unexpected identity");
+      if (operation.records.at(-1)?.identity) check(isDeepStrictEqual(payload.identity, operation.records.at(-1)!.identity), "bound identity changed");
+      operation.records.push(payload); operation.bytes.push(record.bytes);
+    }
+    check(identity === await directory(path) && isDeepStrictEqual(names, (await readdir(path)).sort()), "operation changed while reading");
+    for (let index = 0; index < names.length; index++) check((await artifact(join(path, names[index]!), 24_000))?.bytes === operation.bytes[index], "stage changed while reading");
+    return operation;
+  }
+
+  private async operations(master: string, key: Buffer, pendingOwner?:string) {
+    await this.recoveryDecisions(master,key,pendingOwner);
+    const nativeGuard = await lstat(join(master,"owner-recovery-flock-v2.lock")).catch(error=>{
+      if((error as NodeJS.ErrnoException).code!=="ENOENT")throw error;return null;
+    });
+    if(nativeGuard)check(nativeGuard.isFile()&&!nativeGuard.isSymbolicLink()&&nativeGuard.nlink===1&&nativeGuard.size===0,"native guard invalid");
+    const identity = await directory(master), names = (await readdir(master)).filter(name => !masterOwnerAuxiliary.includes(name)).sort();
+    check(names.length <= 10_000 && names.every(name => uuid.test(name)), "unexpected Master conversation entry");
+    const operations: Operation[] = [];
+    for (const name of names) operations.push(await this.readOperation(join(master, name), key));
+    check(identity === await directory(master) && isDeepStrictEqual(names, (await readdir(master)).filter(name => !masterOwnerAuxiliary.includes(name)).sort()), "Master conversation inventory changed");
+    return operations;
+  }
+
+  private validateRecoveryRecord(value:Record<string,unknown>,name:string,key:Buffer) {
+    const payload=value.payload as RecoveryPayload,signature=value.signature;
+    check(Object.keys(value).length===2&&payload&&!Array.isArray(payload)&&Object.keys(payload).length===8&&payload.schemaVersion==="negi-master-owner-recovery/1"&&
+      payload.masterId===this.options.masterId&&typeof payload.decisionId==="string"&&uuid.test(payload.decisionId)&&typeof payload.cwdSha256==="string"&&/^[0-9a-f]{64}$/.test(payload.cwdSha256)&&
+      typeof payload.proofSha256==="string"&&/^[0-9a-f]{64}$/.test(payload.proofSha256)&&payload.action==="release-owner-only"&&
+      typeof payload.at==="string"&&Number.isFinite(Date.parse(payload.at))&&typeof signature==="string"&&/^[0-9a-f]{64}$/.test(signature),"recovery shape");
+    validatedMasterOwner(payload.owner as unknown as Record<string,unknown>,this.options.masterId,key);
+    check(payload.owner.cwdSha256===payload.cwdSha256&&name===payload.owner.owner+".json"&&
+      timingSafeEqual(createHmac("sha256",key).update(JSON.stringify(payload)).digest(),Buffer.from(signature,"hex")),"recovery signature/owner mismatch");
+    return payload;
+  }
+
+  private async recoveryDecisions(master:string,key:Buffer,pendingOwner?:string) {
+    const root=join(master,"recoveries");
+    try {await directory(root);}catch(error){if((error as NodeJS.ErrnoException).code==="ENOENT")return [];throw error;}
+    const identity=await directory(root),names=(await readdir(root)).sort(),rows:Array<{payload:RecoveryPayload;bytes:string}>=[];
+    check(names.length<=10_000,"recovery inventory limit");
+    for(const name of names){
+      const pending=/^\.pending-([0-9a-f-]{36})-([0-9a-f-]{36})\.json$/.exec(name);
+      if(pending){
+        check(pendingOwner===pending[1]&&uuid.test(pending[1]!)&&uuid.test(pending[2]!),"pending recovery requires its exact owner");
+        const info=await lstat(join(root,name));check(info.isFile()&&!info.isSymbolicLink()&&info.nlink===1&&info.size<=8000,"unsafe pending recovery");
+        continue; // Never treat incomplete staging bytes as an accepted decision.
+      }
+      check(/^[0-9a-f-]{36}\.json$/.test(name),"unexpected recovery entry");
+      const record=await artifact(join(root,name),8000);check(record,"recovery record missing");
+      const payload=this.validateRecoveryRecord(record.value,name,key);
+      check(!rows.some(row=>row.payload.decisionId===payload.decisionId),"duplicate recovery decision");rows.push({payload,bytes:record.bytes});
+    }
+    check(identity===await directory(root)&&isDeepStrictEqual(names,(await readdir(root)).sort()),"recovery inventory changed");
+    for(const row of rows)check((await artifact(join(root,row.payload.owner.owner+".json"),8000))?.bytes===row.bytes,"recovery decision changed");
+    return rows;
+  }
+
+  private async recoveryState(cwd:string) {
+    const canonicalCwd=await realpath(resolve(cwd));
+    check(!inside(canonicalCwd,this.root)&&!inside(canonicalCwd,this.options.turnRoot)&&!inside(canonicalCwd,this.options.scheduler.path),"recovery state inside checkout");
+    try {await directory(this.root);}catch(error){if((error as NodeJS.ErrnoException).code==="ENOENT")return null;throw error;}
+    check(isDeepStrictEqual((await readdir(this.root)).sort(),["masters","signing-key.json"]),"recovery authority entries invalid");
+    const keyRecord=await artifact(join(this.root,"signing-key.json"),1000);
+    check(keyRecord&&Object.keys(keyRecord.value).length===2&&keyRecord.value.schemaVersion==="negi-master-conversation-key/1"&&
+      typeof keyRecord.value.key==="string"&&/^[0-9a-f]{64}$/.test(keyRecord.value.key),"recovery key invalid");
+    await directory(join(this.root,"masters"));const master=join(this.root,"masters",this.options.masterId);
+    try {await directory(master);}catch(error){if((error as NodeJS.ErrnoException).code==="ENOENT")return null;throw error;}
+    return {canonicalCwd,master,key:Buffer.from(keyRecord.value.key,"hex"),keyBytes:keyRecord.bytes};
+  }
+
+  private async ownerRecoveryEvidence(state:NonNullable<Awaited<ReturnType<MasterConversationAuthority["recoveryState"]>>>,owner:MasterOwner) {
+    check(owner.cwdSha256===hash(state.canonicalCwd),"owner checkout changed");
+    const operations=await this.operations(state.master,state.key,owner.owner),target=operations.find(op=>op.records[0]!.request.requestId===owner.operation.requestId);
+    check(operations.every(op=>op===target||["completed","cancelled"].includes(op.records.at(-1)!.stage)),"another conversation requires reconciliation");
+    if(owner.kind==="thread-start")check(target&&hash(JSON.stringify(target.records[0]!.request)+"\n")===owner.operation.hash&&
+      target.records[0]!.request.cwd===state.canonicalCwd,"recovery target request missing/changed");
+    if(owner.kind==="inspection")check(owner.operation.hash===hash(JSON.stringify({masterId:this.options.masterId,cwd:state.canonicalCwd,kind:owner.kind})),"inspection conditions changed");
+    if(owner.kind==="turn-admission"){
+      // This release handles only an admission stopped before any request/claim.
+      // Existing target records need their own durable reconciliation first.
+      const targetWork="master-"+owner.operation.requestId;
+      try{await lstat(join(this.options.turnRoot,targetWork));throw Error("admission target exists; preserve owner");}
+      catch(error){if((error as NodeJS.ErrnoException).code!=="ENOENT")throw error;}
+      check(!(await this.options.scheduler.read()).state?.entries.some(entry=>entry.work.id===targetWork),"admission claim exists; preserve owner");
+    }
+    await assertMasterIdleEvidence(this.options.turnRoot,this.options.masterId,this.options.scheduler);
+    const evidenceSha256=await masterOwnerEvidence({...this.options,root:this.root,master:state.master},owner.kind,owner.operation.requestId);
+    check(evidenceSha256===owner.evidenceSha256,"owner baseline changed; preserve hold");
+    check((await artifact(join(this.root,"signing-key.json"),1000))?.bytes===state.keyBytes,"recovery key changed");
+    const proofSha256=hash(JSON.stringify({masterId:this.options.masterId,cwd:state.canonicalCwd,keyBytes:state.keyBytes,
+      ownerBytes:JSON.stringify(owner)+"\n",ownerState:"dead",operations:operations.map(op=>op.bytes),evidenceSha256}));
+    return {operations,evidenceSha256,proofSha256};
+  }
+
+  /** Read-only preview. No native guard, key, decision, owner or provider is created. */
+  async assertRecoveryEvidence(cwd: string, ownerBytes: string, expectedProofSha256: string, ownerPresent: boolean): Promise<void> {
+    // Fixed native verifier only: the parent already owns the root guard. Taking
+    // a second process guard here would deadlock. This method writes nothing.
+    check(Buffer.byteLength(ownerBytes) <= 2000 && /^[0-9a-f]{64}$/.test(expectedProofSha256), "recovery verifier input invalid");
+    const state = await this.recoveryState(cwd);check(state, "recovery authority absent");
+    const owner = validatedMasterOwner(JSON.parse(ownerBytes), this.options.masterId, state.key);
+    const before = await this.ownerRecoveryEvidence(state, owner);
+    const actual = await artifact(join(state.master, "owner.lock"), 2000);
+    check(ownerPresent ? actual?.bytes === ownerBytes : actual === null, "recovery verifier exact owner changed");
+    const after = await this.ownerRecoveryEvidence(state, owner);
+    check(before.proofSha256 === expectedProofSha256 && after.proofSha256 === expectedProofSha256 &&
+      (await artifact(join(state.master, "owner.lock"), 2000))?.bytes === actual?.bytes, "current recovery proof changed");
+  }
+
+  /** Read-only preview. Indexed mode joins only the existing storage guard;
+   * no authority, key, decision, owner or provider is created. */
+  async ownerRecovery(cwd:string):Promise<MasterOwnerRecoveryPreview|null> {
+    return this.stageInventory ? this.withStorage(() => this.ownerRecoveryHeld(cwd)) : this.ownerRecoveryHeld(cwd);
+  }
+
+  private assertIndexedRecoveryContext(): void {
+    check(resolve(this.options.scheduler.path) === this.schedulerPath, "registered scheduler path changed");
+  }
+
+  private async ownerRecoveryHeld(cwd:string):Promise<MasterOwnerRecoveryPreview|null> {
+    try{
+      if(this.runtimeInventory)check((await this.runtimeInventory.audit()).state==="clean","runtime recovery storage pending");
+      if(this.stageInventory)this.assertIndexedRecoveryContext();
+      const state=await this.recoveryState(cwd);
+      if(!state){if(this.stageInventory)await this.stageInventory.audit();return null;}
+      const record=await artifact(join(state.master,"owner.lock"),2000);
+      if(!record){if(this.stageInventory)await this.stageInventory.audit();return null;}
+      const owner=validatedMasterOwner(record.value,this.options.masterId,state.key);
+      if(this.stageInventory&&(owner.schema==="negi-master-conversation-owner/4"||owner.schema==="negi-master-conversation-owner/5"))await this.stageInventory.ownerBaseline(hash(record.bytes));
+      const indexed = this.stageInventory ? await this.stageInventory.ownerRecoveryIntent(owner.owner) : null;
+      let saved:RecoveryPayload|null=null;
+      if(indexed?.receipt){
+        saved=this.validateRecoveryRecord(JSON.parse(indexed.receipt.bytes),owner.owner+".json",state.key);
+        check(JSON.stringify(saved.owner)+"\n"===record.bytes,"indexed recovery owner differs");
+      }
+      const before=await this.ownerRecoveryEvidence(state,owner);
+      check(!saved||saved.proofSha256===before.proofSha256,"saved recovery proof is stale");
+      const observed=await observeWriter(state.master,"master");
+      check(observed.sha256===hash(record.bytes)&&observed.operation&&isDeepStrictEqual(observed.operation,owner.operation)&&!observed.legacyGuard,"native owner observation changed");
+      const after=await this.ownerRecoveryEvidence(state,owner);
+      check(before.proofSha256===after.proofSha256&&(await artifact(join(state.master,"owner.lock"),2000))?.bytes===record.bytes,"owner evidence changed during preview");
+      const ownerState=observed.state==="dead"?"dead":observed.state==="live"?"live":"unknown";
+      const supported=process.platform==="win32";
+      const storagePending=indexed?.missing.some(path=>path!==indexed.receipt?.relativePath)??false;
+      const ownMissing=indexed?.receipt!==null&&indexed?.missing.includes(indexed.receipt?.relativePath??"");
+      const compatible=indexed ? indexed.origin!=="adopted"&&!storagePending : owner.schema!=="negi-master-conversation-owner/4"&&owner.schema!=="negi-master-conversation-owner/5"&&await this.legacyInventoryAbsent();
+      if(this.stageInventory){
+        check(isDeepStrictEqual(indexed,await this.stageInventory.ownerRecoveryIntent(owner.owner)),"indexed recovery preview changed");
+        this.assertIndexedRecoveryContext();
+      }
+      return {ownerId:owner.owner,requestId:owner.operation.requestId,kind:owner.kind,ownerState,ownerSha256:hash(record.bytes),
+        proofSha256:before.proofSha256,canRelease:ownerState==="dead"&&supported&&compatible,
+        ...(indexed?{recoveryDecisionId:saved?.decisionId??null,recoveryState:storagePending?"storage_pending" as const:!saved?"not_confirmed" as const:ownMissing?"intent_saved" as const:"receipt_published" as const}:{}),
+        reason:!compatible?"会話の保存記録との照合が必要です。所有記録を保持しています。":ownerState!=="dead"?"所有者の終了を確認できません。所有記録を保持しています。":supported?null:"このOSでは正確な所有記録の解除を保証できません。所有記録を保持しています。"};
+    }catch{throw new MasterConversationHeldError();}
+  }
+
+  /** Explicit exact-owner cleanup. Repeating the same decision never executes a model operation. */
+  async releaseOwner(cwd:string,decisionId:string,expectedProofSha256:string):Promise<{decisionId:string;requestId:string;ownerReleased:true;operationComplete:false}> {
+    return this.withStorage(() => this.releaseOwnerHeld(cwd, decisionId, expectedProofSha256));
+  }
+
+  private async releaseOwnerHeld(cwd:string,decisionId:string,expectedProofSha256:string):Promise<{decisionId:string;requestId:string;ownerReleased:true;operationComplete:false}> {
+    check(uuid.test(decisionId)&&/^[0-9a-f]{64}$/.test(expectedProofSha256),"recovery decision invalid");
+    try{
+      if(this.stageInventory)return await this.releaseIndexedOwnerHeld(cwd,decisionId,expectedProofSha256);
+      await this.requireLegacyInventoryAbsent();
+      const state=await this.recoveryState(cwd);check(state,"recovery authority absent");
+      let record=await artifact(join(state.master,"owner.lock"),2000);
+      const owner=record?validatedMasterOwner(record.value,this.options.masterId,state.key):null;
+      const decisions=await this.recoveryDecisions(state.master,state.key,owner?.owner),existing=decisions.find(row=>row.payload.decisionId===decisionId);
+      check(owner?.schema!=="negi-master-conversation-owner/4"&&owner?.schema!=="negi-master-conversation-owner/5"&&
+        existing?.payload.owner.schema!=="negi-master-conversation-owner/4"&&existing?.payload.owner.schema!=="negi-master-conversation-owner/5","indexed owner requires its original inventory registration");
+      if(!record){
+        check(existing&&existing.payload.cwdSha256===hash(state.canonicalCwd)&&existing.payload.proofSha256===expectedProofSha256,"absent owner has no matching decision");
+        // The receipt describes this past exact owner. Later legitimate work
+        // must not turn a lost response into a new recovery/model operation.
+        check((await artifact(join(state.master,"recoveries",existing.payload.owner.owner+".json"),8000))?.bytes===existing.bytes&&
+          (await artifact(join(this.root,"signing-key.json"),1000))?.bytes===state.keyBytes,"saved decision changed");
+        check(await artifact(join(state.master,"owner.lock"),2000)===null,"a new owner appeared");
+        await this.requireLegacyInventoryAbsent();
+        return {decisionId,requestId:existing.payload.owner.operation.requestId,ownerReleased:true,operationComplete:false};
+      }
+      check(owner,"owner absent");const preview=await this.ownerRecovery(cwd);
+      check(preview?.canRelease&&preview.proofSha256===expectedProofSha256&&preview.ownerSha256===hash(record.bytes),"owner recovery preview is stale or live");
+      const target=decisions.find(row=>row.payload.owner.owner===owner.owner);
+      check(!existing||existing===target,"decision already belongs to another owner");
+      check(!target||target.payload.decisionId===decisionId,"another decision already owns this recovery");
+      check(target||decisions.length<10_000,"no capacity for a new recovery decision");
+      const root=join(state.master,"recoveries");
+      const pendingNames=await readdir(root).catch(error=>{if((error as NodeJS.ErrnoException).code!=="ENOENT")throw error;return [];});
+      check(pendingNames.every(name=>!name.startsWith(".pending-")||name===`.pending-${owner.owner}-${decisionId}.json`),"another pending decision owns recovery");
+      const path=join(root,owner.owner+".json");
+      let receiptBytes=target?.bytes;
+      if(!target){
+        const payload:RecoveryPayload={schemaVersion:"negi-master-owner-recovery/1",masterId:this.options.masterId,decisionId,cwdSha256:hash(state.canonicalCwd),
+          owner,proofSha256:expectedProofSha256,action:"release-owner-only",at:new Date().toISOString()};
+        receiptBytes=JSON.stringify({payload,signature:createHmac("sha256",state.key).update(JSON.stringify(payload)).digest("hex")})+"\n";
+      }
+      check(receiptBytes&&Buffer.byteLength(receiptBytes)<=8000,"recovery receipt exceeds boundary");
+      const payload=this.validateRecoveryRecord(JSON.parse(receiptBytes),owner.owner+".json",state.key);
+      check(payload.decisionId===decisionId&&payload.cwdSha256===hash(state.canonicalCwd)&&payload.proofSha256===expectedProofSha256&&
+        isDeepStrictEqual(payload.owner,owner),"recovery decision changed");
+      check((await this.ownerRecovery(cwd))?.proofSha256===expectedProofSha256,"evidence changed before native owner release");
+      await this.requireLegacyInventoryAbsent();
+      await recoverWriter(state.master,"master",owner.operation,hash(record.bytes),receiptBytes);
+      check(await artifact(join(state.master,"owner.lock"),2000)===null,"owner was replaced after native release");
+      check((await artifact(path,8000))?.bytes===receiptBytes&&(await this.ownerRecoveryEvidence(state,owner)).proofSha256===expectedProofSha256,"recovery evidence changed after native release");
+      check(await artifact(join(state.master,"owner.lock"),2000)===null,"new owner appeared after recovery");
+      await this.requireLegacyInventoryAbsent();
+      return {decisionId,requestId:owner.operation.requestId,ownerReleased:true,operationComplete:false};
+    }catch{throw new MasterConversationHeldError();}
+  }
+
+  /** Read the saved decision without repeating a recovery or provider operation. */
+  async ownerRecoveryStatus(cwd:string,decisionId:string):Promise<MasterOwnerRecoveryStatus|null> {
+    check(uuid.test(decisionId),"recovery decision invalid");
+    const read=async()=>{
+      try{
+        if(this.runtimeInventory)check((await this.runtimeInventory.audit()).state==="clean","runtime recovery decision storage pending");
+        if(this.stageInventory)this.assertIndexedRecoveryContext();else await this.requireLegacyInventoryAbsent();
+        const indexed=this.stageInventory?await this.stageInventory.recoveryIntent(decisionId):null;
+        const state=await this.recoveryState(cwd);if(!state){check(!indexed,"indexed recovery authority absent");return null;}
+        const record=await artifact(join(state.master,"owner.lock"),2000);
+        const owner=record?validatedMasterOwner(record.value,this.options.masterId,state.key):null;
+        const legacy=indexed?null:(await this.recoveryDecisions(state.master,state.key,owner?.owner)).find(row=>row.payload.decisionId===decisionId);
+        const receipt=indexed?.receipt??(legacy?{relativePath:"recoveries/"+legacy.payload.owner.owner+".json",bytes:legacy.bytes}:null);
+        if(!receipt)return null;
+        const value=JSON.parse(receipt.bytes),payload=this.validateRecoveryRecord(value,value.payload?.owner?.owner+".json",state.key);
+        check(this.stageInventory!==null||payload.owner.schema!=="negi-master-conversation-owner/4"&&payload.owner.schema!=="negi-master-conversation-owner/5","indexed recovery requires its original inventory registration");
+        check(payload.decisionId===decisionId&&payload.cwdSha256===hash(state.canonicalCwd),"saved recovery checkout/decision differs");
+        const expectedOwner=JSON.stringify(payload.owner)+"\n",ownMissing=indexed?.missing.includes(receipt.relativePath)??false;
+        const storagePending=indexed?.missing.some(path=>path!==receipt.relativePath)??false;
+        const phase=storagePending?"storage_pending":ownMissing?"intent_saved":record===null?"owner_released":record.bytes===expectedOwner?"receipt_published":"different_owner";
+        if(!ownMissing)check((await artifact(join(state.master,receipt.relativePath),8000))?.bytes===receipt.bytes,"published recovery changed");
+        check((await artifact(join(this.root,"signing-key.json"),1000))?.bytes===state.keyBytes&&
+          (await artifact(join(state.master,"owner.lock"),2000))?.bytes===record?.bytes,"saved recovery evidence changed");
+        if(this.stageInventory){check(isDeepStrictEqual(indexed,await this.stageInventory.recoveryIntent(decisionId)),"saved recovery index changed");this.assertIndexedRecoveryContext();}
+        return {decisionId,requestId:payload.owner.operation.requestId,ownerId:payload.owner.owner,kind:payload.owner.kind,ownerSha256:hash(expectedOwner),
+          proofSha256:payload.proofSha256,state:phase,ownerReleased:phase==="owner_released",operationComplete:false} as MasterOwnerRecoveryStatus;
+      }catch{throw new MasterConversationHeldError();}
+    };
+    return this.stageInventory?this.withStorage(read):read();
+  }
+
+  private async releaseIndexedOwnerHeld(cwd:string,decisionId:string,expectedProofSha256:string) {
+    this.assertIndexedRecoveryContext();const inventory=this.stageInventory!;
+    const state=await this.recoveryState(cwd);check(state,"recovery authority absent");
+    const indexed=await inventory.recoveryIntent(decisionId);
+    let receipt=indexed.receipt?.bytes;
+    const record=await artifact(join(state.master,"owner.lock"),2000);
+    if(!record){
+      const saved=await this.ownerRecoveryStatus(cwd,decisionId);
+      check(saved?.state==="owner_released"&&saved.proofSha256===expectedProofSha256,"absent owner has no matching published decision");
+      return {decisionId,requestId:saved.requestId,ownerReleased:true as const,operationComplete:false as const};
+    }
+    const owner=validatedMasterOwner(record.value,this.options.masterId,state.key);
+    const preview=await this.ownerRecoveryHeld(cwd);
+    check(preview?.canRelease&&preview.proofSha256===expectedProofSha256&&preview.ownerSha256===hash(record.bytes)&&
+      (preview.recoveryDecisionId===null||preview.recoveryDecisionId===decisionId),"owner recovery preview is stale, live or belongs to another decision");
+    if(!receipt){
+      check(indexed.state==="clean"&&preview.recoveryDecisionId===null,"another recovery intent is pending");
+      const payload:RecoveryPayload={schemaVersion:"negi-master-owner-recovery/1",masterId:this.options.masterId,decisionId,cwdSha256:hash(state.canonicalCwd),
+        owner,proofSha256:expectedProofSha256,action:"release-owner-only",at:new Date().toISOString()};
+      receipt=JSON.stringify({payload,signature:createHmac("sha256",state.key).update(JSON.stringify(payload)).digest("hex")})+"\n";
+      await inventory.appendRecoveryIntent({expectedHead:indexed.head,ownerSha256:hash(record.bytes),bytes:receipt,cwd:state.canonicalCwd});
+    }
+    const payload=this.validateRecoveryRecord(JSON.parse(receipt),owner.owner+".json",state.key);
+    check(payload.decisionId===decisionId&&payload.proofSha256===expectedProofSha256&&payload.cwdSha256===hash(state.canonicalCwd)&&
+      JSON.stringify(payload.owner)+"\n"===record.bytes,"saved recovery decision differs");
+    const result=await inventory.releaseRecoveryIntent({decisionId,expectedProofSha256,cwd:state.canonicalCwd});
+    check(result.requestId===owner.operation.requestId&&await artifact(join(state.master,"owner.lock"),2000)===null,"indexed owner release changed");
+    const saved=await this.ownerRecoveryStatus(cwd,decisionId);
+    check(saved?.state==="owner_released"&&saved.proofSha256===expectedProofSha256,"indexed owner release not materialized");
+    this.assertIndexedRecoveryContext();
+    return {decisionId,requestId:result.requestId,ownerReleased:true as const,operationComplete:false as const};
+  }
+  private async idle(state: Awaited<ReturnType<MasterConversationAuthority["prepare"]>>) {
+    const operations = await this.operations(state.master, state.key);
+    check(operations.every(op => ["completed", "cancelled"].includes(op.records.at(-1)!.stage)), "unfinished conversation transaction");
+    await assertMasterIdleEvidence(this.options.turnRoot, this.options.masterId, this.options.scheduler);
+    check((await artifact(join(this.root, "signing-key.json"), 1000))?.bytes === state.keyBytes, "signing key changed");
+    return operations;
+  }
+
+  private conversationChain(operations: Operation[]): MasterConversationResult | null {
+    check(operations.every(op => ["completed", "cancelled"].includes(op.records.at(-1)!.stage)), "unfinished conversation transaction");
+    const completed = operations.map(op => op.records.at(-1)!).filter(record => record.stage === "completed");
+    if (!completed.length) return null;
+    const starts = completed.filter(record => record.request.mode === "start");
+    check(starts.length === 1, "resident conversation must have one initial identity");
+    let current = starts[0]!;
+    const visited = new Set([current.request.requestId]), threads = new Set([current.identity!.threadId]);
+    for (;;) {
+      const next = completed.filter(record => record.request.oldThreadId === current.identity!.threadId);
+      check(next.length <= 1, "resident conversation branched");
+      if (!next.length) break;
+      current = next[0]!;
+      check(!visited.has(current.request.requestId) && !threads.has(current.identity!.threadId), "resident conversation cycle");
+      visited.add(current.request.requestId); threads.add(current.identity!.threadId);
+    }
+    check(visited.size === completed.length, "resident conversation identity disconnected");
+    return structuredClone({ request: current.request, stage: current.stage, identity: current.identity, reason: current.reason });
+  }
+
+  /** Read the signed conversation chain and all local turns; never infer an ID from the display log. */
+  async resident(cwd: string): Promise<{ current: MasterConversationResult | null; turns: Array<{ id: string; status: string }> }> {
+    return this.withStorage(async () => {
+      await this.assertStartupSafeHeld(cwd);
+      const before = await this.startupEvidence();
+      const current = this.conversationChain(before?.operations ?? []);
+      const canonical = await realpath(resolve(cwd));
+      check(!current || current.request.cwd === canonical, "resident checkout differs");
+      const knownThreads = new Set((before?.operations ?? []).flatMap(op => op.records.at(-1)?.identity?.threadId ?? []));
+      const turns: Array<{ id: string; status: string }> = [];
+      let names: string[] = [];
+      try { names = await readdir(this.options.turnRoot); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      for (const name of names) {
+        const path = join(this.options.turnRoot, name), request = await artifact(join(path, "request.json"), 1_000_000);
+        check(request, "resident turn request missing");
+        if (request.value.masterId !== this.options.masterId) continue;
+        check(knownThreads.has(request.value.threadId as string), "unregistered historical resident thread requires explicit migration");
+        if (request.value.threadId !== current?.identity?.threadId) continue;
+        const binding = await artifact(join(path, "provider.json"), 8000);
+        if (!binding) continue; // assertStartupSafe already proves an unsent cancellation.
+        const outcome = await artifact(join(path, "outcome.json"), 2_000_000);
+        check(outcome && token(binding.value.turnId), "resident terminal evidence missing");
+        turns.push({ id: binding.value.turnId, status: String(outcome.value.status) });
+      }
+      check(new Set(turns.map(turn => turn.id)).size === turns.length, "resident turn identity duplicated");
+      check(isDeepStrictEqual(before, await this.startupEvidence()), "resident identity changed during observation");
+      return { current, turns: turns.sort((a, b) => a.id.localeCompare(b.id)) };
+    });
+  }
+
+  /** Candidate writer audit; not used by production startup or normal turn dispatch. */
+  async assertIdle(cwd: string): Promise<void> {
+    await this.withLock(cwd, async state => { try { await this.idle(state); } catch { throw new MasterConversationHeldError(); } });
+  }
+  /** Turn reservation and empty-thread rotation use this same per-Master lock. */
+  async admitTurn(raw: MasterTurnRequest & {requestId:string}, options?: { resident: true }): Promise<MasterTurnLease> {
+    check(uuid.test(raw.requestId), "admission request invalid");
+    const cwd=await realpath(resolve(raw.cwd)),request={cwd,model:raw.model,effort:raw.effort,threadId:raw.threadId,text:raw.text};
+    const workId="master-"+raw.requestId,requestedAt=new Date().toISOString();
+    const requestBytes=JSON.stringify({schemaVersion:"negi-master-turn/1",workId,masterId:this.options.masterId,...request,inputSha256:hash(request.text),at:requestedAt})+"\n";
+    return this.withLock(cwd, async state => {
+      try { await this.idle(state); } catch { throw new MasterConversationHeldError(); }
+      if (options?.resident) {
+        const current = this.conversationChain(await this.operations(state.master, state.key));
+        check(current?.identity?.threadId === request.threadId && current.request.cwd === request.cwd &&
+          current.request.model === request.model && current.request.effort === request.effort, "resident turn uses stale conversation or settings");
+      }
+      await this.assertStorageCompatible();
+      return guardMasterAdmission(scheduledMasterTurns({...this.options,root:this.options.turnRoot,workId,requestedAt,
+        ...(this.runtimeInventory ? { journal: this.runtimeInventory.turnJournal() } : {})}),
+        () => this.assertStorageCompatible(), run => this.withStorage(run)).reserve(request);
+    },{kind:"turn-admission",operation:{domain:"master-conversation",requestId:raw.requestId,hash:hash(requestBytes)}});
+  }
+
+  private async startupEvidence() {
+    await this.assertStorageCompatible();
+    await directory(dirname(this.root));
+    let rootIdentity: string;
+    try { rootIdentity = await directory(this.root); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
+    const names = (await readdir(this.root)).sort();
+    check(isDeepStrictEqual(names, ["masters", "signing-key.json"]), "startup authority entries invalid");
+    const key = await artifact(join(this.root, "signing-key.json"), 1000);
+    check(key && Object.keys(key.value).length === 2 && key.value.schemaVersion === "negi-master-conversation-key/1" &&
+      typeof key.value.key === "string" && /^[0-9a-f]{64}$/.test(key.value.key), "startup signing key invalid");
+    const masters = join(this.root, "masters"), mastersIdentity = await directory(masters);
+    const mastersNames = (await readdir(masters)).sort();
+    check(mastersNames.length <= 10_000 && mastersNames.every(name => /^[a-zA-Z0-9_-]{1,100}$/.test(name)), "startup Master inventory invalid");
+    const master = join(masters, this.options.masterId);
+    let masterIdentity: string | null = null;
+    try { masterIdentity = await directory(master); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    let operations: Operation[] = [];
+    if (masterIdentity) {
+      check(await artifact(join(master, "owner.lock"), 8000) === null, "conversation owner requires reconciliation");
+      operations = await this.operations(master, Buffer.from(key.value.key, "hex"));
+      check(operations.every(op => ["completed", "cancelled"].includes(op.records.at(-1)!.stage)), "conversation transaction incomplete");
+    }
+    check(rootIdentity === await directory(this.root) && mastersIdentity === await directory(masters) &&
+      isDeepStrictEqual(names, (await readdir(this.root)).sort()) && isDeepStrictEqual(mastersNames, (await readdir(masters)).sort()) &&
+      (await artifact(join(this.root, "signing-key.json"), 1000))?.bytes === key.bytes, "startup authority changed");
+    await this.assertStorageCompatible();
+    return { rootIdentity, mastersIdentity, mastersNames, masterIdentity, keyBytes: key.bytes, operations };
+  }
+
+  /** Production bootstrap audit. Read-only: no signing key, journal, owner lock or repair. */
+  async assertStartupSafe(cwd: string): Promise<void> {
+    if (this.runtimeInventory) return this.withStorage(() => this.assertStartupSafeHeld(cwd));
+    return this.assertStartupSafeHeld(cwd);
+  }
+  private async assertStartupSafeHeld(cwd: string): Promise<void> {
+    try {
+      const canonical = await realpath(resolve(cwd));
+      check(!inside(canonical, this.root) && !inside(canonical, this.options.turnRoot) && !inside(canonical, this.options.scheduler.path), "state inside checkout");
+      const before = await this.startupEvidence();
+      await assertMasterIdleEvidence(this.options.turnRoot, this.options.masterId, this.options.scheduler);
+      check(isDeepStrictEqual(before, await this.startupEvidence()), "startup authority changed during turn audit");
+    } catch { throw new MasterConversationHeldError(); }
+  }
+
+  /** Read the same request after reconnect/crash. No mkdir, key creation, replay or lock stealing. */
+  async status(requestId: string): Promise<MasterConversationStatus | null> {
+    check(uuid.test(requestId), "request ID invalid");
+    if (this.stageInventory) return this.indexedStatus(requestId);
+    try {
+      let rootIdentity: string;
+      try { rootIdentity = await directory(this.root); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
+      const key = await artifact(join(this.root, "signing-key.json"), 1000);
+      check(key && Object.keys(key.value).length === 2 && key.value.schemaVersion === "negi-master-conversation-key/1" &&
+        typeof key.value.key === "string" && /^[0-9a-f]{64}$/.test(key.value.key), "status signing key invalid");
+      await directory(join(this.root, "masters"));
+      const master = join(this.root, "masters", this.options.masterId);
+      try { await directory(master); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
+      const operations = await this.operations(master, Buffer.from(key.value.key, "hex"));
+      const owner = await artifact(join(master, "owner.lock"), 8000);
+      if (owner) validatedMasterOwner(owner.value,this.options.masterId,Buffer.from(key.value.key,"hex"));
+      check(rootIdentity === await directory(this.root) && (await artifact(join(this.root, "signing-key.json"), 1000))?.bytes === key.bytes, "status authority changed");
+      const last = operations.find(op => op.records[0]!.request.requestId === requestId)?.records.at(-1);
+      return last ? structuredClone({ request: last.request, stage: last.stage, identity: last.identity, reason: last.reason, exclusionHeld: owner !== null }) : null;
+    } catch { throw new MasterConversationHeldError(); }
+  }
+
+  /** A crash can preserve the signed owner before the first stage exists. */
+  async pendingResidentRequest(requestId: string): Promise<boolean> {
+    check(uuid.test(requestId), "request ID invalid");
+    return this.withStorage(async () => {
+      const key = await artifact(join(this.root, "signing-key.json"), 1000);
+      check(key && key.value.schemaVersion === "negi-master-conversation-key/1" && typeof key.value.key === "string" && /^[0-9a-f]{64}$/.test(key.value.key), "status authority missing");
+      const record = await artifact(join(this.root, "masters", this.options.masterId, "owner.lock"), 8000);
+      if (!record) return false;
+      const owner = validatedMasterOwner(record.value, this.options.masterId, Buffer.from(key.value.key, "hex"));
+      return owner.kind === "thread-start" && owner.operation.requestId === requestId;
+    });
+  }
+
+  private async indexedStatus(requestId: string): Promise<MasterConversationStatus | null> {
+    try {
+      return await this.withStorage(async () => {
+        const runtime = this.runtimeInventory ? await this.runtimeInventory.audit() : null;
+        const indexed = await this.stageInventory!.latestStage(requestId);
+        if (!indexed.latest) return null;
+        const envelope = JSON.parse(indexed.latest.bytes), last = envelope.payload as RecordPayload;
+        check(last && validRequest(last.request) && last.request.requestId === requestId && last.request.masterId === this.options.masterId,
+          "indexed conversation registration invalid");
+        const state = await this.recoveryState(last.request.cwd);
+        check(state && Object.keys(envelope).length === 2 && typeof envelope.signature === "string" && /^[0-9a-f]{64}$/.test(envelope.signature) &&
+          timingSafeEqual(createHmac("sha256", state.key).update(JSON.stringify(last)).digest(), Buffer.from(envelope.signature, "hex")), "indexed stage signature invalid");
+        const owner = await artifact(join(state.master, "owner.lock"), 8000);
+        if (owner) validatedMasterOwner(owner.value, this.options.masterId, state.key);
+        const after = await this.stageInventory!.latestStage(requestId);
+        check(isDeepStrictEqual(indexed, after), "indexed status changed during observation");
+        if(this.runtimeInventory)check(isDeepStrictEqual(runtime,await this.runtimeInventory.audit()),"runtime status changed during observation");
+        const pending = indexed.state === "pending" || runtime?.state === "pending";
+        return structuredClone({ request: last.request, stage: pending ? "needs_reconciliation" : last.stage,
+          identity: last.identity, reason: pending ? "会話の保存が途中です。記録を保持して照合してください。" : last.reason,
+          exclusionHeld: owner !== null || pending });
+      });
+    } catch { throw new MasterConversationHeldError(); }
+  }
+
+  /** A trusted callback must persist dispatch intent immediately before thread/start. */
+  async start(raw: MasterConversationRequest, run: (markDispatched: () => Promise<void>) => Promise<CodexThreadIdentity>, options?: { resident: true }): Promise<MasterConversationResult> {
+    const request = structuredClone(raw);
+    check(validRequest(request) && request.masterId === this.options.masterId, "request invalid");
+    request.cwd = await realpath(resolve(request.cwd));
+    check(Buffer.byteLength(JSON.stringify(request)) <= 16_000, "request exceeds durable record bound");
+    return this.withLock(request.cwd, async state => {
+      const operations = await this.withStorage(() => this.operations(state.master, state.key));
+      const existing = operations.find(op => op.records[0]!.request.requestId === request.requestId);
+      if (existing) {
+        check(isDeepStrictEqual(existing.records[0]!.request, request), "request ID reused for different conditions");
+        const last = existing.records.at(-1)!;
+        return structuredClone({ request, stage: ["completed", "cancelled"].includes(last.stage) ? last.stage : "needs_reconciliation", identity: last.identity, reason: last.reason });
+      }
+      try { await this.withStorage(() => this.idle(state)); } catch { throw new MasterConversationHeldError(); }
+      if (options?.resident) {
+        const current = this.conversationChain(operations);
+        check(request.oldThreadId === (current?.identity?.threadId ?? null) &&
+          request.mode === (current ? "rotate" : "start"), "resident conversation changed before dispatch");
+      }
+      await this.requireStageStorage();
+      const path = join(state.master, request.requestId);
+      if (!this.stageInventory) await mkdir(path);
+      const operation: Operation = { path, records: [], bytes: [] };
+      const ownerBytes = (await artifact(join(state.master, "owner.lock"), 8000))?.bytes;
+      check(ownerBytes, "conversation owner missing");
+      const append = async (stage: Stage, identity: CodexThreadIdentity | null = null, reason: string | null = null) => this.withStorage(async () => {
+        check((await artifact(join(state.master, "owner.lock"), 8000))?.bytes === ownerBytes, "conversation owner changed");
+        if (this.stageInventory) await this.stageInventory.ownerBaseline(hash(ownerBytes));
+        if (options?.resident && stage === "bound") await assertMasterIdleEvidence(this.options.turnRoot, this.options.masterId, this.options.scheduler);
+        check(nextStage(operation.records.at(-1)?.stage ?? null, stage), "invalid transition");
+        check((await artifact(join(this.root, "signing-key.json"), 1000))?.bytes === state.keyBytes, "signing key changed");
+        await this.requireStageStorage();
+        const payload: RecordPayload = { schemaVersion: "negi-master-conversation/1", request, stage,
+          previousSha256: operation.bytes.length ? hash(operation.bytes.at(-1)!) : null, identity, reason, at: new Date().toISOString() };
+        const signature = createHmac("sha256", state.key).update(JSON.stringify(payload)).digest("hex");
+        const bytes = JSON.stringify({ payload, signature }) + "\n";
+        const filename = `0${operation.records.length}-${stage}.json`;
+        if (this.stageInventory) {
+          const before = await this.stageInventory.audit();
+          check(before.state === "clean", "previous indexed stage is incomplete");
+          const owner = await artifact(join(state.master, "owner.lock"), 2000);
+          check(owner, "exact indexed stage owner missing");
+          // Persist the signed intent/head together before the first mkdir or
+          // create-only stage file. An uncertain ACK must not materialize/replay.
+          await this.stageInventory.appendStageIntent({ expectedHead: before.head, ownerSha256: hash(owner.bytes),
+            relativePath: request.requestId + "/" + filename, bytes });
+          if (!operation.records.length) await mkdir(path);
+        }
+        await writeNew(join(path, filename), bytes);
+        operation.records.push(payload); operation.bytes.push(bytes);
+        await this.requireStageStorage();
+      });
+      await append("requested"); await append("old_idle");
+      let dispatched = false, marking = false;
+      try {
+        await this.requireStageStorage();
+        const identity = structuredClone(await run(async () => {
+          check(!dispatched && !marking, "dispatch intent already requested"); marking = true;
+          await this.requireStageStorage();
+          await append("start_dispatched"); dispatched = true;
+        }));
+        check(dispatched, "provider callback omitted dispatch intent");
+        validateIdentity(identity, request);
+        await append("bound", identity); await append("completed", identity);
+        return structuredClone({ request, stage: "completed", identity, reason: null });
+      } catch {
+        // Failed intent persistence may leave a partial file; never reinterpret it as unsent.
+        const uncertain = dispatched || marking;
+        try { await append(uncertain ? "needs_reconciliation" : "cancelled", operation.records.at(-1)?.identity ?? null,
+          uncertain ? "thread/start or its durable outcome is unknown; inspect this request before continuing" : "thread/start was not dispatched"); }
+        catch { /* Partial/unknown evidence remains a startup hold; no replay. */ }
+        throw new MasterConversationHeldError(uncertain ? "新しい会話の作成結果を確認できません。同じ要求の照合が必要です。自動では再作成しません。" : "新しい会話は未作成です。準備を確認してから、別の要求で明示的に再試行してください。");
+      }
+    },{kind:"thread-start",operation:{domain:"master-conversation",requestId:request.requestId,hash:hash(JSON.stringify(request)+"\n")}}, options?.resident === true);
+  }
+}

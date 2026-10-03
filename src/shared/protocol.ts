@@ -275,6 +275,7 @@ export type ClientMessage =
   | ChatAnswerMessage
   | ChatStopMessage
   | ChatNewMessage
+  | ChatConversationStatusMessage
   | ChatHistoryMessage;
 
 // ===== サーバ → クライアント =====
@@ -365,6 +366,16 @@ export interface CapabilitiesMessage {
   type: "capabilities";
   /** 監督・要約機能が有効か（＝サブスクの claude CLI が使えるか）。 */
   supervisor: boolean;
+  /** Authenticated local artifact reviews are configured. */
+  reviews?: boolean;
+  /** Fixed Vault Task Contract execution is configured. */
+  tasks?: boolean;
+  taskAuthoring?: boolean;
+  projectSetup?: boolean;
+  /** Managed Task workflow; direct PTY additions are unavailable. */
+  managedTasksOnly?: boolean;
+  codexConversations?: boolean;
+  conversationAuthority?: string;
 }
 
 /** ダッシュボード: エビ 1 体分の使用状況（cost/context/model）。 */
@@ -432,6 +443,7 @@ export interface DirListingMessage {
 }
 
 export type ServerMessage =
+  | { type: "taskResults"; results: import("./taskResults.ts").TaskResultSummary[] }
   | RegistryMessage
   | OutputMessage
   | ScrollbackMessage
@@ -447,7 +459,9 @@ export type ServerMessage =
   | DirListingMessage
   | ChatEventMessage
   | ChatSnapshotMessage
-  | ChatStateMessage;
+  | ChatStateMessage
+  | ChatSendResultMessage
+  | ChatConversationResultMessage;
 
 // ===== master チャット UI（ui:"chat"）のプロトコル =====
 //
@@ -537,6 +551,7 @@ export interface MasterChatUsage {
 
 /** チャット 1 イベント（サーバ内部 MasterEvent ＋ user / inbound）。 */
 export type MasterChatEvent =
+  | { kind: "taskResult"; result: import("./taskResults.ts").TaskResultSummary }
   | {
       kind: "session";
       sessionId: string;
@@ -545,7 +560,7 @@ export type MasterChatEvent =
       mcpServers: { name: string; status: string }[];
       capabilities: string[];
     }
-  | { kind: "user"; text: string; attachments?: ChatAttachment[]; replyTo?: ChatReplyRef }
+  | { kind: "user"; text: string; attachments?: ChatAttachment[]; replyTo?: ChatReplyRef; requestId?: string }
   /**
    * master がチャットへ共有した画像（PR-M10・`chat_image` ツール）。
    * `user` / `inbound` と同じ「ワイヤ側にしか無い kind」で、MasterSession.shareImage()
@@ -611,11 +626,13 @@ export type MasterChatEvent =
    *
    * 未知の kind として無視する旧クライアントは、これまでどおり全ログを出し続けるだけ。
    */
-  | { kind: "cleared" }
+  | { kind: "cleared"; requestId?: string; oldThreadId?: string; newThreadId?: string }
   | { kind: "exit"; code: number | null; signal: string | null };
 
 /** seq / ts を付けた配信単位。seq は master セッション内で単調増加（欠落検出用）。 */
 export interface MasterChatEnvelope {
+  /** Resident display partition; provider identity comes from the server, never the display log. */
+  threadId?: string | null;
   seq: number;
   ts: number;
   event: MasterChatEvent;
@@ -637,6 +654,8 @@ export interface ChatSendMessage {
   /** master の agent id（既定 "master"）。 */
   id: string;
   text: string;
+  /** Correlates the response and accepted transcript entry; never an automatic retry token. */
+  requestId?: string;
   /**
    * 添付画像（PR-M4）。`POST /control/chat-attach` で保存済みのものだけを参照する。
    * サーバは image/* のものを stream-json の image content block として投入する。
@@ -647,6 +666,14 @@ export interface ChatSendMessage {
    * `> [reply to master#<seq>] <抜粋>` が 1 行足される。
    */
   replyTo?: ChatReplyRef;
+}
+
+export interface ChatSendResultMessage {
+  type: "chatSendResult";
+  id: string;
+  requestId: string;
+  accepted: boolean;
+  reason?: string;
 }
 
 /**
@@ -682,6 +709,14 @@ export interface ChatStopMessage {
 export interface ChatNewMessage {
   type: "chatNew";
   id: string;
+  requestId?: string;
+  oldThreadId?: string;
+}
+export interface ChatConversationStatusMessage { type: "chatConversationStatus"; id: string; requestId: string }
+export interface ChatConversationResultMessage {
+  type: "chatConversationResult"; id: string; requestId: string;
+  state: "completed" | "cancelled" | "attention" | "missing";
+  oldThreadId: string | null; newThreadId: string | null; reason: string | null;
 }
 
 /** 過去ログのページング要求（クライアント → サーバ）。 */
@@ -713,6 +748,7 @@ export interface ChatSnapshotMessage {
   id: string;
   events: MasterChatEnvelope[];
   hasMore: boolean;
+  threadId?: string | null;
 }
 
 /** チャット master の状態通知（サーバ → クライアント）。 */
@@ -722,4 +758,5 @@ export interface ChatStateMessage {
   state: MasterChatState;
   /** 未応答の承認/質問の件数（「待機 N 件」ではない。busy 中の投入はキューされない）。 */
   pending: number;
+  threadId?: string | null;
 }

@@ -14,6 +14,7 @@ import type { DirListing, DirEntry } from "../shared/protocol.ts";
 export class FilePicker {
   /** モーダルのルート要素（index.html の #file-picker）。 */
   private readonly el: HTMLElement;
+  private panel!: HTMLDialogElement;
   private pathLabel!: HTMLElement;
   private listEl!: HTMLElement;
   private errorEl!: HTMLElement;
@@ -41,22 +42,23 @@ export class FilePicker {
     this.el.innerHTML = "";
     this.el.classList.add("file-picker");
 
-    // 背景（タップで閉じる）。
-    const backdrop = document.createElement("div");
-    backdrop.className = "fp-backdrop";
-    backdrop.addEventListener("click", () => this.close());
-
-    const panel = document.createElement("div");
+    const panel = document.createElement("dialog");
+    this.panel = panel;
     panel.className = "fp-panel";
-    panel.setAttribute("role", "dialog");
-    panel.setAttribute("aria-label", "ファイルを開く");
+    panel.setAttribute("aria-label", "資料を開く");
+    panel.addEventListener("cancel", event => { event.preventDefault(); this.close(); });
+    panel.addEventListener("click", event => {
+      if (event.target !== panel) return;
+      const rect = panel.getBoundingClientRect();
+      if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) this.close();
+    });
 
     // ヘッダ。
     const head = document.createElement("div");
     head.className = "fp-head";
     const title = document.createElement("span");
     title.className = "fp-title";
-    title.textContent = "📂 ファイルを開く";
+    title.textContent = "資料を開く";
     const closeBtn = document.createElement("button");
     closeBtn.className = "fp-close";
     closeBtn.type = "button";
@@ -82,6 +84,7 @@ export class FilePicker {
     input.autocapitalize = "off";
     input.spellcheck = false;
     input.setAttribute("inputmode", "text");
+    input.setAttribute("aria-label", "資料のパス");
     const openBtn = document.createElement("button");
     openBtn.type = "submit";
     openBtn.className = "fp-manual-open";
@@ -105,7 +108,7 @@ export class FilePicker {
     this.listEl = listEl;
 
     panel.append(head, pathLabel, form, errorEl, listEl);
-    this.el.append(backdrop, panel);
+    this.el.append(panel);
   }
 
   /** モーダルを開き、ルート一覧を要求する。 */
@@ -113,6 +116,7 @@ export class FilePicker {
     this.opened = true;
     this.pendingOpen = false;
     this.el.hidden = false;
+    if (!this.panel.open) this.panel.showModal();
     this.clearError();
     this.setLoading("読み込み中…");
     // 直近に開いていたディレクトリがあればそこを、無ければルート一覧を要求する。
@@ -123,6 +127,7 @@ export class FilePicker {
   close(): void {
     this.opened = false;
     this.pendingOpen = false;
+    this.panel.close();
     this.el.hidden = true;
   }
 
@@ -191,6 +196,7 @@ export class FilePicker {
       row.addEventListener("click", () => this.requestOpen(entry.path, entry.name));
     } else {
       row.setAttribute("aria-disabled", "true");
+      (row as HTMLButtonElement).disabled = true;
     }
     return row;
   }

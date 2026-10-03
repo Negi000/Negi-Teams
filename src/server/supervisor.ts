@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { withoutControlPlaneEnv } from "./controlPlaneEnv.ts";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -283,7 +284,7 @@ function runOnce(cmd: string, args: string[], engine: SummaryEngine): Promise<st
         maxBuffer: MAX_STDOUT_BYTES,
         // 標準出力を文字列で受ける。
         encoding: "utf8",
-        env: { ...parentEnv, ...engine.env },
+        env: withoutControlPlaneEnv({ ...parentEnv, ...engine.env }),
         // PTY は使わない。stdin は閉じる（--print / -p は stdin を待たない）。
       },
       (error, stdout, stderr) => {
