@@ -65,7 +65,9 @@ function publicView(service: LocalTaskService, view: TaskRunView) {
     taskContract: service.dispatchContract(view.id),
     version: view.version, configSha256: view.configSha256, objective: view.objective, baseSha: view.baseSha,
     allowedPaths: view.allowedPaths, acceptance: view.acceptance, invariants: view.invariants,
-    outOfScope: view.outOfScope, verification: view.verification, planner: view.astra, worker: view.sol,
+    outOfScope: view.outOfScope, verification: view.verification, planner: view.astra,
+    worker: view.taskMode==="read_only_research"?view.luna:view.sol,
+    ...(view.taskMode?{taskMode:view.taskMode,workerRole:"luna"}:{}),
     status: view.status, canStart: view.canStart, live: view.live, error: view.error,
     verificationOutcome: view.verificationOutcome, acceptedBy: view.acceptedBy, reviewId: view.reviewId,
     ...(view.requestedBy ? { requestedBy: view.requestedBy } : {}) };
@@ -105,7 +107,9 @@ export function registeredTaskTools(service: LocalTaskService, masterId: string,
           value={decompositionId:group.id,title:group.title,hash:group.hash,url:`/task-plans?draft=${drafts[0].id}`,
             tasks:drafts.map(d=>({draftId:d.id,key:d.decomposition!.key,title:d.title,dependsOn:d.decomposition!.dependsOn,
               status:d.status,canFinalize:d.canFinalize,url:`/task-plans?draft=${d.id}`})),
-            executionStarted:false,humanConfirmationRequired:true,successorsRequireNewPlanAfterIntegration:true};
+            executionStarted:false,humanConfirmationRequired:true,
+            successorsRequireNewPlanAfterIntegration:drafts.every(d=>d.taskMode!=="read_only_research"),
+            ...(drafts.some(d=>d.taskMode==="read_only_research")?{successorsRequireNewResearchContract:true}: {})};
         } else {
           const draft=await authoring.service.propose(args.profile_id,args.task,{...origin,...authoring.planner},args.baseline_id as string|undefined);
           value={draftId:draft.id,title:draft.title,hash:draft.hash,status:draft.status,

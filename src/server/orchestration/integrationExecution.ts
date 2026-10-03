@@ -153,7 +153,10 @@ export class LocalIntegrationExecutionService {
   }
   async preview(profileId: string, ids: string[]) { this.authoring.assertActiveProfile(profileId);return (await this.selected(profileId, ids)).preview; }
   async overview(profileId?: string) {
-    const p = this.profile(profileId ?? this.profiles.find(p=>p.active!==false)!.id), sources = [];
+    const runs = []; for (const id of await this.ids()) runs.push(await this.snapshot(id));
+    const selectedId = profileId ?? this.profiles.find(p=>p.active!==false)?.id;
+    if (!selectedId) return { profiles: [], profileId: null, sources: [], runs };
+    const p = this.profile(selectedId), sources = [];
     for (const item of this.tasks.list()) {
       if ((await this.tasks.knowledgeSource(item.id)).project !== p.project) continue;
       const view = await this.tasks.snapshot(item.id);
@@ -162,7 +165,6 @@ export class LocalIntegrationExecutionService {
       sources.push({ id: item.id, title: item.title, status: view.status, eligible, baseSha: view.baseSha,
         reviewId: view.reviewId, error: eligible ? null : "固定成果と検証を確認してから統合できます。" });
     }
-    const runs = []; for (const id of await this.ids()) runs.push(await this.snapshot(id));
     return { profiles: this.profiles.filter(p=>p.active!==false).map(p => ({ id: p.id, title: p.title })), profileId: p.id, sources, runs };
   }
   private async worktree(setup: Setup, clean = false) {

@@ -2,6 +2,7 @@
 // the existing evidence checks; this projection never decides a verification outcome.
 import { parseMarkdown, type MdBlock } from "../../client/markdown.ts";
 export interface TaskReviewPresentation {
+  kind?: "read_only_research";
   changes: string;
   acceptance: string;
   checks: Array<{ requirement: string; passed: boolean }>;

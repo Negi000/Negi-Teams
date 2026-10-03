@@ -262,7 +262,7 @@ export class CodexAppServerClient {
       throw new Error("resident provider returned different directory, policy, effort or state");
   }
 
-  private async assertResearchToolAuthority(cwd:string,threadId:string|null=null):Promise<void>{
+  async assertResearchToolAuthority(cwd:string,threadId:string|null=null):Promise<void>{
     // Read static effective config before asking for inventory, so a configured
     // MCP command is never started merely to discover that it was disallowed.
     const response=record(await this.transport.request("config/read",{cwd,includeLayers:false}));

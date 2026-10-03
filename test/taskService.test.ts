@@ -77,17 +77,18 @@ async function until(predicate: () => Promise<boolean>, timeoutMs = 5000) {
   }
 }
 
-test("browser Task paths hold research profiles until their artifact review schema is installed",async()=>{
+test("browser research registration requires its matching Vault class before any dispatch",async()=>{
   await fixture(async({catalog,config,prepare})=>{
     const {sol,...common}=config;
     const research={...common,taskMode:"read_only_research",luna:{model:"gpt-6-luna",effort:"low"}};
     let starts=0;
     const runtime={prepare,submit:submitVaultRun,execute:async(...args:Parameters<typeof completed>)=>{starts++;return completed(...args)}};
-    await assert.rejects(LocalTaskService.open({...catalog as object,runs:[{title:"Research",config:research}]},runtime),/artifact review.*held/);
+    await assert.rejects(LocalTaskService.open({...catalog as object,runs:[{title:"Research",config:research}]},runtime),/explicit Luna configuration/);
     const service=await LocalTaskService.open(catalog,runtime);
     try{
-      await assert.rejects(service.validateAuthoringConfiguration(research),/artifact review.*held/);
-      await assert.rejects(service.registerAuthoredRun("Research",{...research,approvedPlan:{proofDirectory:config.outputDir,requestId:randomUUID()}} as VaultRunConfig),/artifact review.*held/);
+      // The trusted profile parser accepts the explicit mode; catalog snapshot
+      // registration still checks the exact class before execution.
+      await service.validateAuthoringConfiguration(research);
       assert.equal(starts,0);assert.equal((await service.list()).length,1);
     }finally{await service.close()}
   });

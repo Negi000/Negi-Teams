@@ -67,6 +67,8 @@ async function writePinned(path: string, bytes: Buffer): Promise<void> {
 
 export async function captureTaskReview(config: VaultRunConfig, configSha256: string,
   title: string, state: TaskSnapshot, options: TaskReviewCaptureOptions = {}): Promise<TaskReviewManifest> {
+  if(config.taskMode==="read_only_research"||state.contract.taskClass==="read_only_research")
+    throw Error("Research results require their artifact review, not a Git review");
   const revision = options.revision ?? 0;
   if (!Number.isSafeInteger(revision) || revision < 0 || revision > 99 || (revision > 0 && !options.deferLedger))
     throw new Error("Task review revision options invalid");
@@ -128,6 +130,8 @@ export async function captureTaskReview(config: VaultRunConfig, configSha256: st
 }
 
 export async function verifyTaskReviewCheckout(config: VaultRunConfig, manifest: TaskReviewManifest): Promise<void> {
+  if(config.taskMode==="read_only_research"||manifest.schema!=="negi-task-review/1")
+    throw Error("Research results cannot be used as a Git review or integration source");
   if (manifest.runId !== config.runId || git(config.checkout, ["rev-parse", "HEAD"]).trim() !== manifest.baseSha ||
       hash(diff(config.checkout)) !== manifest.diffSha256 ||
       JSON.stringify(changedGitPaths(config.checkout)) !== JSON.stringify(manifest.files.map((file) => file.path)))

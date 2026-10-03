@@ -2,13 +2,15 @@
 
 2026-10-03（JST）。基準は `NEGI_TEAMS_MASTER_PLAN.ja.md` のPhase 0〜8と `REQUIREMENTS_TRACEABILITY.ja.md`。この表は実装・合成テスト・実モデル観測・人間受入を分ける。Git管理外の実行証拠も参照しており、実装差分の公開を全Phaseの完了宣言とは扱わない。
 
-## 2026-10-03追加: Luna調査Taskの実行基盤と画面公開の保留
+## 2026-10-03追加: Luna調査Task・成果レビューとMaterial 3画面
 
-[Lunaの読み取り専用Task実行基盤](negi-teams-luna-tasks.md)。明示したresearch契約とLuna設定だけをAstra→Lunaの共通schedulerへ接続し、正確なrole・read lease・別Context Pack・固定成果・変更ゼロ検証・native Job終了を記録する。通常Solや従来の限定Luna実装の扱いは保持する。ブラウザのTask起動は調査専用レビューが揃うまで拒否し、CLI結果もレビュー未登録と表示する。次に成果manifest・回復・署名付き受入・元Astraへの通知を接続し、その後Material 3 Expressiveの通常Task導線へ公開する。
+[Lunaの読み取り専用Taskと成果レビュー](negi-teams-luna-tasks.md)。明示したresearch契約とLuna設定だけをAstra→Lunaの共通schedulerへ接続し、正確なrole・read lease・別Context Pack・固定成果・変更ゼロ検証・native Job終了を記録する。専用成果manifest・部分保存回復・署名付き受入/取消・再起動・元Astra通知を接続した。raw/template契約案の確定はresearch classとLuna profileを維持し、通常Taskと並列CLIへ登録できる。単一Vault CLIは引き続きレビュー未登録と表示する。研究成果はコード統合/修正版/baselineへ渡さず、後続は新しい契約にする。
 
-独立レビューで指摘された外部tool権限とCLI版の起動前確認を修正した。research専用processの18feature/webを無効にし、thread/turn前にeffective config→空MCP inventoryを照合する。検査したCLI 0.160.0をprepareと各provider起動前に確認する。実CLIのmetadata確認は継承MCP6件を検出して保留し、inventory/thread/turnを要求せずJob終了を確認した。現在設定での実モデル調査成功ではなく、専用tool-free profileの接続が残る。
+research専用processは18featureとwebを無効にし、effective configが成立してから空のMCP inventoryを照合する。CLI 0.160.0と正規実行ファイルをprepare/各provider起動/中断照合で確認する。Windows Job確認が必要なため非Windowsは起動前に保留する。既知の最終回答が12KBを超えれば決定的に失敗を記録し、固定metadataの事前20KB確認でレビューの全文100KB上限を守る。先行の実CLI metadata確認は継承MCP6件を検出して保留し、inventory/thread/turnを要求せずJob終了を確認した。今回の実model調査成功を示すものではなく、専用tool-free profileとapproved Policyの通常Task選択は残る。
 
-最終関連13 filesは106/106成功、失敗・取消・skip 0（104744ms、actual exit0）、実行中src/scripts/test SHA不変。型検査/build/差分検査成功。先行155/155は最終tool権限・CLI版修正前で合算しない。独立再レビューで具体的な未解消指摘なし。今回clientソースの変更・新GUI試験・実モデルturn/Jev・実機・CI成功の証拠はない。ignored/transient filesystem変更・同一ユーザー外部processの完全隔離、調査レビュー/UI/Policy接続、旧binaryの混在対応と全利用者受入は未完。全73要件・Phase0〜8と全体ゴールはACTIVE。
+最終関連18 filesは179件中178成功・失敗/取消0・skip1（WindowsにPOSIX executable permissionがないため、881348ms、actual exit0）。その後追加した別fileの承認済みLuna直接実行/過大契約開始前拒否の2/2も成功。既存352 filesのsrc/scripts/test SHAは試験中不変で、追加はこの2件のtest fileだけ。型検査/build/差分検査成功。先行基盤106/106や修正前の試験結果へ合算しない。独立再レビューで具体的な未解消指摘なし。
+
+M3の通常compiled serverを実認証で操作し、1440×1000・375×812・320×780、深いリンク、契約確定→Task、レビュー→受入→再起動→取消、原文変更時の保留、研究専用の統合空状態、ダークテーマ/減動作/キーボードを確認した。20項目成功、横overflow/framework overlay/console error・warning 0。待機/調査中/照合のLuna表示はcontrolled HTTP payloadで確認。モデル結果は合成で、実model turn/Jev・実機・CI成功の証拠ではない。ignored/transient filesystem変更・同一ユーザー外部processの完全隔離、tool-free profile/Policy接続、旧binary混在対応と全利用者受入は未完。全73要件・Phase0〜8と全体ゴールはACTIVE。
 
 ## 2026-10-03追加: L1/L2と現在の知識承認
 
@@ -117,7 +119,7 @@
 | 1 履歴診断 | 読取専用importerとローカルDB。269 source・700,674 eventの保存版、参照行・欠測・再取込・変化中入力を区別。合成16件とDB整合性を確認 | 変化中の約2.8 GBログと今後の増分、全履歴の最新性、成果の外部裏づけ |
 | 2 Vault | ID/版/hashつきノート、検索、Context Pack、更新前hash、candidate/activate/deprecate。実VaultのTask/仕様/候補を利用。自由文から限定Lesson候補と明示知識承認を接続 | 既存派生Packの失効通知・大規模検索・同期競合 |
 | 3 Astra→Sol | App Server接続・台帳・Task固定・隔離checkoutを実装。Task画面で実Astra→Sol、内容監査による失効、元成果を保持した同一契約の修正版Bの再検証・再起動を確認。固定Codex Masterの読取専用UI turnも完了。開始・停止・操作承認・固定差分レビューを接続 | 実成果の人間受入。旧worker/MCP経路のTask Contractと同一枠への全面移行 |
-| 4 Luna・並列 | 単一schedulerとLuna/Solの読取並列を観測し、内容不良と機械条件の不一致を失敗として保持。別所有の2文書の実Astra→Sol書込を並行実行し、第三のclean checkoutへ統合・再検証。登録Taskの最新修正版も統合対象にできる。固定成果の選択・専用worktree・統合検証・レビューを通常UIへ接続し、停止・明示再開・署名付き受入・保存基準から後続契約まで合成確認。明示researchのAstra→Luna/read-only基盤とtool権限の開始前保留を追加 | 調査成果の専用レビュー・署名付き受入・通常UIとtool-free profile、実コードの競合解消・人間受入、全通常dispatchの同一枠化、checkout alias対策 |
+| 4 Luna・並列 | 単一schedulerとLuna/Solの読取並列を観測し、内容不良と機械条件の不一致を失敗として保持。別所有の2文書の実Astra→Sol書込を並行実行し、第三のclean checkoutへ統合・再検証。登録Taskの最新修正版も統合対象にできる。固定成果の選択・専用worktree・統合検証・レビューを通常UIへ接続し、停止・明示再開・署名付き受入・保存基準から後続契約まで合成確認。明示researchのAstra→Luna/read-only基盤・専用成果レビュー・署名付き受入/取消・通常M3 UI・部分保存/再起動復元を追加 | tool-free profileとapproved Policyの通常Task選択、実コードの競合解消・人間受入、全通常dispatchの同一枠化、checkout alias対策 |
 | 5 Jev shadow | 7 gateのoff/shadowと利用台帳。送信レビュー済みの非機密fixtureで2成功・1不正応答を観測し、失敗は再送せず保留 | 日本語の人間ラベルとの校正、全gateの実フロー接続、外部アカウント残高の強制上限 |
 | 6 レビュー | A→指摘→B→検証の台帳、Lesson候補、失効操作。Cookie認証付き画面で自由文を成果hashへ固定し、署名付き受入・取消を対応Task台帳へ反映。同一契約のローカル修正登録とjournalからの台帳復旧を実成果で確認。認証付き指摘→候補→別の知識承認→次のTask参照→失効を通常schedulerの合成Taskで接続 | 実成果の人間受入、workerによる修正版生成への通常経路、Lessonの複数事例照合・矛盾・寿命管理 |
 | 7 政策比較 | 同条件のLuna medium/lowを2問で実比較。双方正答だが所要時間は1勝1敗。M3の比較・別の承認/適用・理由付きrollback、署名固定版と再起動を接続。候補モデル/effortと独立した比較の照合を修正。根拠欠損後も署名履歴から戻せる。限定した読み取りdispatcherでは明示opt-in、実行中の版固定と次回既定への復帰を合成確認 | 品質を維持した明瞭な改善・実Policyの人間承認/実アカウント適用は未観測。通常Task分解・旧Master/workerの自動調査への接続、実機・大規模履歴・power loss/UNCは残る |

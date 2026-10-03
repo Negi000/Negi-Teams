@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { RESEARCH_FINDINGS_BYTES, researchReviewMetadata } from "../src/server/orchestration/researchArtifactPolicy.ts";
 import { FileTaskLedger } from "../src/server/orchestration/singleTask.ts";
 import { runSingleTask, type SingleTaskClient } from "../src/server/orchestration/singleTaskRunner.ts";
 
@@ -36,6 +37,27 @@ class FakeClient implements SingleTaskClient {
       contextInputTokens: null, contextWindow: null, lastUsage: this.usage };
   }
 }
+
+test("research findings bound is stated before dispatch and oversized results cannot become verified reviews",async()=>{
+  for(const bytes of [RESEARCH_FINDINGS_BYTES,RESEARCH_FINDINGS_BYTES+1]){
+    const dir=await mkdtemp(join(tmpdir(),"negi-research-limit-"));
+    try{
+      const astra=new FakeClient("gpt-6-astra","Read and report"),luna=new FakeClient("gpt-6-luna","x".repeat(bytes));let checks=0;
+      const state=await runSingleTask({runId:"bounded-research",contract:{...contract,taskClass:"read_only_research"},cwd:dir,
+        astra:{client:astra,model:astra.model,effort:"medium"},luna:{client:luna,model:luna.model,effort:"medium"},
+        ledger:new FileTaskLedger(join(dir,"run.jsonl")),artifactDir:join(dir,"artifacts"),turnTimeoutMs:1000,
+        verify:async()=>{checks++;return{outcome:"passed",evidenceRef:"fixture:checks"}}});
+      assert.match(luna.prompts[0],/UTF-8で12000バイト以内/);
+      assert.equal(checks,bytes===RESEARCH_FINDINGS_BYTES?1:0);
+      assert.equal(state.status,bytes===RESEARCH_FINDINGS_BYTES?"ready_for_review":"blocked");
+      if(bytes>RESEARCH_FINDINGS_BYTES)assert.equal(state.attempts.at(-1)!.state,"failed");
+    }finally{await rm(dir,{recursive:true,force:true})}
+  }
+  const metadata=researchReviewMetadata(contract);
+  const escaped=JSON.stringify({...metadata,findings:"\u0001".repeat(RESEARCH_FINDINGS_BYTES)},null,2);
+  assert.ok(Buffer.byteLength(escaped)<100_000);
+  assert.throws(()=>researchReviewMetadata({...contract,acceptance:Array(30).fill("\u0001".repeat(1000))}),/split it before dispatch/);
+});
 
 test("explicit research uses Luna, two read-only threads and a fixed post-turn verifier",async()=>{
   const dir=await mkdtemp(join(tmpdir(),"negi-luna-runner-"));

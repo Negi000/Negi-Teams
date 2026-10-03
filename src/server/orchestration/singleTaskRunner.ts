@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import type { CodexAppServerClient, CodexThreadIdentity, CodexTurnObservation } from "../master/appServerClient.ts";
 import { FileTaskLedger, type AttemptUsage, type ContractRef, type TaskAction, type TaskSnapshot, type TaskRole } from "./singleTask.ts";
 import type { ApprovedTaskPlan } from "./approvedTaskPlan.ts";
+import { RESEARCH_FINDINGS_BYTES, researchReviewMetadata } from "./researchArtifactPolicy.ts";
 
 export interface SingleTaskClient {
   initialize: CodexAppServerClient["initialize"];
@@ -76,6 +77,7 @@ function promptForSol(contract: ContractRef, plan: string, context: string | und
 }
 function promptForLuna(contract: ContractRef, plan: string, context: string | undefined): string {
   return `固定された読み取り専用契約を調査し、根拠のファイルと行・不明点を報告してください。\n` +
+    `最終回答はUTF-8で${RESEARCH_FINDINGS_BYTES}バイト以内（日本語なら約4000文字以内）にまとめてください。\n` +
     `ファイル変更、追加のモデル・subagent・別モデルCLI・権限昇格・外部送信は禁止です。成果は最終回答に返し、ランナーが保存します。\n` +
     `目的: ${contract.objective}\n受入条件: ${contract.acceptance.join(" / ")}\n` +
     `対象: ${contract.scope?.in.join(" / ") ?? "契約の範囲"}\n対象外: ${contract.scope?.out.join(" / ") ?? "範囲外の作業"}\n` +
@@ -86,11 +88,11 @@ function promptForLuna(contract: ContractRef, plan: string, context: string | un
     `基準SHA: ${contract.baseSha}\n承認された調査計画:\n${plan}` +
     (context ? `\n\nLuna Vault Context Pack（関連知識の派生物）:\n${context}` : "");
 }
-async function writeArtifact(directory: string, attemptId: string, text: string): Promise<string> {
+async function writeArtifact(directory: string, attemptId: string, text: string, limit=2_000_000): Promise<string> {
   await mkdir(directory, { recursive: true });
   const path = join(directory, `${attemptId}.md`);
   const data = Buffer.from(text, "utf8");
-  if (data.length > 2_000_000) throw new Error("model output too large for local artifact");
+  if (data.length > limit) throw new Error("model output too large for local artifact");
   const handle = await open(path, "wx");
   try { await handle.writeFile(data); await handle.sync(); }
   finally { await handle.close(); }
@@ -120,6 +122,7 @@ function observedUsage(result: CodexTurnObservation, threadId: string): AttemptU
 
 export async function runSingleTask(options: SingleTaskRunOptions): Promise<TaskSnapshot> {
   const readOnly = options.contract.taskClass === "read_only_research";
+  if(readOnly)researchReviewMetadata(options.contract);
   const worker = readOnly ? options.luna : options.sol;
   if (!worker || (readOnly ? options.sol !== undefined : options.luna !== undefined))
     throw Error("Task worker must match its fixed read-only or implementation contract");
@@ -209,10 +212,13 @@ export async function runSingleTask(options: SingleTaskRunOptions): Promise<Task
       return { state: await append({ type: "provider_unknown", attemptId,
         reason: `${role} turn has no confirmed final answer` }), text: null, ref: null };
     }
+    if(role==="luna"&&readOnly&&Buffer.byteLength(result.finalText)>RESEARCH_FINDINGS_BYTES){
+      return {state:await append({type:"fail_attempt",attemptId,reason:"Luna findings exceeded the fixed review size limit"}),text:null,ref:null};
+    }
     // The artifact and ledger are separate writes. If a crash occurs between them,
     // the attempt remains running and must be reconciled; it is never redispatched.
     let ref: string;
-    try { ref = await writeArtifact(out, attemptId, result.finalText); }
+    try { ref = await writeArtifact(out, attemptId, result.finalText, role==="luna"&&readOnly?RESEARCH_FINDINGS_BYTES:2_000_000); }
     catch {
       return { state: await append({ type: "provider_unknown", attemptId,
         reason: `${role} output artifact could not be persisted` }), text: null, ref: null };

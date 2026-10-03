@@ -35,6 +35,7 @@ export interface TaskPlanFields {
 export interface TaskExecutionProfile { id: string; title: string; project: string; repository: string; worktreeRoot: string;
   allowedPaths: string[]; maxAttempts: number; timeLimitMinutes: number; config: VaultRunConfig; hash: string; active?:boolean }
 type Profile = TaskExecutionProfile;
+const profileWorker=(profile:Profile)=>profile.config.taskMode==="read_only_research"?profile.config.luna:profile.config.sol;
 interface Draft { schema: "negi-task-plan/1"; id: string; createdAt: string; profileId: string;
   profileHash: string; baseSha: string; sources: Source[]; fields: TaskPlanFields;
   origin: Exclude<TaskRequestOrigin, { kind: "browser" }> & { model: string; effort: string }; hash: string;
@@ -48,7 +49,8 @@ function planIdentity(origin:Draft["origin"], suffix=""):string {
 }
 export interface TaskPlanView { id: string; createdAt: string; title: string; project: string; profileId: string;
   hash: string; baseSha: string; fields: TaskPlanFields; sources: Source[]; verification: string[];
-  planner: VaultRunConfig["astra"]; worker: VaultRunConfig["sol"]; origin: Draft["origin"];
+  planner: VaultRunConfig["astra"]; worker: VaultRunConfig["astra"]; origin: Draft["origin"];
+  taskMode?:"read_only_research";workerRole?:"luna";
   status: "draft" | "registered" | "attention" | "waiting_dependencies"; canFinalize: boolean; runId: string | null; error: string | null;
   decomposition?: TaskDecompositionNode; integrationBase?: IntegrationBase }
 
@@ -117,7 +119,8 @@ function markdown(draft: Draft, profile: Profile, requestId: string): string {
   const scalar = (k: string, v: string) => k + ": " + JSON.stringify(v) + "\n";
   const taskId = `NT-TASK-${draft.id}`;
   return "---\n" + Object.entries({ id: taskId, kind: "Task", project: profile.project, scope: "project", status: "active",
-    version: "1", updated: draft.createdAt.slice(0, 10), sensitivity: "local", approval_ref: `user:http-task-plan:${requestId}` })
+    version: "1", updated: draft.createdAt.slice(0, 10), sensitivity: "local", approval_ref: `user:http-task-plan:${requestId}`,
+    ...(profile.config.taskMode?{task_class:profile.config.taskMode}:{}) })
     .map(([k,v]) => scalar(k,v)).join("") + "source_refs:\n" + [`master:${draft.origin.masterId}:${draft.origin.threadId}:${draft.origin.turnId}:${draft.origin.callId}`]
     .map(v => "  - " + JSON.stringify(v) + "\n").join("") + "depends_on:\n" + draft.sources.map(s => "  - " + JSON.stringify(s.id) + "\n").join("") +
     "---\n# " + f.title.replace(/[\r\n]/g, " ") + "\n\n```negi-task-contract\n" + JSON.stringify(body, null, 2) + "\n```\n\n## 実行計画\n" +
@@ -130,6 +133,7 @@ function markdown(draft: Draft, profile: Profile, requestId: string): string {
 function snapshot(draft: Draft, profile: Profile, content: string): VaultTaskContract {
   const f = draft.fields, taskId = `NT-TASK-${draft.id}`, hash = sha(content);
   return { schemaVersion: "negi-task-contract/1", vaultId: taskId, version: 1, sha256: hash, project: profile.project,
+    ...(profile.config.taskMode?{taskClass:profile.config.taskMode}:{}),
     objective: f.objective, acceptance: f.acceptance, baseSha: draft.baseSha,
     scope: { in: f.inScope, out: f.outOfScope, allowedPaths: f.allowedPaths }, invariants: f.invariants,
     verification: profile.config.verification.map(v => v.requirement), escalation: f.escalation,
@@ -197,25 +201,31 @@ export class LocalTaskAuthoringService {
     throw new Error("Task draft writer is busy or requires reconciliation");
   }
   listProfiles() { return this.profiles.filter(p=>p.active!==false).map(p => ({ id:p.id, title:p.title, project:p.project, allowedPaths:p.allowedPaths,
-    verification:p.config.verification.map(c=>c.requirement), planner:p.config.astra, worker:p.config.sol,
+    verification:p.config.verification.map(c=>c.requirement), planner:p.config.astra, worker:profileWorker(p),
+    ...(p.config.taskMode?{taskMode:p.config.taskMode,workerRole:"luna"}:{}),
     maxAttempts:p.maxAttempts, timeLimitMinutes:p.timeLimitMinutes, independentTasksOnly:true,
-    decomposition:{maxTasks:8, executable:"independent_roots", successors:"new_plan_after_integration"} })); }
+    ...(p.config.taskMode?{executionInstructions:"Lunaの読み取り専用調査です。implementationPlanには調査手順を指定してください。ファイル変更・権限昇格・外部送信はできません。成果は調査レビューで確認し、訂正や後続作業は新しい契約で依頼してください。"}:{}),
+    decomposition:{maxTasks:8, executable:"independent_roots", successors:p.config.taskMode?"new_research_contract":"new_plan_after_integration"} })); }
   /** Trusted server composition only. No HTTP/tool endpoint exposes configuration mutation. */
-  integrationConfiguration() { return { storageRoot:join(this.root,"integrations"), profiles:structuredClone(this.profiles) }; }
+  integrationConfiguration() { return { storageRoot:join(this.root,"integrations"), profiles:structuredClone(this.profiles.filter(p=>p.config.taskMode!=="read_only_research")) }; }
   async bindIntegration(options:IntegrationReviewOptions,manifest:IntegrationReviewManifest,reviews:LocalReviewService):Promise<void> {
     for(const path of new Set([options.checkout,...reviews.modelWritableRoots(),...options.sources.flatMap(s=>[s.config.checkout,s.config.vault])])){
       const root=await realpath(path);
       if(inside(root,this.root)||inside(this.root,root))throw Error("Integration writable root overlaps protected authoring storage");
     }
     const ids:Array<{profileId:string;id:string}>=[];
-    for(const p of this.profiles){const id=await this.baselines.bind(p,options,manifest,reviews);if(id)ids.push({profileId:p.id,id})}
+    for(const p of this.profiles.filter(p=>p.config.taskMode!=="read_only_research")){const id=await this.baselines.bind(p,options,manifest,reviews);if(id)ids.push({profileId:p.id,id})}
     if(ids.length)reviews.bindIntegrationBaselines(manifest.review.id,()=>Promise.all(ids.map(row=>this.baselines.preview(row.profileId,row.id))));
   }
   async publishIntegrationBase(profileId:string,id:string,artifactSha256:string,requestId:string) {
+    if(this.profile(profileId).config.taskMode==="read_only_research")throw Error("Research cannot publish code integration baselines");
     return this.admission(async()=>{this.assertActiveProfile(profileId);return this.baselines.publish(profileId,id,artifactSha256,requestId)});
   }
-  async integrationBase(profileId:string,id:string){this.profile(profileId);return this.baselines.resolve(profileId,id)}
+  async integrationBase(profileId:string,id:string){
+    if(this.profile(profileId).config.taskMode==="read_only_research")throw Error("Research cannot use code integration baselines");
+    return this.baselines.resolve(profileId,id)}
   private withBase<T>(profileId:string,id:string|undefined,operation:(base?:IntegrationBase)=>Promise<T>):Promise<T> {
+    if(id&&this.profile(profileId).config.taskMode==="read_only_research")throw Error("Research uses a new fixed contract, not a code integration baseline");
     return id?this.baselines.withAccepted(profileId,id,operation):operation();
   }
   private async python(profile: Profile, args: string[]): Promise<unknown> {
@@ -233,8 +243,10 @@ export class LocalTaskAuthoringService {
   }
   async readProject(id: string, references: string[] = [], baselineId?:string) {
     this.assertActiveProfile(id);
+    if(baselineId&&this.profile(id).config.taskMode==="read_only_research")throw Error("Research uses a new fixed contract, not a code integration baseline");
     const context=await this.projectReferences(id,references);
-    return { ...this.listProfiles().find(row=>row.id===id)!, ...context, integrationBases:await this.baselines.choices(id),
+    return { ...this.listProfiles().find(row=>row.id===id)!, ...context,
+      integrationBases:this.profile(id).config.taskMode==="read_only_research"?[]:await this.baselines.choices(id),
       ...(baselineId?{integrationBase:await this.baselines.resolve(id,baselineId)}:{}) };
   }
   async propose(profileId: string, raw: unknown, origin: Draft["origin"], baselineId?:string): Promise<TaskPlanView> {
@@ -268,6 +280,8 @@ export class LocalTaskAuthoringService {
     return this.serial(()=>this.admission(()=>this.withBase(profileId,baselineId,async(integrationBase)=>{
       this.assertActiveProfile(profileId);
       const p=this.profile(profileId), f=taskDecomposition(raw,raw=>fields(raw,p));
+      if(p.config.taskMode==="read_only_research"&&f.nodes.some(node=>node.dependsOn.length))
+        throw Error("Research decomposition supports independent roots only; use a new contract for an artifact handoff");
       if(origin.kind!=="master"||origin.model!==p.config.astra.model||origin.effort!==p.config.astra.effort||
         ![origin.masterId,origin.threadId,origin.turnId,origin.callId].every(id=>typeof id==="string"&&id.length>0&&id.length<=200&&!/[\r\n\0]/.test(id)))
         throw new Error("Task decompositions require the configured resident Astra");
@@ -388,7 +402,8 @@ export class LocalTaskAuthoringService {
     if (approval && !registered && !error) error="契約の確定処理を照合してください。実行はまだ開始していません。";
     const waiting=Boolean(d.decomposition?.dependsOn.length);
     return { id:d.id,createdAt:d.createdAt,title:d.fields.title,project:p.project,profileId:p.id,hash:d.hash,baseSha:d.baseSha,
-      fields:d.fields,sources:d.sources,verification:p.config.verification.map(v=>v.requirement),planner:p.config.astra,worker:p.config.sol,
+      fields:d.fields,sources:d.sources,verification:p.config.verification.map(v=>v.requirement),planner:p.config.astra,worker:profileWorker(p),
+      ...(p.config.taskMode?{taskMode:p.config.taskMode,workerRole:"luna"}:{}),
       origin:d.origin,status:registered?"registered":error?"attention":waiting?"waiting_dependencies":"draft",canFinalize:!approval&&!error&&!waiting,runId,error,
       ...(d.decomposition?{decomposition:structuredClone(d.decomposition)}:{}),...(d.integrationBase?{integrationBase:structuredClone(d.integrationBase)}:{}) };
   }

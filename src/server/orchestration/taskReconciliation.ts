@@ -8,7 +8,8 @@ import { isDeepStrictEqual } from "node:util";
 import { loadApprovedTaskPlan } from "./approvedTaskPlan.ts";
 import type { VaultTaskContract } from "./vaultTaskContract.ts";
 import { AppServerProcess } from "../master/appServerProcess.ts";
-import { boundedAppServerArgs, subscriptionChildEnv } from "../master/boundedAppServer.ts";
+import { boundedAppServerArgs, researchAppServerArgs, subscriptionChildEnv } from "../master/boundedAppServer.ts";
+import { assertResearchExecutable } from "./vaultTaskExecution.ts";
 import { HumanReviewProofStore, isReviewRequestId, type HumanReviewReceipt } from "./humanReviewProof.ts";
 import { inspectTaskExecutionOwner, type TaskExecutionOwnerView } from "./taskExecutionOwner.ts";
 import { FileTaskLedger, type Attempt, type ProviderTurnEvidence, type ReconciliationVerifier, type TaskSnapshot } from "./singleTask.ts";
@@ -42,16 +43,29 @@ export interface TaskReconciliationView {
   canClose:boolean;heldReasons:string[];pendingCloseRequestId:string|null;
 }
 export type InspectTaskProvider=(config:VaultRunConfig,threadId:string,turnId:string)=>Promise<ProviderTurnEvidence>;
-export const inspectTaskProvider:InspectTaskProvider=async(config,threadId,turnId)=>{
+type InspectionDependencies = {
+  assertExecutable: typeof assertResearchExecutable;
+  launch: (options: Parameters<typeof AppServerProcess.launch>[0], treeRoot:string)=>Promise<Pick<AppServerProcess,"client"|"stop">>;
+};
+/** Server composition/test seam; no browser input selects a launcher or executable. */
+export function createTaskProviderInspector(dependencies:InspectionDependencies = {
+  assertExecutable:assertResearchExecutable,
+  launch:async(options,treeRoot)=>process.platform==="win32"?AppServerProcess.launchContained(options,treeRoot):AppServerProcess.launch(options)
+}):InspectTaskProvider{return async(config,threadId,turnId)=>{
+  const research=config.taskMode==="read_only_research";
+  if(research)await dependencies.assertExecutable(config);
   const options={executable:await realpath(config.executable),cwd:config.checkout,
-    args:boundedAppServerArgs(true),env:subscriptionChildEnv(),client:{transportTimeoutMs:20_000}};
-  const provider=process.platform==="win32"?await AppServerProcess.launchContained(options,join(config.outputDir,"inspection-process-trees")):AppServerProcess.launch(options);
+    args:research?researchAppServerArgs():boundedAppServerArgs(true),env:subscriptionChildEnv(),client:{transportTimeoutMs:20_000}};
+  const provider=await dependencies.launch(options,join(config.outputDir,"inspection-process-trees"));
   try{
-    await provider.client.initialize();const account=await provider.client.readAccountMode();
+    await provider.client.initialize();
+    if(research)await provider.client.assertResearchToolAuthority(config.checkout);
+    const account=await provider.client.readAccountMode();
     if(account.type!=="chatgpt"||!account.requiresOpenaiAuth)throw Error("Task inspection requires ChatGPT login");
     return await provider.client.inspectProviderTurnProcessSafety(threadId,turnId,{cwd:config.checkout,modelProvider:"openai"});
   }finally{await provider.stop()}
-};
+}};
+export const inspectTaskProvider=createTaskProviderInspector();
 
 async function regular(path:string,max:number):Promise<Buffer|null>{
   try{const s=await lstat(path);if(!s.isFile()||s.isSymbolicLink()||s.size>max)throw Error("Reconciliation file is unsafe or too large");

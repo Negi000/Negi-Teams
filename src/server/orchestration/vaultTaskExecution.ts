@@ -17,10 +17,15 @@ import { assertVaultRunOutputPaths, assertVerificationCoverage, assertVaultWorke
 import { loadApprovedTaskPlan, type ApprovedTaskPlan } from "./approvedTaskPlan.ts";
 import { verifyConfiguredCheckout } from "./checkoutVerification.ts";
 import { TaskExecutionOwner } from "./taskExecutionOwner.ts";
+import { researchReviewMetadata } from "./researchArtifactPolicy.ts";
 
 const exec = promisify(execFile);
 const hash = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
-async function assertResearchExecutable(config:VaultRunConfig):Promise<void>{
+export function assertResearchHost(platform:NodeJS.Platform=process.platform):void{
+  if(platform!=="win32")throw Error("Read-only research requires Windows Job process containment; this host is unsupported");
+}
+export async function assertResearchExecutable(config:VaultRunConfig):Promise<void>{
+  assertResearchHost();
   const entry=await lstat(config.executable),actual=await realpath(config.executable);
   const normalized=(path:string)=>process.platform==="win32"?resolve(path).toLowerCase():resolve(path);
   if(!entry.isFile()||entry.isSymbolicLink()||normalized(actual)!==normalized(config.executable))
@@ -57,6 +62,7 @@ export async function prepareVaultRun(raw: VaultRunConfig): Promise<PreparedVaul
     throw new Error("Codex is not logged in using ChatGPT; refusing model dispatch");
   const contract = await loadVaultTaskContract(config.vault, config.snapshot, config.checkout);
   assertVaultWorkerContract(config,contract);
+  if(config.taskMode==="read_only_research")researchReviewMetadata(contract,config.verification.map(c=>c.requirement));
   assertVerificationCoverage(contract.verification, config.verification);
   await assertVaultRunOutputPaths(config);
   const approvedPlan = await loadApprovedTaskPlan(config, contract);

@@ -8,9 +8,11 @@ import { MasterConversationAuthority } from "./masterConversations.ts";
 import type { ConfigurationAdmission } from "./projectConfiguration.ts";
 import { FileTaskLedger, type TaskEvent, type TaskSnapshot } from "./singleTask.ts";
 import { HumanReviewProofStore, isReviewRequestId } from "./humanReviewProof.ts";
-import { assertVaultRunOutputPaths, canonicalVaultRunRegistration, parseVaultRunConfig as parseExecutionConfig, type VaultRunConfig } from "./vaultRunConfig.ts";
+import { assertVaultRunOutputPaths, assertVaultWorkerContract, canonicalVaultRunRegistration, parseVaultRunConfig, type VaultRunConfig } from "./vaultRunConfig.ts";
 import { executeVaultRun, prepareVaultRun, submitVaultRun, verifyVaultRun, type PreparedVaultRun, type TaskOperationApproval } from "./vaultTaskExecution.ts";
 import { captureTaskReview, taskReviewCheckoutFingerprint, verifyTaskReviewCheckout, type TaskReviewManifest } from "./taskReviewArtifact.ts";
+import { captureReadOnlyTaskReview, loadReadOnlyTaskReview, readOnlyTaskReviewPresentation,
+  verifyReadOnlyTaskReview, type ReadOnlyTaskReviewManifest } from "./readOnlyTaskReview.ts";
 import { ReviewDecisionBusyError, type LocalReviewService } from "./reviewService.ts";
 import { setTimeout as wait } from "node:timers/promises";
 import type { TaskAdmissionGuard } from "./scheduledVaultRun.ts";
@@ -24,20 +26,14 @@ import type { TaskResultNotice, TaskResultSummary } from "../../shared/taskResul
 import { loadApprovedTaskOrigin } from "./approvedTaskPlan.ts";
 import type { MasterOrigin } from "../../shared/conversations.ts";
 import { readMasterTurnOrigin } from "./masterTurnRecords.ts";
-import { TaskExecutionOwner } from "./taskExecutionOwner.ts";
+import { inspectTaskExecutionOwner, TaskExecutionOwner } from "./taskExecutionOwner.ts";
 import { LocalTaskReconciliation, type InspectTaskProvider, type TaskReconciliationView } from "./taskReconciliation.ts";
 import { RuntimeJournalInventory } from "./runtimeJournalInventory.ts";
 import { TaskPreflightRecovery, withTaskPreflightLock, type PreflightRecoveryView } from "./taskPreflightRecovery.ts";
 import type { VaultTaskContract } from "./vaultTaskContract.ts";
 
 const hash = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
-// The existing browser result schema describes a Git diff. Until a separately
-// verified artifact review is installed, it must never dispatch a research run.
-function parseVaultRunConfig(raw:unknown):VaultRunConfig {
-  const config=parseExecutionConfig(raw);
-  if(config.taskMode==="read_only_research")throw Error("Read-only Task artifact review is not yet registered; browser Task dispatch is held");
-  return config;
-}
+type RegisteredTaskReview = TaskReviewManifest | ReadOnlyTaskReviewManifest;
 function inside(root: string, path: string): boolean {
   const rel = relative(root.toLowerCase(), path.toLowerCase());
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
@@ -90,6 +86,7 @@ export interface TaskRunView {
   acceptance: string[]; allowedPaths: string[]; verification: string[];
   outOfScope: string[]; invariants: string[];
   astra: VaultRunConfig["astra"]; sol: VaultRunConfig["sol"];
+  taskMode?:"read_only_research"; luna?:VaultRunConfig["luna"];
   status: string; canStart: boolean; canStop: boolean; live: boolean;
   executionPhase: ScheduledPhase | null;
   stopRequested: boolean; error: string | null; verificationOutcome: string | null;
@@ -154,9 +151,9 @@ export class LocalTaskService {
   private closing = false;
   private reviews: LocalReviewService | null = null;
   private knowledgeProofDirectory?: string;
-  private readonly manifests = new Map<string, TaskReviewManifest>();
+  private readonly manifests = new Map<string, RegisteredTaskReview>();
   private readonly reviewSyncs = new Map<string, Promise<void>>();
-  private readonly manifestLoads = new Map<string, Promise<TaskReviewManifest | null>>();
+  private readonly manifestLoads = new Map<string, Promise<RegisteredTaskReview | null>>();
   private readonly revisions = new Map<string, { fingerprint: string; promise: Promise<TaskRunView> }>();
   private readonly approvals = new Map<string, Map<string, { approval: TaskOperationApproval;
     decide: (allow: boolean, approvalRef: string, at: string, requestId: string) => Promise<void> }>>();
@@ -204,6 +201,7 @@ export class LocalTaskService {
           typeof contract.project !== "string" || typeof contract.vaultId !== "string" ||
           !Number.isSafeInteger(contract.version) || typeof contract.baseSha !== "string" ||
           !Array.isArray(contract.acceptance) || !Array.isArray(contract.verification)) throw new Error("Task snapshot metadata invalid");
+      assertVaultWorkerContract(config,contract);
       const snapshotSha256 = hash(await readFile(config.snapshot));
       runs.push({ title: item.title, config, contract, snapshotSha256,
         configSha256: hash(JSON.stringify({ config, snapshotSha256 })) });
@@ -257,6 +255,7 @@ export class LocalTaskService {
     const run = this.registered(id), request = await this.request(run), view = await this.snapshot(id);
     if (!request || view.live || ["not_started", "queued", "planning", "ready_for_worker", "working", "verifying"].includes(view.status)) return null;
     const ledger = (await this.ledger(run).read()).state;
+    if(run.config.taskMode==="read_only_research"&&ledger?.verification?.outcome==="passed"&&!view.reviewId)return null;
     const entry = (await this.scheduler.read()).state?.entries.find(e => e.work.id === id) ?? null;
     const core = { runId: view.id, title: view.title.replace(/[\r\n\0]/g, " "), project: view.project,
       taskId: view.taskId, version: view.version, configSha256: view.configSha256,
@@ -382,6 +381,7 @@ export class LocalTaskService {
     // Registration restores visibility only; normal start/review preflight checks freshness.
     const contract = await readJson(config.snapshot) as import("./vaultTaskContract.ts").VaultTaskContract;
     if (!contract || contract.schemaVersion !== "negi-task-contract/1") throw new Error("Authored Task snapshot invalid");
+    assertVaultWorkerContract(config,contract);
     const { loadApprovedTaskPlan } = await import("./approvedTaskPlan.ts");
     await loadApprovedTaskPlan(config, contract);
     assertVerificationCoverage(contract.verification, config.verification);
@@ -431,11 +431,13 @@ export class LocalTaskService {
   /** Trusted readers for local integration; no provider dispatch or acceptance. */
   async integrationSource(id: string, preflight = true): Promise<IntegrationSource> {
     const run = this.registered(id);
+    if(run.config.taskMode==="read_only_research")throw Error("Research artifacts cannot be code integration sources");
     const readState = async () => {
       const manifest = await this.ensureReview(run);
       if (!manifest || !this.reviews) throw new Error("Integration requires a registered review result");
       const review = await this.reviews.snapshot(manifest.review.id,{includeRelations:false});
       if (review.integrityError || review.status === "revoked") throw new Error("Integration source review requires correction or reconciliation");
+      if(manifest.schema!=="negi-task-review/1")throw Error("Integration requires a Git result manifest");
       await verifyTaskReviewCheckout(run.config, manifest);
       const state = (await this.ledger(run).read()).state;
       if (!state) throw new Error("Integration source Task state unavailable");
@@ -443,7 +445,8 @@ export class LocalTaskService {
     };
     if (preflight) await readState();
     return { config: structuredClone(run.config), configSha256: run.configSha256, resultStorage:this.resultSourceStorageRegistration(),readState,
-      readManifest: async () => { await readState(); return structuredClone((await this.ensureReview(run))!); } };
+      readManifest: async () => { await readState();const manifest=(await this.ensureReview(run))!;
+        if(manifest.schema!=="negi-task-review/1")throw Error("Integration requires a Git result manifest");return structuredClone(manifest); } };
   }
   resultSourceStorageRegistration(): Readonly<TaskStorageRegistration> | null {
     return this.runtimeInventory?Object.freeze({root:join(this.root,"master-conversations"),
@@ -460,10 +463,16 @@ export class LocalTaskService {
       for(const [id,manifest] of this.manifests)if(manifest.review.id===caseId)await this.publishResult(id);
     });
   }
-  private async ensureReview(run: CatalogRun): Promise<TaskReviewManifest | null> {
+  /** Trusted CLI composition: adopt durable completed results without a model turn. */
+  async registerCompletedReview(id:string):Promise<TaskRunView>{
+    const run=this.registered(id);
+    if(!this.reviews||!await this.ensureReview(run))throw Error("Completed Task review could not be registered");
+    return this.snapshot(id);
+  }
+  private async ensureReview(run: CatalogRun): Promise<RegisteredTaskReview | null> {
     if(!this.reviews)return null;
     const cached=this.manifests.get(run.config.runId);
-    if(!cached){let present=false;for(const name of ["review-manifest.json","review-current.json"]){
+    if(!cached&&run.config.taskMode!=="read_only_research"){let present=false;for(const name of ["review-manifest.json","review-current.json"]){
       try{await lstat(join(run.config.outputDir,name));present=true;break}
       catch(e){if((e as NodeJS.ErrnoException).code!=="ENOENT")throw e}
     }if(!present)return null;}
@@ -475,17 +484,32 @@ export class LocalTaskService {
     const entry=(await this.scheduler.read()).state?.entries.find(e=>e.work.id===run.config.runId);
     return Boolean(entry?.status==="cancelled"&&entry.claimKey===null&&entry.evidenceRef?.startsWith("user:preflight-close:"));
   }
-  private async ensureReviewLocked(run: CatalogRun): Promise<TaskReviewManifest | null> {
+  private async ensureReviewLocked(run: CatalogRun): Promise<RegisteredTaskReview | null> {
     const pending = this.manifestLoads.get(run.config.runId);
     if (pending) return pending;
     const operation = this.ensureReviewOnce(run);
     this.manifestLoads.set(run.config.runId, operation);
     try { return await operation; } finally { this.manifestLoads.delete(run.config.runId); }
   }
-  private async ensureReviewOnce(run: CatalogRun): Promise<TaskReviewManifest | null> {
+  private async ensureReviewOnce(run: CatalogRun): Promise<RegisteredTaskReview | null> {
     if (!this.reviews) return null;
     if(await this.preflightReviewHeld(run))return null;
     if (this.manifests.has(run.config.runId)) return this.manifests.get(run.config.runId)!;
+    if(run.config.taskMode==="read_only_research"){
+      if(await readJson(join(run.config.outputDir,"review-current.json"))||await readJson(join(run.config.outputDir,"revision-1.json")))
+        throw Error("Research results require a new fixed contract for correction");
+      let manifest=await loadReadOnlyTaskReview(run.config);
+      const state=(await this.ledger(run,manifest??undefined).read()).state;
+      if(!state){if(manifest)throw Error("Research manifest has no execution ledger");return null;}
+      if(!manifest){if(state.status!=="ready_for_review"||state.verification?.outcome!=="passed")return null;
+        manifest=await captureReadOnlyTaskReview(run.config,run.configSha256,run.title,state);}
+      if(manifest.configSha256!==run.configSha256||manifest.review.title!==run.title)throw Error("Research review registration changed");
+      await verifyReadOnlyTaskReview(run.config,manifest,state);
+      await this.reviews.registerPinnedResult(manifest.review,run.config.runId,join(run.config.outputDir,"review-result.md"));
+      this.manifests.set(run.config.runId,manifest);
+      this.reviews.bindPresentation(manifest.review.id,readOnlyTaskReviewPresentation);
+      this.bindReviewCheck(run,manifest);return manifest;
+    }
     const pointer = await readJson(join(run.config.outputDir, "review-current.json")) as
       { schema?: string; number?: number; revisionRef?: string } | null;
     if (pointer) {
@@ -524,10 +548,17 @@ export class LocalTaskService {
     this.bindReviewCheck(run, manifest);
     return manifest;
   }
-  private bindReviewCheck(run: CatalogRun, manifest: TaskReviewManifest): void {
+  private bindReviewCheck(run: CatalogRun, manifest: RegisteredTaskReview): void {
     this.reviews!.bindCurrentCheck(manifest.review.id, async () => {
-      await verifyTaskReviewCheckout(run.config, manifest);
       const state = (await this.ledger(run).read()).state;
+      if(manifest.schema==="negi-task-readonly-review/1"){
+        if(!state)throw Error("Research review has no execution ledger");
+        await verifyReadOnlyTaskReview(run.config,manifest,state);
+        const requiredRoles=[...(run.config.approvedPlan?[]:["astra" as const]),"luna" as const,
+          ...Array.from({length:run.config.verification.length+1},(_,i)=>`verification-${i}` as const)];
+        const owner=await inspectTaskExecutionOwner(run.config.outputDir,run.config.runId,run.configSha256,`${run.config.runId}:dispatch`,requiredRoles);
+        if(owner.status!=="finished"||owner.jobExit!=="confirmed")throw Error("Research execution has not confirmed process termination");
+      }else await verifyTaskReviewCheckout(run.config, manifest);
       if (state?.verification?.evidenceRef !== `${manifest.review.evidencePath}#sha256=${manifest.review.evidenceSha256}`)
         throw new Error("Task revision metadata is not yet recorded");
       const scheduled = (await this.scheduler.read()).state?.entries.find((entry) => entry.work.id === run.config.runId);
@@ -535,10 +566,10 @@ export class LocalTaskService {
         throw new Error("Task execution/revision requires scheduler reconciliation before acceptance");
     });
   }
-  private ledger(run: CatalogRun): FileTaskLedger {
+  private ledger(run: CatalogRun, manifest?:RegisteredTaskReview): FileTaskLedger {
     return new FileTaskLedger(join(run.config.outputDir, "run.jsonl"), Date.now,
       this.reconciliation.verifier(run),
-      ({ event, state }) => this.verifyHumanDecision(run, event, state),
+      ({ event, state }) => this.verifyHumanDecision(run, event, state,manifest),
       ({ event, state }) => this.verifyOperationDecision(run, event, state),
       ({ event, state }) => this.verifyResultRevision(run, event, state));
   }
@@ -636,6 +667,7 @@ export class LocalTaskService {
   /** Register a locally applied correction. No browser-provided edits or model dispatch. */
   async registerResultRevision(id: string, configSha256: string, feedbackIds: string[]): Promise<TaskRunView> {
     const run = this.registered(id);
+    if(run.config.taskMode==="read_only_research")throw Error("Research correction requires a new fixed contract");
     if (!this.reviews || this.closing || configSha256 !== run.configSha256 || this.active.has(id) ||
         !Array.isArray(feedbackIds) || !feedbackIds.length || feedbackIds.length > 20 ||
         new Set(feedbackIds).size !== feedbackIds.length || !feedbackIds.every((value) => typeof value === "string" && value.length < 200))
@@ -655,6 +687,7 @@ export class LocalTaskService {
   private async registerResultRevisionOnce(run: CatalogRun, feedbackIds: string[]): Promise<TaskRunView> {
     const {previous,state,reviewStateSha256}=await this.withResultSource(async()=>{
     const previous = await this.ensureReview(run);
+    if(previous?.schema!=="negi-task-review/1")throw Error("Checkout revisions require a Git result review");
     const state = (await this.ledger(run).read()).state;
     if (!previous || !state || state.status !== "ready_for_review" || state.acceptedBy !== null ||
         state.stopReason?.startsWith("Human acceptance revoked:")) throw new Error("Task revision requires an unaccepted verified result");
@@ -761,8 +794,8 @@ export class LocalTaskService {
       receipt.data.target === action.target && receipt.data.decision === action.decision &&
       event.key === `task-operation:${receipt.id}`);
   }
-  private async verifyHumanDecision(run: CatalogRun, event: TaskEvent, state: TaskSnapshot): Promise<boolean> {
-    const manifest = this.manifests.get(run.config.runId);
+  private async verifyHumanDecision(run: CatalogRun, event: TaskEvent, state: TaskSnapshot, registeredManifest?:RegisteredTaskReview): Promise<boolean> {
+    const manifest = registeredManifest??this.manifests.get(run.config.runId);
     if (!this.reviews || !manifest ||
         (event.action.type !== "accept" && event.action.type !== "revoke_acceptance")) return false;
     const ref = event.action.type === "accept" ? event.action.reviewer : event.action.reasonRef;
@@ -776,20 +809,20 @@ export class LocalTaskService {
       (kind === "revoke" || (receipt.data.evidenceSha256 === manifest.review.evidenceSha256 &&
         state.verification?.evidenceRef === `${manifest.review.evidencePath}#sha256=${manifest.review.evidenceSha256}`)));
   }
-  private async syncReview(run: CatalogRun, manifest: TaskReviewManifest): Promise<void> {
+  private async syncReview(run: CatalogRun, manifest: RegisteredTaskReview): Promise<void> {
     const review=await this.reviews!.readState(manifest.review.id),state=(await this.ledger(run).read()).state;
     if(state&&!((review.acceptance&&state.status==="ready_for_review"&&!state.stopReason?.startsWith("Human acceptance revoked:"))||
       (review.revoked&&state.status==="accepted")))return;
     return this.withResultSource(()=>this.syncReviewLocked(run,manifest));
   }
-  private async syncReviewLocked(run: CatalogRun, manifest: TaskReviewManifest): Promise<void> {
+  private async syncReviewLocked(run: CatalogRun, manifest: RegisteredTaskReview): Promise<void> {
     const pending = this.reviewSyncs.get(run.config.runId);
     if (pending) return pending;
     const operation = this.syncReviewOnce(run, manifest);
     this.reviewSyncs.set(run.config.runId, operation);
     try { await operation; } finally { this.reviewSyncs.delete(run.config.runId); }
   }
-  private async syncReviewOnce(run: CatalogRun, manifest: TaskReviewManifest): Promise<void> {
+  private async syncReviewOnce(run: CatalogRun, manifest: RegisteredTaskReview): Promise<void> {
     const review = await this.reviews!.readState(manifest.review.id);
     const ledger = this.ledger(run);
     let state = (await ledger.read()).state;
@@ -836,24 +869,29 @@ export class LocalTaskService {
     // A running/queued Task has no result adoption to perform. Its status read
     // must remain available while another accepted baseline holds the gate.
     const executing=Boolean(active||preparing||entry?.status==="queued");
-    const manifest = closedProjection ? null : executing ? this.manifests.get(id)??null : await this.ensureReview(run);
+    let manifest:RegisteredTaskReview|null=null,manifestHeld=false;
+    try{manifest = closedProjection ? null : executing ? this.manifests.get(id)??null : await this.ensureReview(run);}
+    catch(error){if(run.config.taskMode!=="read_only_research")throw error;manifestHeld=true;}
     if (manifest&&!executing) { await this.syncReview(run, manifest); state=(await this.ledger(run).read()).state; }
     const error = await readJson(join(this.root, `${id}.error.json`)) as { error?: string } | null;
     const interrupted = !active && entry && ["running", "needs_reconciliation"].includes(entry.status);
     let status = interrupted ? "needs_reconciliation" : state?.status ?? entry?.status ??
       (request ? error ? "preflight_failed" : preparing ? "queued" : "needs_reconciliation" : "not_started");
     if(closedProjection&&!preflightClosed)status="needs_reconciliation";
-    let reviewError: string | null = null;
+    let reviewError: string | null = manifestHeld?"調査成果の固定版と検証記録を照合できません。元の成果を保持し、記録を確認してください。":null;
+    if(manifestHeld&&state?.verification?.outcome==="passed")status="artifact_changed";
     if (manifest) {
       const review = await this.reviews!.snapshot(manifest.review.id,{includeRelations:false});
       if (review.status === "revoked") status = "review_revoked";
       if (review.integrityError) { status = review.qualityIssue ? "quality_issue" : "artifact_changed"; reviewError = review.integrityError; }
-    } else if (state?.status === "ready_for_review" && this.reviews)
-      reviewError = "Webレビュー用の固定差分を生成できませんでした。ローカルの成果と検証証拠を確認してください。";
+    } else if (!reviewError&&state?.status === "ready_for_review" && this.reviews)
+      reviewError = run.config.taskMode==="read_only_research"?"調査成果のレビューを登録できませんでした。元の成果と検証記録を確認してください。":
+        "Webレビュー用の固定差分を生成できませんでした。ローカルの成果と検証証拠を確認してください。";
     const scope = run.contract.scope as { allowedPaths?: string[]; out?: string[] } | undefined;
     let startError:string|null=null;
     if(!request&&!entry&&!state&&!this.closing)try{startError=await this.startChecks.get(id)?.()??null}
     catch{startError="開始条件を照合できません。契約案の状態を確認してください。"}
+    if(run.config.taskMode==="read_only_research"&&!this.reviews)startError="調査成果のレビューを準備してから開始してください。";
     return { id, title: run.title, configSha256: run.configSha256,
       project: run.contract.project as string, objective: run.contract.objective as string,
       taskId: run.contract.vaultId as string, version: run.contract.version as number,
@@ -861,6 +899,7 @@ export class LocalTaskService {
       acceptance: run.contract.acceptance as string[], allowedPaths: scope?.allowedPaths ?? [],
       outOfScope: scope?.out ?? [], invariants: run.contract.invariants as string[] ?? [],
       verification: run.contract.verification as string[], astra: run.config.astra, sol: run.config.sol,
+      ...(run.config.taskMode==="read_only_research"?{taskMode:run.config.taskMode,luna:run.config.luna}:{}),
       status, executionPhase: entry?.phase ?? null, canStart: !request && !entry && !state && !this.closing && !startError,
       canStop: Boolean(active || entry?.status === "queued"), live: Boolean(active || preparing && !error),
       stopRequested: active?.controller.signal.aborted ?? false,
@@ -961,7 +1000,7 @@ export class LocalTaskService {
             if (result.status === "ready_for_review" && this.reviews) {
               try {
                 const run = this.registered(id);
-                await captureTaskReview(prepared.config, run.configSha256, run.title, result);
+                if(prepared.config.taskMode!=="read_only_research")await captureTaskReview(prepared.config, run.configSha256, run.title, result);
                 await this.ensureReview(run);
               } catch { /* execution remains unaccepted; the Task view shows the missing preview */ }
             }

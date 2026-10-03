@@ -180,6 +180,11 @@ export class LocalReviewService {
     this.knowledgeBridge = bridge;
   }
   private readonly currentChecks = new Map<string, () => Promise<void>>();
+  private readonly presentations = new Map<string, (content:string)=>TaskReviewPresentation|null>();
+  /** Presentation from a registered immutable result kind, never browser input. */
+  bindPresentation(id:string,project:(content:string)=>TaskReviewPresentation|null):void {
+    this.registered(id);this.presentations.set(id,project);
+  }
   private readonly resultListeners=new Set<(caseId:string)=>Promise<void>>();
   subscribeResultChanges(listener:(caseId:string)=>Promise<void>):()=>void{
     this.resultListeners.add(listener);return ()=>{this.resultListeners.delete(listener)};
@@ -432,7 +437,7 @@ export class LocalReviewService {
       objectiveId: state.artifacts.at(-1)!.objectiveId,
       artifactSha256: item.verifiedArtifactSha256,
       previousSha256: state.artifacts.length > 1 ? state.artifacts.at(-2)!.sha256 : null,
-      content: bytes.toString("utf8"), presentation: taskReviewPresentation(bytes.toString("utf8")), verificationSummary: item.verificationSummary,
+      content: bytes.toString("utf8"), presentation: (this.presentations.get(id)??taskReviewPresentation)(bytes.toString("utf8")), verificationSummary: item.verificationSummary,
       limits: item.limits, integrityError,
       status: state.revoked ? "revoked" : state.acceptance ? "accepted" : "awaiting_review",
       canAccept: !integrityError && state.acceptance === null && state.revoked === null,

@@ -82,7 +82,8 @@ export class TaskExecutionOwner {
 }
 
 /** No process is started, killed or restarted by this inspection. PID reuse is held. */
-export async function inspectTaskExecutionOwner(root:string,runId:string,configSha256:string,claimKey:string):Promise<TaskExecutionOwnerView>{
+export async function inspectTaskExecutionOwner(root:string,runId:string,configSha256:string,claimKey:string,
+  requiredRoles?:readonly ExecutionRole[]):Promise<TaskExecutionOwnerView>{
   const ownerBytes=await bytes(join(root,"execution-owner.json")),childBytes=await bytes(join(root,"execution-children.jsonl")),finishedBytes=await bytes(join(root,"execution-finished.json")),guardBytes=await bytes(join(root,"execution-guard.lock"));
   const sha256=digest(JSON.stringify([ownerBytes?.toString("base64")??null,childBytes?.toString("base64")??null,finishedBytes?.toString("base64")??null,guardBytes?.toString("base64")??null]));
   const view:TaskExecutionOwnerView={status:ownerBytes?"unknown":"missing",ownerId:null,pid:null,childPids:[],sha256,guardPresent:guardBytes!==null,jobExit:"none"};
@@ -106,6 +107,7 @@ export async function inspectTaskExecutionOwner(root:string,runId:string,configS
       else return view;
     }
     if([...children.values()].some(c=>c.pid===null))return view;
+    if(requiredRoles&&JSON.stringify([...children.keys()].sort())!==JSON.stringify([...requiredRoles].sort()))return view;
     view.jobExit=children.size?[...children.values()].every(c=>c.confirmed)?"confirmed":"unconfirmed":"none";
     if(finishedBytes){const finished=JSON.parse(finishedBytes.toString("utf8"));
       if(finished.ownerId!==owner.id||!Number.isFinite(Date.parse(finished.at))||Object.keys(finished).length!==2||[...children.values()].some(c=>!c.exited))return view;

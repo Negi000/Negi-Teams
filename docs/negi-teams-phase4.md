@@ -2,7 +2,7 @@
 
 `src/server/orchestration/scheduler.ts`は、登録済みの作業だけを開始するローカルJSONL台帳である。実モデルの起動、承認、OS sandboxは持たない。`scheduledVaultRun.ts`がVault契約に基づくAstra→Solの1runをこの受付へ通す。
 
-2026-10-03に、[明示的なLuna読み取り専用Taskの実行基盤](negi-teams-luna-tasks.md)を追加した。role/mode、Context Pack、計画→作業枠、native process owner、権限要求拒否、tool authorityの保留、変更ゼロの固定検証を分けて記録する。通常Task画面への調査起動・専用成果レビュー・元Astra通知・approved Policy選択は次の接続で、既存Gitレビュー経由の起動を許可しない。
+2026-10-03に、[明示的なLuna読み取り専用Taskと専用成果レビュー](negi-teams-luna-tasks.md)を追加した。role/mode、Context Pack、計画→作業枠、native process owner、権限要求拒否、tool authorityの保留、変更ゼロの固定検証を分けて記録する。通常Task・raw/template契約案・並列CLIからの専用成果登録、署名付き受入/取消・再起動復元・元Astra通知を接続し、Material 3 ExpressiveのPC/スマホ画面で操作した。researchはWindows専用で、実model調査turn・tool-free profile・approved Policy選択は未完。既存Git差分レビューを空差分対応へ緩めない。
 
 ## 現在の保証
 
