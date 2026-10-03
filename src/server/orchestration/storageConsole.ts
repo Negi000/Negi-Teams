@@ -55,6 +55,13 @@ export class LocalStorageConsole {
     await new MasterConversationAuthority({ ...this.registration,
       scheduler: new FileScheduler(this.registration.schedulerPath) }).assertStorageCompatible();
   }
+  supportsMaster(id: string): boolean { return id === this.registration.masterId; }
+  async conversationStatus(requestId: string) {
+    const authority = new MasterConversationAuthority({ ...this.registration, scheduler: new FileScheduler(this.registration.schedulerPath),
+      stageStorage: "indexed", runtimeStorage: "indexed" });
+    const result = await authority.status(requestId);
+    return { result, ownerPending: !result && await authority.pendingResidentRequest(requestId) };
+  }
   /** Validate the exact registered Master before any Task state is opened.
    * Pending/unknown work stays held; startup never adopts, repairs or resends. */
   async assertIndexedExecutionAllowed(cwd: string) {

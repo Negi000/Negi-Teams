@@ -292,12 +292,12 @@ export class LocalTaskService {
       draining: usage.global > state.maxConcurrent || usage.planners > state.roleLimits.planners || usage.workers > state.roleLimits.workers };
   }
   /** A resident planner uses the exact scheduler and a server-owned evidence directory. */
-  masterTurnAdmission(masterId: string): MasterTurnAdmission {
+  masterTurnAdmission(masterId: string, options?: { resident: true }): MasterTurnAdmission {
     const conversations = this.masterConversationAuthority(masterId);
     if (this.indexedRuntime) return {
       reserve: raw => {
         const request = structuredClone(raw), requestId = randomUUID();
-        return this.configurationAdmission(() => conversations.admitTurn({ ...request, requestId }));
+        return this.configurationAdmission(() => conversations.admitTurn({ ...request, requestId }, options));
       },
       assertIdle: cwd => conversations.assertStartupSafe(cwd),
       assertStorageCompatible: () => conversations.assertStorageCompatible(),

@@ -54,7 +54,7 @@ test("normal indexed server starts its registered planner, rejects unmanaged spa
     const sent=await server.messages();assert.equal(sent.filter(q=>q.method==="turn/start").length,1);
     const inventory=new RuntimeJournalInventory(f.registration);assert.equal((await inventory.audit()).state,"clean");
     await server.stop();server=await f.launch({mode:"indexed"});await server.until(v=>!v.executionHeld);
-    const restarted=await server.messages();assert.equal(restarted.filter(q=>q.method==="thread/start").length,1);assert.equal(restarted.filter(q=>q.method==="turn/start").length,0);
+    const restarted=await server.messages();assert.equal(restarted.filter(q=>q.method==="thread/start").length,0);assert.equal(restarted.filter(q=>q.method==="thread/resume").length,1);assert.equal(restarted.filter(q=>q.method==="turn/start").length,0);
     assert.equal((await inventory.audit()).state,"clean");assert.deepEqual(f.calls(),{astra:0,sol:0});
   }finally{await server?.stop();await f.close()}
 });

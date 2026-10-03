@@ -2,6 +2,8 @@
 // 0.158.0-alpha.2.1 types and 0.159.2 experimental dynamic tools. It owns streams, never spawns a process.
 import type { Readable, Writable } from "node:stream";
 import { createHash } from "node:crypto";
+import { resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { AppServerTransport } from "./appServerTransport.ts";
 
 type RecordValue = Record<string, unknown>;
@@ -15,6 +17,11 @@ function string(value: unknown): string | null {
 function requiredString(value: unknown, field: string): string {
   const result = string(value);
   if (!result) throw new Error(`App Server response missing ${field}; outcome needs reconciliation`);
+  return result;
+}
+function identityToken(value: unknown, field: string): string {
+  const result = requiredString(value, field);
+  if (result.length > 200 || /[\r\n\0]/.test(result)) throw new Error(`App Server identity invalid ${field}; outcome needs reconciliation`);
   return result;
 }
 
@@ -78,6 +85,13 @@ export interface CodexDynamicToolCall {
   threadId: string; turnId: string; callId: string; tool: string; arguments: unknown;
 }
 export interface CodexDynamicToolResult { success: boolean; text: string }
+export interface CodexThreadOptions {
+  cwd: string; model: string; sandbox: "read-only" | "workspace-write";
+  instructions?: string; dynamicTools?: CodexDynamicToolDefinition[];
+  dynamicToolLimits?: Record<string, CodexDynamicToolLimits>;
+  /** Resident lifecycle pins the returned directory, policy and effort as well as the model. */
+  resident?: { effort: string; modelProvider?: string };
+}
 
 export class CodexAppServerClient {
   private readonly transport: AppServerTransport;
@@ -135,6 +149,11 @@ export class CodexAppServerClient {
   get currentThread(): CodexThreadIdentity | null { return this.identity && { ...this.identity }; }
   get activeTurn(): string | null { return this.activeTurnId; }
   get pendingDynamicTools(): number { return this.activeDynamicCalls.size; }
+  assertQuiescent(): void {
+    if (this.dispatchBlocked || this.threadRequestPending || this.turnRequestPending || this.activeTurnId ||
+        this.activeDynamicCalls.size || this.approvals.size || this.turnWaiters.size || this.transport.pendingCount)
+      throw new Error("resident provider still has active or unknown operations");
+  }
   get dispatchBlocked(): boolean {
     return this.closedReason !== null || this.needsReconciliation || this.identity?.rerouted === true;
   }
@@ -191,16 +210,17 @@ export class CodexAppServerClient {
       requiresOpenaiAuth: result.requiresOpenaiAuth };
   }
 
-  async startThread(options: { cwd: string; model: string; sandbox: "read-only" | "workspace-write";
-    instructions?: string; dynamicTools?: CodexDynamicToolDefinition[];
-    dynamicToolLimits?: Record<string, CodexDynamicToolLimits> }): Promise<CodexThreadIdentity> {
-    this.requireInitialized();
-    if (this.identity || this.threadRequestPending || this.needsReconciliation || !options.cwd || !options.model) {
-      throw new Error("thread already started, uncertain, or options missing");
-    }
-    if (!this.catalog?.some((x) => x.model === options.model)) {
-      throw new Error(`requested model not in discovered account catalog: ${options.model}`);
-    }
+  async startThread(options: CodexThreadOptions): Promise<CodexThreadIdentity> {
+    return this.openThread(options, null);
+  }
+
+  async rotateThread(options: CodexThreadOptions, oldThreadId: string): Promise<CodexThreadIdentity> {
+    this.assertQuiescent();
+    if (this.identity?.threadId !== oldThreadId) throw new Error("resident provider conversation changed");
+    return this.openThread(options, oldThreadId);
+  }
+
+  private registerDynamicTools(options: Pick<CodexThreadOptions, "dynamicTools" | "dynamicToolLimits">): void {
     const tools = options.dynamicTools ?? [];
     if (tools.length > 20 || (tools.length && !this.options.onDynamicToolCall) ||
         tools.some(tool => tool.type !== "function" || !/^[a-zA-Z0-9_]{1,80}$/.test(tool.name) ||
@@ -214,29 +234,58 @@ export class CodexAppServerClient {
         !Number.isSafeInteger(limit.resultBytes) || limit.resultBytes < 1 || limit.resultBytes > 64_000))
       throw new Error("Dynamic tool limits invalid");
     this.dynamicToolNames = new Set(tools.map(tool => tool.name));
-    const ownLimits = new Map(Object.entries(limits).map(([name, limit]) => [name,
-      { argumentBytes: limit.argumentBytes, resultBytes: limit.resultBytes }]));
+    const ownLimits = new Map(Object.entries(limits));
     this.dynamicToolLimits = new Map(tools.map(tool => [tool.name,
-      ownLimits.get(tool.name) ?? { argumentBytes: 8000, resultBytes: 24_000 }]));
+      { ...(ownLimits.get(tool.name) ?? { argumentBytes: 8000, resultBytes: 24_000 }) }]));
+  }
+
+  private verifyResidentResponse(result: RecordValue | null, options: CodexThreadOptions): void {
+    const thread = record(result?.thread), normalized = (value: unknown) => typeof value === "string"
+      ? (process.platform === "win32" ? resolve(value).toLowerCase() : resolve(value)) : null;
+    if (normalized(result?.cwd) !== normalized(options.cwd) || normalized(thread?.cwd) !== normalized(options.cwd) ||
+        record(thread?.status)?.type !== "idle" || thread?.ephemeral !== false || result?.approvalPolicy !== "on-request" ||
+        result.approvalsReviewer !== "user" || record(result.sandbox)?.type !== "readOnly" || record(result.sandbox)?.networkAccess !== false ||
+        result.reasoningEffort !== options.resident!.effort || thread.model !== options.model ||
+        thread.modelProvider !== result.modelProvider || thread.reasoningEffort !== options.resident!.effort ||
+        (options.resident!.modelProvider && result.modelProvider !== options.resident!.modelProvider))
+      throw new Error("resident provider returned different directory, policy, effort or state");
+  }
+
+  private async openThread(options: CodexThreadOptions, oldThreadId: string | null): Promise<CodexThreadIdentity> {
+    this.requireInitialized();
+    if ((this.identity && this.identity.threadId !== oldThreadId) || this.threadRequestPending || this.needsReconciliation || !options.cwd || !options.model) {
+      throw new Error("thread already started, uncertain, or options missing");
+    }
+    if (!this.catalog?.some((x) => x.model === options.model)) {
+      throw new Error(`requested model not in discovered account catalog: ${options.model}`);
+    }
+    this.registerDynamicTools(options);
+    const tools = options.dynamicTools ?? [];
     this.threadRequestPending = true;
     try {
       const result = record(await this.transport.request("thread/start", {
         cwd: options.cwd, model: options.model, sandbox: options.sandbox,
         approvalPolicy: "on-request", approvalsReviewer: "user",
+        ...(options.resident ? { ephemeral: false, config: { model_reasoning_effort: options.resident.effort, sandbox_read_only: { network_access: false } },
+          ...(options.resident.modelProvider ? { modelProvider: options.resident.modelProvider } : {}) } : {}),
         ...(options.instructions ? { baseInstructions: options.instructions } : {}),
         ...(tools.length ? { dynamicTools: structuredClone(tools) } : {}),
       }));
-      const threadId = requiredString(record(result?.thread)?.id, "thread.id");
+      const threadId = identityToken(record(result?.thread)?.id, "thread.id");
       const resolvedModel = requiredString(result?.model, "model");
+      if (options.resident) this.verifyResidentResponse(result, options);
+      if (options.resident && (!Array.isArray(record(result?.thread)?.turns) || (record(result?.thread)!.turns as unknown[]).length))
+        throw new Error("new resident conversation is not empty");
+      if (oldThreadId && threadId === oldThreadId) throw new Error("provider did not create a new conversation");
       this.identity = { threadId, requestedModel: options.model, resolvedModel,
-        modelProvider: requiredString(result?.modelProvider, "modelProvider"),
+        modelProvider: identityToken(result?.modelProvider, "modelProvider"),
         rerouted: resolvedModel !== options.model };
       return { ...this.identity };
     } catch (error) { this.needsReconciliation = true; throw error; }
     finally { this.threadRequestPending = false; }
   }
 
-  async resumeThread(threadId: string, expectedModel: string): Promise<CodexThreadIdentity> {
+  async resumeThread(threadId: string, expectedModel: string, resident?: CodexThreadOptions): Promise<CodexThreadIdentity> {
     this.requireInitialized();
     if (this.activeTurnId || this.threadRequestPending || this.turnRequestPending || this.needsReconciliation ||
         (this.identity && this.identity.threadId !== threadId)) {
@@ -247,21 +296,55 @@ export class CodexAppServerClient {
     }
     this.threadRequestPending = true;
     try {
+      if (resident) this.registerDynamicTools(resident);
       const result = record(await this.transport.request("thread/resume", {
         threadId, model: expectedModel, approvalPolicy: "on-request", approvalsReviewer: "user",
         excludeTurns: true,
+        ...(resident ? { cwd: resident.cwd, modelProvider: resident.resident!.modelProvider, sandbox: "read-only",
+          config: { model_reasoning_effort: resident.resident!.effort, sandbox_read_only: { network_access: false } }, baseInstructions: resident.instructions ?? null } : {}),
       }));
-      const returnedId = requiredString(record(result?.thread)?.id, "thread.id");
+      const returnedId = identityToken(record(result?.thread)?.id, "thread.id");
       if (returnedId !== threadId) throw new Error("resumed thread ID mismatch");
       const resolvedModel = requiredString(result?.model, "model");
+      if (resident) this.verifyResidentResponse(result, resident);
       this.identity = { threadId, requestedModel: expectedModel, resolvedModel,
-        modelProvider: requiredString(result?.modelProvider, "modelProvider"),
+        modelProvider: identityToken(result?.modelProvider, "modelProvider"),
         rerouted: resolvedModel !== expectedModel };
       // A resumed thread may still have an active turn or unobserved writes.
       this.needsReconciliation = true;
       return { ...this.identity };
     } catch (error) { this.needsReconciliation = true; throw error; }
     finally { this.threadRequestPending = false; }
+  }
+
+  /** Compare all provider turns with the signed local terminal records before allowing continuation. */
+  async verifyResidentTurns(threadId: string, expected: CodexThreadOptions, turns: Array<{ id: string; status: string }>): Promise<void> {
+    const read = record(await this.transport.request("thread/read", { threadId, includeTurns: false })), thread = record(read?.thread);
+    const normalize = (value: unknown) => typeof value === "string" ? (process.platform === "win32" ? resolve(value).toLowerCase() : resolve(value)) : null;
+    if (thread?.id !== threadId || normalize(thread.cwd) !== normalize(expected.cwd) ||
+        thread.modelProvider !== expected.resident!.modelProvider || thread.model !== expected.model ||
+        thread.reasoningEffort !== expected.resident!.effort || !["idle", "notLoaded"].includes(String(record(thread.status)?.type)))
+      throw new Error("saved provider conversation identity or state differs");
+    const observed: Array<{ id: string; status: string }> = [], cursors = new Set<string>();
+    let cursor: string | null = null;
+    for (let page = 0; page < 100; page++) {
+      const result = record(await this.transport.request("thread/turns/list", { threadId, cursor, limit: 100, sortDirection: "desc", itemsView: "notLoaded" }));
+      if (!Array.isArray(result?.data) || (result.nextCursor !== null && typeof result.nextCursor !== "string")) throw new Error("provider turn inventory unavailable");
+      for (const row of result.data) {
+        const value = record(row), id = requiredString(value?.id, "turn.id"), status = String(value?.status);
+        if (!["completed", "failed", "interrupted"].includes(status)) throw new Error("provider conversation has an unresolved turn");
+        observed.push({ id, status });
+      }
+      if (result.nextCursor === null) {
+        if (new Set(observed.map(turn => turn.id)).size !== observed.length ||
+            !isDeepStrictEqual(observed.sort((a, b) => a.id.localeCompare(b.id)), [...turns].sort((a, b) => a.id.localeCompare(b.id))))
+          throw new Error("provider turns differ from local terminal evidence");
+        return;
+      }
+      if (cursors.has(result.nextCursor)) throw new Error("provider turn inventory cursor repeated");
+      cursor = result.nextCursor; cursors.add(cursor);
+    }
+    throw new Error("provider turn inventory exceeds reconciliation limit");
   }
 
   async startTurn(text: string, effort: string): Promise<string> {

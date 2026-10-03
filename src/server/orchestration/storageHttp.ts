@@ -25,6 +25,20 @@ export function createStorageHttp(service: LocalStorageConsole | null, auth: Aut
       if (req.method === "GET" && url.pathname === "/api/storage") {
         json(res, 200, service ? { available: true, ...await service.status() } : { available: false, ...host() });return true;
       }
+      if (req.method === "GET" && url.pathname === "/api/storage/conversation") {
+        const requestId = url.searchParams.get("request");
+        if (!service || [...url.searchParams.keys()].join() !== "request" || !requestId ||
+            !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(requestId)) {
+          json(res, 400, { error: "保持した会話の確認要求IDを指定してください。" }); return true;
+        }
+        const { result } = await service.conversationStatus(requestId);
+        // An absent stage cannot prove that another live request has not started.
+        // This read-only recovery surface keeps the request until the chat confirms it.
+        json(res, 200, { requestId,
+          state: result?.stage === "completed" && !result.exclusionHeld ? "completed" :
+            result?.stage === "cancelled" && !result.exclusionHeld ? "cancelled" : "attention",
+          oldThreadId: result?.request.oldThreadId ?? null, newThreadId: result?.identity?.threadId ?? null }); return true;
+      }
       if (req.method !== "POST" || !["/api/storage/preview", "/api/storage/apply"].includes(url.pathname)) { json(res, 405, { error: "Method not allowed" });return true; }
       let sameOrigin = false;
       try { const origin = new URL(String(req.headers.origin));sameOrigin = ["http:", "https:"].includes(origin.protocol) && origin.host === req.headers.host; } catch {}

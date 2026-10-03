@@ -275,6 +275,7 @@ export type ClientMessage =
   | ChatAnswerMessage
   | ChatStopMessage
   | ChatNewMessage
+  | ChatConversationStatusMessage
   | ChatHistoryMessage;
 
 // ===== サーバ → クライアント =====
@@ -373,6 +374,8 @@ export interface CapabilitiesMessage {
   projectSetup?: boolean;
   /** Managed Task workflow; direct PTY additions are unavailable. */
   managedTasksOnly?: boolean;
+  codexConversations?: boolean;
+  conversationAuthority?: string;
 }
 
 /** ダッシュボード: エビ 1 体分の使用状況（cost/context/model）。 */
@@ -457,7 +460,8 @@ export type ServerMessage =
   | ChatEventMessage
   | ChatSnapshotMessage
   | ChatStateMessage
-  | ChatSendResultMessage;
+  | ChatSendResultMessage
+  | ChatConversationResultMessage;
 
 // ===== master チャット UI（ui:"chat"）のプロトコル =====
 //
@@ -622,11 +626,13 @@ export type MasterChatEvent =
    *
    * 未知の kind として無視する旧クライアントは、これまでどおり全ログを出し続けるだけ。
    */
-  | { kind: "cleared" }
+  | { kind: "cleared"; requestId?: string; oldThreadId?: string; newThreadId?: string }
   | { kind: "exit"; code: number | null; signal: string | null };
 
 /** seq / ts を付けた配信単位。seq は master セッション内で単調増加（欠落検出用）。 */
 export interface MasterChatEnvelope {
+  /** Resident display partition; provider identity comes from the server, never the display log. */
+  threadId?: string | null;
   seq: number;
   ts: number;
   event: MasterChatEvent;
@@ -703,6 +709,14 @@ export interface ChatStopMessage {
 export interface ChatNewMessage {
   type: "chatNew";
   id: string;
+  requestId?: string;
+  oldThreadId?: string;
+}
+export interface ChatConversationStatusMessage { type: "chatConversationStatus"; id: string; requestId: string }
+export interface ChatConversationResultMessage {
+  type: "chatConversationResult"; id: string; requestId: string;
+  state: "completed" | "cancelled" | "attention" | "missing";
+  oldThreadId: string | null; newThreadId: string | null; reason: string | null;
 }
 
 /** 過去ログのページング要求（クライアント → サーバ）。 */
@@ -734,6 +748,7 @@ export interface ChatSnapshotMessage {
   id: string;
   events: MasterChatEnvelope[];
   hasMore: boolean;
+  threadId?: string | null;
 }
 
 /** チャット master の状態通知（サーバ → クライアント）。 */
@@ -743,4 +758,5 @@ export interface ChatStateMessage {
   state: MasterChatState;
   /** 未応答の承認/質問の件数（「待機 N 件」ではない。busy 中の投入はキューされない）。 */
   pending: number;
+  threadId?: string | null;
 }

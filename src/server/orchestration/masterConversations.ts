@@ -1,5 +1,4 @@
-// Candidate server-owned empty-thread transactions; production uses only the read-only startup audit.
-// The writer is not connected to provider RPC/UI until inventory, performance and full reconciliation gates pass.
+// Server-owned empty-thread transactions and resident conversation identity.
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { lstat, mkdir, open, readdir, realpath, unlink } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -184,12 +183,22 @@ export class MasterConversationAuthority {
   }
 
   private async withLock<T>(cwd: string, run: (state: Awaited<ReturnType<MasterConversationAuthority["prepare"]>>) => Promise<T>,
-      target?: { kind: MasterOwnerKind; operation: WriterOperation }): Promise<T> {
+      target?: { kind: MasterOwnerKind; operation: WriterOperation }, detached = false): Promise<T> {
+    if (detached) {
+      const owner = await this.withStorage(() => this.acquireOwnerHeld(cwd, target));
+      try { return await run(owner.state); }
+      finally { await this.withStorage(() => owner.release()); }
+    }
     return this.withStorage(() => this.withLockHeld(cwd, run, target));
   }
 
   private async withLockHeld<T>(cwd: string, run: (state: Awaited<ReturnType<MasterConversationAuthority["prepare"]>>) => Promise<T>,
       target?: { kind: MasterOwnerKind; operation: WriterOperation }): Promise<T> {
+    const owner = await this.acquireOwnerHeld(cwd, target);
+    try { return await run(owner.state); } finally { await owner.release(); }
+  }
+
+  private async acquireOwnerHeld(cwd: string, target?: { kind: MasterOwnerKind; operation: WriterOperation }) {
     let state;
     try { state = await this.prepare(cwd); } catch { throw new MasterConversationHeldError(); }
     const path = join(state.master, "owner.lock");
@@ -217,6 +226,7 @@ export class MasterConversationAuthority {
     catch { throw new MasterConversationHeldError("会話の変更または実行受付が進行中か、所有者の照合が必要です。自動では再試行しません。"); }
     const pinned = await file.stat();
     let fileClosed = false;
+    let returned = false;
     try {
       await file.writeFile(bytes, "utf8"); await file.sync();
       // The fixed helper uses a protected owner reader that denies WRITE sharing.
@@ -226,9 +236,8 @@ export class MasterConversationAuthority {
       check(evidenceSha256 === await masterOwnerEvidence(evidenceOptions,kind,operation.requestId), "evidence changed before owner admission");
       if(this.stageInventory)await this.stageInventory.ownerBaseline(hash(bytes));
       await this.requireStageStorage();
-      return await run(state);
-    } finally {
-      try {
+      returned = true;
+      return { state, release: async () => { try {
         // An index appearing during this operation makes its owner evidence
         // part of the required migration/reconciliation. Preserve it.
         await this.requireStageStorage();
@@ -236,8 +245,8 @@ export class MasterConversationAuthority {
         const current = await lstat(path), record = await artifact(path, 8000);
         check(current.dev === pinned.dev && current.ino === pinned.ino && record?.bytes === bytes, "owner lock replaced; keep hold");
         await unlink(path); // Remove only this exact live owner; never steal an old lock.
-      } finally { if (!fileClosed) await file.close(); }
-    }
+      } finally { if (!fileClosed) await file.close(); } } };
+    } finally { if (!fileClosed && !returned) await file.close(); }
   }
 
   private async readOperation(path: string, key: Buffer): Promise<Operation> {
@@ -547,18 +556,73 @@ export class MasterConversationAuthority {
     return operations;
   }
 
+  private conversationChain(operations: Operation[]): MasterConversationResult | null {
+    check(operations.every(op => ["completed", "cancelled"].includes(op.records.at(-1)!.stage)), "unfinished conversation transaction");
+    const completed = operations.map(op => op.records.at(-1)!).filter(record => record.stage === "completed");
+    if (!completed.length) return null;
+    const starts = completed.filter(record => record.request.mode === "start");
+    check(starts.length === 1, "resident conversation must have one initial identity");
+    let current = starts[0]!;
+    const visited = new Set([current.request.requestId]), threads = new Set([current.identity!.threadId]);
+    for (;;) {
+      const next = completed.filter(record => record.request.oldThreadId === current.identity!.threadId);
+      check(next.length <= 1, "resident conversation branched");
+      if (!next.length) break;
+      current = next[0]!;
+      check(!visited.has(current.request.requestId) && !threads.has(current.identity!.threadId), "resident conversation cycle");
+      visited.add(current.request.requestId); threads.add(current.identity!.threadId);
+    }
+    check(visited.size === completed.length, "resident conversation identity disconnected");
+    return structuredClone({ request: current.request, stage: current.stage, identity: current.identity, reason: current.reason });
+  }
+
+  /** Read the signed conversation chain and all local turns; never infer an ID from the display log. */
+  async resident(cwd: string): Promise<{ current: MasterConversationResult | null; turns: Array<{ id: string; status: string }> }> {
+    return this.withStorage(async () => {
+      await this.assertStartupSafeHeld(cwd);
+      const before = await this.startupEvidence();
+      const current = this.conversationChain(before?.operations ?? []);
+      const canonical = await realpath(resolve(cwd));
+      check(!current || current.request.cwd === canonical, "resident checkout differs");
+      const knownThreads = new Set((before?.operations ?? []).flatMap(op => op.records.at(-1)?.identity?.threadId ?? []));
+      const turns: Array<{ id: string; status: string }> = [];
+      let names: string[] = [];
+      try { names = await readdir(this.options.turnRoot); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      for (const name of names) {
+        const path = join(this.options.turnRoot, name), request = await artifact(join(path, "request.json"), 1_000_000);
+        check(request, "resident turn request missing");
+        if (request.value.masterId !== this.options.masterId) continue;
+        check(knownThreads.has(request.value.threadId as string), "unregistered historical resident thread requires explicit migration");
+        if (request.value.threadId !== current?.identity?.threadId) continue;
+        const binding = await artifact(join(path, "provider.json"), 8000);
+        if (!binding) continue; // assertStartupSafe already proves an unsent cancellation.
+        const outcome = await artifact(join(path, "outcome.json"), 2_000_000);
+        check(outcome && token(binding.value.turnId), "resident terminal evidence missing");
+        turns.push({ id: binding.value.turnId, status: String(outcome.value.status) });
+      }
+      check(new Set(turns.map(turn => turn.id)).size === turns.length, "resident turn identity duplicated");
+      check(isDeepStrictEqual(before, await this.startupEvidence()), "resident identity changed during observation");
+      return { current, turns: turns.sort((a, b) => a.id.localeCompare(b.id)) };
+    });
+  }
+
   /** Candidate writer audit; not used by production startup or normal turn dispatch. */
   async assertIdle(cwd: string): Promise<void> {
     await this.withLock(cwd, async state => { try { await this.idle(state); } catch { throw new MasterConversationHeldError(); } });
   }
   /** Turn reservation and empty-thread rotation use this same per-Master lock. */
-  async admitTurn(raw: MasterTurnRequest & {requestId:string}): Promise<MasterTurnLease> {
+  async admitTurn(raw: MasterTurnRequest & {requestId:string}, options?: { resident: true }): Promise<MasterTurnLease> {
     check(uuid.test(raw.requestId), "admission request invalid");
     const cwd=await realpath(resolve(raw.cwd)),request={cwd,model:raw.model,effort:raw.effort,threadId:raw.threadId,text:raw.text};
     const workId="master-"+raw.requestId,requestedAt=new Date().toISOString();
     const requestBytes=JSON.stringify({schemaVersion:"negi-master-turn/1",workId,masterId:this.options.masterId,...request,inputSha256:hash(request.text),at:requestedAt})+"\n";
     return this.withLock(cwd, async state => {
       try { await this.idle(state); } catch { throw new MasterConversationHeldError(); }
+      if (options?.resident) {
+        const current = this.conversationChain(await this.operations(state.master, state.key));
+        check(current?.identity?.threadId === request.threadId && current.request.cwd === request.cwd &&
+          current.request.model === request.model && current.request.effort === request.effort, "resident turn uses stale conversation or settings");
+      }
       await this.assertStorageCompatible();
       return guardMasterAdmission(scheduledMasterTurns({...this.options,root:this.options.turnRoot,workId,requestedAt,
         ...(this.runtimeInventory ? { journal: this.runtimeInventory.turnJournal() } : {})}),
@@ -636,6 +700,19 @@ export class MasterConversationAuthority {
     } catch { throw new MasterConversationHeldError(); }
   }
 
+  /** A crash can preserve the signed owner before the first stage exists. */
+  async pendingResidentRequest(requestId: string): Promise<boolean> {
+    check(uuid.test(requestId), "request ID invalid");
+    return this.withStorage(async () => {
+      const key = await artifact(join(this.root, "signing-key.json"), 1000);
+      check(key && key.value.schemaVersion === "negi-master-conversation-key/1" && typeof key.value.key === "string" && /^[0-9a-f]{64}$/.test(key.value.key), "status authority missing");
+      const record = await artifact(join(this.root, "masters", this.options.masterId, "owner.lock"), 8000);
+      if (!record) return false;
+      const owner = validatedMasterOwner(record.value, this.options.masterId, Buffer.from(key.value.key, "hex"));
+      return owner.kind === "thread-start" && owner.operation.requestId === requestId;
+    });
+  }
+
   private async indexedStatus(requestId: string): Promise<MasterConversationStatus | null> {
     try {
       return await this.withStorage(async () => {
@@ -662,25 +739,35 @@ export class MasterConversationAuthority {
   }
 
   /** A trusted callback must persist dispatch intent immediately before thread/start. */
-  async start(raw: MasterConversationRequest, run: (markDispatched: () => Promise<void>) => Promise<CodexThreadIdentity>): Promise<MasterConversationResult> {
+  async start(raw: MasterConversationRequest, run: (markDispatched: () => Promise<void>) => Promise<CodexThreadIdentity>, options?: { resident: true }): Promise<MasterConversationResult> {
     const request = structuredClone(raw);
     check(validRequest(request) && request.masterId === this.options.masterId, "request invalid");
     request.cwd = await realpath(resolve(request.cwd));
     check(Buffer.byteLength(JSON.stringify(request)) <= 16_000, "request exceeds durable record bound");
     return this.withLock(request.cwd, async state => {
-      const operations = await this.operations(state.master, state.key);
+      const operations = await this.withStorage(() => this.operations(state.master, state.key));
       const existing = operations.find(op => op.records[0]!.request.requestId === request.requestId);
       if (existing) {
         check(isDeepStrictEqual(existing.records[0]!.request, request), "request ID reused for different conditions");
         const last = existing.records.at(-1)!;
         return structuredClone({ request, stage: ["completed", "cancelled"].includes(last.stage) ? last.stage : "needs_reconciliation", identity: last.identity, reason: last.reason });
       }
-      try { await this.idle(state); } catch { throw new MasterConversationHeldError(); }
+      try { await this.withStorage(() => this.idle(state)); } catch { throw new MasterConversationHeldError(); }
+      if (options?.resident) {
+        const current = this.conversationChain(operations);
+        check(request.oldThreadId === (current?.identity?.threadId ?? null) &&
+          request.mode === (current ? "rotate" : "start"), "resident conversation changed before dispatch");
+      }
       await this.requireStageStorage();
       const path = join(state.master, request.requestId);
       if (!this.stageInventory) await mkdir(path);
       const operation: Operation = { path, records: [], bytes: [] };
-      const append = async (stage: Stage, identity: CodexThreadIdentity | null = null, reason: string | null = null) => {
+      const ownerBytes = (await artifact(join(state.master, "owner.lock"), 8000))?.bytes;
+      check(ownerBytes, "conversation owner missing");
+      const append = async (stage: Stage, identity: CodexThreadIdentity | null = null, reason: string | null = null) => this.withStorage(async () => {
+        check((await artifact(join(state.master, "owner.lock"), 8000))?.bytes === ownerBytes, "conversation owner changed");
+        if (this.stageInventory) await this.stageInventory.ownerBaseline(hash(ownerBytes));
+        if (options?.resident && stage === "bound") await assertMasterIdleEvidence(this.options.turnRoot, this.options.masterId, this.options.scheduler);
         check(nextStage(operation.records.at(-1)?.stage ?? null, stage), "invalid transition");
         check((await artifact(join(this.root, "signing-key.json"), 1000))?.bytes === state.keyBytes, "signing key changed");
         await this.requireStageStorage();
@@ -703,7 +790,7 @@ export class MasterConversationAuthority {
         await writeNew(join(path, filename), bytes);
         operation.records.push(payload); operation.bytes.push(bytes);
         await this.requireStageStorage();
-      };
+      });
       await append("requested"); await append("old_idle");
       let dispatched = false, marking = false;
       try {
@@ -725,6 +812,6 @@ export class MasterConversationAuthority {
         catch { /* Partial/unknown evidence remains a startup hold; no replay. */ }
         throw new MasterConversationHeldError(uncertain ? "新しい会話の作成結果を確認できません。同じ要求の照合が必要です。自動では再作成しません。" : "新しい会話は未作成です。準備を確認してから、別の要求で明示的に再試行してください。");
       }
-    },{kind:"thread-start",operation:{domain:"master-conversation",requestId:request.requestId,hash:hash(JSON.stringify(request)+"\n")}});
+    },{kind:"thread-start",operation:{domain:"master-conversation",requestId:request.requestId,hash:hash(JSON.stringify(request)+"\n")}}, options?.resident === true);
   }
 }

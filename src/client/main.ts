@@ -99,8 +99,9 @@ const chatPanel = new ChatPanel(
       ...(replyTo ? { replyTo } : {}),
     }),
   (id) => sendMsg({ type: "chatStop", id }),
-  (id) => sendMsg({ type: "chatNew", id }),
+  (id, request) => sendMsg({ type: "chatNew", id, ...request }),
   (id, requestId, answer) => sendMsg({ type: "chatAnswer", id, requestId, ...answer }),
+  (id, requestId) => sendMsg({ type: "chatConversationStatus", id, requestId }),
 );
 
 /** chat モードの master の id（未確定なら null＝従来どおり PTY ペインを出す）。 */
@@ -266,6 +267,7 @@ function handleServerMessage(msg: ServerMessage): void {
       addNotice("system", `エラー: ${msg.text}`);
       break;
     case "capabilities":
+      chatPanel.setConversationsEnabled(Boolean(msg.codexConversations), msg.conversationAuthority);
       managedTasksOnly = Boolean(msg.managedTasksOnly);
       for (const id of ["open-spawn", "open-spawn-mobile"]) document.getElementById(id)!.hidden = managedTasksOnly;
       if (managedTasksOnly && spawnDialog.open) spawnDialog.close();
@@ -318,7 +320,7 @@ function handleServerMessage(msg: ServerMessage): void {
     case "chatState":
       workbench.updateMasterState(msg.id, msg.state);
       // chat モードの master が居ることの判定材料も兼ねる（registry には情報が無い）。
-      chatPanel.applyState(msg.id, msg.state, msg.pending);
+      chatPanel.applyState(msg.id, msg.state, msg.pending, msg.threadId);
       chatPanel.setCodexReadOnly(registry.some((a) => a.id === msg.id &&
         a.kind === "master" && a.backend === "codex"));
       // registry より先に届くのが通常だが、後から届いたときは PTY ペインを畳んで chat に寄せる。
@@ -330,13 +332,16 @@ function handleServerMessage(msg: ServerMessage): void {
       }
       break;
     case "chatSnapshot":
-      chatPanel.applySnapshot(msg.events, msg.hasMore);
+      chatPanel.applySnapshot(msg.events, msg.hasMore, msg.threadId);
       break;
     case "chatEvent":
       chatPanel.applyEvent({ seq: msg.seq, ts: msg.ts, event: msg.event });
       break;
     case "chatSendResult":
       chatPanel.applySendResult(msg.id, msg.requestId, msg.accepted, msg.reason);
+      break;
+    case "chatConversationResult":
+      chatPanel.applyConversationResult(msg);
       break;
     case "dirListing":
       // ファイルピッカーのディレクトリ列挙応答。error なら理由をモーダル内に表示。

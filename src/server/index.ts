@@ -542,8 +542,10 @@ async function startMasterChatSession(spec: FixedEbiSpec, setupOptions?:ReturnTy
     mcpConfigPath: codexReadOnly || hasManualMcp ? null : ROLE_MCP_CONFIG.master,
     extraArgs: codexReadOnly ? [] : spec.extraArgs,
     logPath: MASTER_CHAT_LOG_PATH,
+    registeredConversations: Boolean(codexReadOnly && storageMode === "indexed"),
     ...(codexReadOnly ? { createBrain: () => new CodexAppServerBrain({ ...codexReadOnly,
-      admission: taskService!.masterTurnAdmission(spec.id),
+      admission: taskService!.masterTurnAdmission(spec.id, storageMode === "indexed" ? { resident: true } : undefined),
+      ...(storageMode === "indexed" ? { conversations: taskService!.masterConversationAuthority(spec.id), masterId: spec.id } : {}),
       ...(taskService ? { taskTools: registeredTaskTools(taskService, spec.id,taskAuthoringService?{
         service:taskAuthoringService,planner:{model:spec.launch.model??"",effort:codexReadOnly.effort}}:undefined) } : {}) }) } : {}),
     handlers: {
@@ -551,7 +553,7 @@ async function startMasterChatSession(spec: FixedEbiSpec, setupOptions?:ReturnTy
         broadcast({ type: "chatEvent", id, seq: envelope.seq, ts: envelope.ts, event: envelope.event });
       },
       onState: (id, state, pending) => {
-        broadcast({ type: "chatState", id, state, pending });
+        broadcast({ type: "chatState", id, state, pending, threadId: masterSession?.currentThreadId ?? null });
         // registry の status（idle/busy）にも写るので一覧を更新する。
         broadcastRegistry();
       },
@@ -601,9 +603,29 @@ async function startMasterChatSession(spec: FixedEbiSpec, setupOptions?:ReturnTy
 function sendChatSnapshot(ws: WebSocket): void {
   const session = masterSession;
   if (!session) return;
-  send(ws, { type: "chatState", id: session.id, state: session.state, pending: session.pendingCount });
+  send(ws, { type: "chatState", id: session.id, state: session.state, pending: session.pendingCount, threadId: session.currentThreadId });
   const snap = session.snapshot();
-  send(ws, { type: "chatSnapshot", id: session.id, events: snap.events, hasMore: snap.hasMore });
+  send(ws, { type: "chatSnapshot", id: session.id, events: snap.events, hasMore: snap.hasMore, threadId: session.currentThreadId });
+}
+
+const conversationRequestsInFlight = new Set<string>();
+async function sendConversationStatus(ws: WebSocket, id: string, requestId: string, fallback?: string): Promise<void> {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(requestId) ||
+      storageMode !== "indexed" || !storageConsole?.supportsMaster(id)) {
+    send(ws, { type: "error", text: "会話の確認要求または登録が不正です。" }); return;
+  }
+  try {
+    const { result, ownerPending } = await storageConsole.conversationStatus(requestId);
+    send(ws, { type: "chatConversationResult", id, requestId,
+      state: !result ? (ownerPending || conversationRequestsInFlight.has(id + ":" + requestId) ? "attention" : "missing") : result.stage === "completed" && !result.exclusionHeld ? "completed" :
+        result.stage === "cancelled" && !result.exclusionHeld ? "cancelled" : "attention",
+      oldThreadId: result?.request.oldThreadId ?? null, newThreadId: result?.identity?.threadId ?? null,
+      reason: result?.reason ?? fallback ?? (!result ? ownerPending || conversationRequestsInFlight.has(id + ":" + requestId)
+        ? "会話の作成を確認しています。同じ要求IDを保持しています。" : "会話の作成記録はありません。現在の会話を確認してください。" : null) });
+  } catch {
+    send(ws, { type: "chatConversationResult", id, requestId, state: "attention", oldThreadId: null, newThreadId: null,
+      reason: "会話の作成結果を照合できません。同じ要求を保持して確認してください。自動では再作成しません。" });
+  }
 }
 
 /** chat 系 WS メッセージの宛先解決。id 違い/未起動は error を返して null。 */
@@ -986,7 +1008,7 @@ const wss = new WebSocketServer({
 wss.on("connection", (ws) => {
   clients.add(ws);
   // 接続直後にサーバ能力（監督が有効か）を送る。クライアントはこれで要約 UI の出し分けをする。
-  send(ws, { type: "capabilities", supervisor: storageMode!=="indexed"&&supervisor.enabled, reviews: reviewService !== null, tasks: taskService !== null,taskAuthoring:taskAuthoringService!==null&&setupModelsVerified,projectSetup:!!authConfig.token,managedTasksOnly:storageMode==="indexed" });
+  send(ws, { type: "capabilities", supervisor: storageMode!=="indexed"&&supervisor.enabled, reviews: reviewService !== null, tasks: taskService !== null,taskAuthoring:taskAuthoringService!==null&&setupModelsVerified,projectSetup:!!authConfig.token,managedTasksOnly:storageMode==="indexed",codexConversations:storageMode==="indexed",conversationAuthority:storageConsole?.registrationSha256 });
   // master が ui:"chat" なら、registry より**先に** state と直近の会話を送る。
   // クライアントは「chatState を受けた id＝chat モードの master」と判定して xterm ペインを
   // 作らない分岐に入るので、registry を先に送ると一瞬だけ PTY ペインが生えてしまう。
@@ -1205,16 +1227,37 @@ function handleClientMessage(ws: WebSocket, msg: ClientMessage): void {
     }
     case "chatNew": {
       // 「新しい会話」。ヘッドレス CLI に `/clear` が無いので、頭脳プロセスを
-      // `--resume` 無しで起動し直して文脈をリセットする（設計書 §10 Q-3）。
+      // Registered Codex rotates in its resident process; other brains restart.
       const session = chatSessionFor(ws, msg.id);
       if (!session) break;
+      const key = msg.id + ":" + msg.requestId;
+      if (storageMode === "indexed" && msg.requestId && conversationRequestsInFlight.has(key)) {
+        void sendConversationStatus(ws, msg.id, msg.requestId); break;
+      }
+      if (storageMode === "indexed" && msg.requestId) conversationRequestsInFlight.add(key);
       void (async()=>{
+        if (storageMode === "indexed" && taskService && msg.requestId) {
+          const recorded = await taskService.masterConversationAuthority(msg.id).status(msg.requestId);
+          if (recorded) {
+            if (recorded.request.mode !== "rotate" || recorded.request.oldThreadId !== msg.oldThreadId)
+              throw Error("同じ確認要求IDへ別の会話条件を指定できません。");
+            await sendConversationStatus(ws, msg.id, msg.requestId); return;
+          }
+        }
         if(executionHeld())throw Error("保存・担当モデルの起動条件を確認できないため保留しています。");
-        if(projectConfiguration&&bootConfiguration)await projectConfiguration.admit(bootConfiguration.hash,()=>session.newConversation());
-        else await session.newConversation();
-      })().catch((err) => {
-        send(ws, { type: "error", text: `新しい会話を開始できませんでした: ${(err as Error).message}` });
-      });
+        const request = msg.requestId && msg.oldThreadId ? { requestId: msg.requestId, oldThreadId: msg.oldThreadId } : undefined;
+        if(projectConfiguration&&bootConfiguration)await projectConfiguration.admit(bootConfiguration.hash,()=>session.newConversation(request));
+        else await session.newConversation(request);
+        if (storageMode === "indexed" && msg.requestId) await sendConversationStatus(ws, msg.id, msg.requestId);
+      })().catch(async (err) => {
+        conversationRequestsInFlight.delete(key);
+        if (storageMode === "indexed" && msg.requestId) await sendConversationStatus(ws, msg.id, msg.requestId, (err as Error).message);
+        else send(ws, { type: "error", text: `新しい会話を開始できませんでした: ${(err as Error).message}` });
+      }).finally(() => conversationRequestsInFlight.delete(key));
+      break;
+    }
+    case "chatConversationStatus": {
+      void sendConversationStatus(ws, msg.id, msg.requestId);
       break;
     }
     case "chatAnswer": {
@@ -1858,7 +1901,7 @@ async function startFixedEbi(): Promise<void> {
       await projectConfiguration!.admit(bootConfiguration!.hash,()=>startMasterChatSession(spec,{...codexMasterLaunchOptions({model:spec.launch.model,extraArgs:[]},
         {...process.env,EBI_CODEX_READ_ONLY_MASTER:"1",EBI_CODEX_APP_SERVER_EXE:config.executable,EBI_CODEX_MASTER_EFFORT:config.astra.effort}),requiredModels:setupStartup!.requiredModels}));
       setupModelsVerified=true;
-      broadcast({type:"capabilities",supervisor:storageMode!=="indexed"&&supervisor.enabled,reviews:reviewService!==null,tasks:taskService!==null,taskAuthoring:taskAuthoringService!==null,projectSetup:!!authConfig.token,managedTasksOnly:storageMode==="indexed"});
+      broadcast({type:"capabilities",supervisor:storageMode!=="indexed"&&supervisor.enabled,reviews:reviewService!==null,tasks:taskService!==null,taskAuthoring:taskAuthoringService!==null,projectSetup:!!authConfig.token,managedTasksOnly:storageMode==="indexed",codexConversations:storageMode==="indexed",conversationAuthority:storageConsole?.registrationSha256});
       return;
     }
     // master には役割別 MCP config を spawn 直前に自動付与する（config への手書きを不要にし、

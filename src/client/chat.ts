@@ -4,6 +4,7 @@ import type {
   MasterChatEnvelope,
   MasterChatState,
   UsageMessage,
+  ChatConversationResultMessage,
 } from "../shared/protocol.ts";
 import { taskResultDeliveryLabels, taskResultUpdateLabel } from "../shared/taskResults.ts";
 import { taskStatusLabels } from "../shared/workspace.ts";
@@ -87,6 +88,11 @@ export class ChatPanel {
   private readonly rendered: HTMLElement[] = [];
   private state: MasterChatState = "stopped";
   private codexReadOnly = false;
+  private conversationsEnabled = false;
+  private currentThreadId: string | null = null;
+  private conversationAuthority: string | null = null;
+  private pendingConversation: { id: string; requestId: string; oldThreadId: string; authoritySha256: string } | null = null;
+  private checkingConversation = false;
   private pending = 0;
   private visible = false;
   /** 最下部に張り付いているか（false のとき新着で勝手にスクロールしない）。 */
@@ -112,6 +118,7 @@ export class ChatPanel {
   private newConversationDialog: HTMLDialogElement | null = null;
   private newConversationConfirm: HTMLButtonElement | null = null;
   private newConversationTarget: string | null = null;
+  private newConversationThread: string | null = null;
 
   constructor(
     private readonly el: HTMLElement,
@@ -123,13 +130,14 @@ export class ChatPanel {
       requestId?: string,
     ) => void | boolean,
     private readonly onStop: (id: string) => void,
-    private readonly onNew: (id: string) => void,
+    private readonly onNew: (id: string, request?: { requestId: string; oldThreadId: string }) => void,
     /** 承認/質問への応答（PR-M5）。WS `chatAnswer` を送る。 */
     private readonly onAnswer: (
       id: string,
       requestId: string,
       answer: { allow?: boolean; choice?: string[]; text?: string },
     ) => void = () => {},
+    private readonly onConversationStatus?: (id: string, requestId: string) => void,
   ) {
     this.el.classList.add("chat");
 
@@ -226,20 +234,59 @@ export class ChatPanel {
   }
 
   /** WS `chatState`。chat モードの master が居ることの判定材料も兼ねる。 */
-  applyState(id: string, state: MasterChatState, pending: number): void {
+  applyState(id: string, state: MasterChatState, pending: number, threadId?: string | null): void {
     this.disconnected = false;
     this.masterId = id;
     this.state = state;
     this.pending = pending;
+    if (threadId !== undefined) this.currentThreadId = threadId;
     this.stateBadge.textContent = stateLabel(state);
     this.stateBadge.className = `chat-state state-${state}`;
+    this.syncControls();
+    if (this.pendingConversation?.id === id && !this.checkingConversation && this.conversationsEnabled) this.checkConversation();
+  }
+
+  setConversationsEnabled(enabled: boolean, authority?: string): void {
+    const selected = enabled && authority && /^[0-9a-f]{64}$/.test(authority) ? authority : null;
+    this.conversationsEnabled = Boolean(selected);
+    if (selected !== this.conversationAuthority) {
+      this.conversationAuthority = selected; this.pendingConversation = null; this.checkingConversation = false;
+      if (selected) try {
+        const saved = JSON.parse(sessionStorage.getItem("negi-master-conversation-" + selected) ?? "null");
+        if (saved && saved.authoritySha256 === selected && typeof saved.id === "string" && typeof saved.oldThreadId === "string" &&
+            /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(saved.requestId)) this.pendingConversation = saved;
+      } catch { /* Request identity must be stored before any new operation. */ }
+    }
+    this.syncControls();
+    if (selected && this.pendingConversation && !this.disconnected && !this.checkingConversation) this.checkConversation();
+  }
+
+  private checkConversation(): void {
+    if (!this.masterId || this.pendingConversation?.id !== this.masterId || !this.onConversationStatus || this.disconnected) return;
+    this.checkingConversation = true;
+    this.onConversationStatus(this.pendingConversation.id, this.pendingConversation.requestId);
+    this.syncControls();
+  }
+
+  applyConversationResult(result: ChatConversationResultMessage): void {
+    const request = this.pendingConversation;
+    if (!request || result.id !== request.id || result.requestId !== request.requestId) return;
+    this.checkingConversation = false;
+    if (["completed", "cancelled", "missing"].includes(result.state) &&
+        (result.state !== "completed" || (result.oldThreadId === request.oldThreadId && result.newThreadId))) {
+      try { sessionStorage.removeItem("negi-master-conversation-" + request.authoritySha256); } catch { /* Same saved ID remains read-only on reload. */ }
+      this.pendingConversation = null;
+      this.showHint(result.state === "completed" ? "新しい会話を準備しました。" : result.state === "missing"
+        ? "会話の作成記録はありません。現在の会話を確認してください。" : "会話は作成されていません。現在の会話を確認してください。",
+        result.state === "completed" ? "info" : "error");
+    } else this.showHint("会話の作成結果を確認できません。「作成結果を確認」から同じ要求を照合してください。要求IDは保持しています。", "error");
     this.syncControls();
   }
 
   /** registry may arrive before or after chatState. */
   setCodexReadOnly(enabled: boolean): void {
     this.codexReadOnly = enabled;
-    this.newBtn.title = enabled
+    this.newBtn.title = enabled && !this.conversationsEnabled
       ? "Codexの会話切替は準備中です。現在の会話と結果の記録は保持されます。"
       : "文脈をリセットし、画面を新しい会話へ切り替えます";
     this.syncControls();
@@ -247,7 +294,12 @@ export class ChatPanel {
   }
 
   /** WS `chatSnapshot`（接続直後・再接続時の一括復元）。 */
-  applySnapshot(envelopes: readonly MasterChatEnvelope[], hasMore: boolean): void {
+  applySnapshot(envelopes: readonly MasterChatEnvelope[], hasMore: boolean, threadId?: string | null): void {
+    const identity = [...envelopes].reverse().find(item => item.event.kind === "session" || item.event.kind === "cleared" && item.event.newThreadId);
+    if (identity?.event.kind === "session") this.currentThreadId = identity.event.sessionId;
+    else if (identity?.event.kind === "cleared") this.currentThreadId = identity.event.newThreadId ?? null;
+    if (threadId !== undefined) this.currentThreadId = threadId;
+    this.syncControls();
     if (this.pendingCodexSend && envelopes.some(({ event }) => event.kind === "user" &&
         event.requestId === this.pendingCodexSend!.requestId)) this.finishCodexSend(true);
     this.transcript.reset(envelopes);
@@ -260,6 +312,9 @@ export class ChatPanel {
 
   /** WS `chatEvent`（live 1 件）。 */
   applyEvent(envelope: MasterChatEnvelope): void {
+    if (envelope.event.kind === "session") this.currentThreadId = envelope.event.sessionId;
+    if (envelope.event.kind === "cleared" && envelope.event.newThreadId) this.currentThreadId = envelope.event.newThreadId;
+    this.syncControls();
     if (envelope.event.kind === "user" && envelope.event.requestId === this.pendingCodexSend?.requestId &&
         this.pendingCodexSend) this.finishCodexSend(true);
     const change = this.transcript.apply(envelope);
@@ -286,6 +341,7 @@ export class ChatPanel {
   /** 接続が切れたときの表示（再接続で snapshot が来れば戻る）。 */
   markDisconnected(): void {
     this.disconnected = true;
+    this.checkingConversation = false;
     this.stateBadge.textContent = "切断（再接続中…）";
     this.stateBadge.className = "chat-state state-stopped";
     if (this.pendingCodexSend) this.showHint("送信結果を確認できません。入力を保持しています。会話履歴の照合を待ち、自動再送しません。", "error");
@@ -538,13 +594,14 @@ export class ChatPanel {
 
   /** 状態に応じて送信ボタン・入力欄・pending バーを更新する。 */
   private syncControls(): void {
-    const blocked = this.disconnected || Boolean(this.pendingCodexSend) || !sendEnabled(this.state) ||
+    const pendingConversation = this.pendingConversation?.id === this.masterId ? this.pendingConversation : null;
+    const blocked = this.disconnected || Boolean(this.pendingCodexSend) || Boolean(pendingConversation) || !sendEnabled(this.state) ||
       (this.codexReadOnly && this.state === "busy");
     this.sendBtn.disabled = blocked;
     this.stopBtn.disabled = !stopEnabled(this.state);
     this.input.disabled = blocked;
     this.input.placeholder = blocked
-      ? this.pendingCodexSend
+      ? pendingConversation ? "会話の作成結果を確認しています（入力は保持されます）" : this.pendingCodexSend
         ? "送信結果を確認しています（入力は保持されます）"
         : this.codexReadOnly && this.state === "busy"
         ? "統括の応答が終わるまでお待ちください"
@@ -552,11 +609,16 @@ export class ChatPanel {
       : this.state === "busy"
         ? "実行中でも送れます（Enter で送信 / 中断は ⏹）"
         : "依頼・相談";
-    this.newBtn.disabled = !this.masterId || this.disconnected || this.codexReadOnly || this.state === "starting";
+    this.newBtn.textContent = pendingConversation ? "作成結果を確認" : "新しい会話";
+    this.newBtn.disabled = !this.masterId || this.disconnected || Boolean(pendingConversation && this.checkingConversation) ||
+      (this.codexReadOnly && !this.conversationsEnabled) ||
+      (!pendingConversation && (this.state === "starting" || this.codexReadOnly &&
+        (this.state !== "idle" || this.pending > 0 || Boolean(this.pendingCodexSend) || !this.currentThreadId)));
     if (this.newConversationConfirm) this.newConversationConfirm.disabled = this.newBtn.disabled;
     // A confirmation applies only to the Master and connection the user saw when opening it.
     if (this.newConversationDialog?.open &&
-        (this.newBtn.disabled || this.newConversationTarget !== this.masterId)) {
+        (this.newBtn.disabled || this.newConversationTarget !== this.masterId ||
+          this.codexReadOnly && this.newConversationThread !== this.currentThreadId)) {
       this.newConversationDialog.close();
     }
     if (this.pending > 0) {
@@ -570,6 +632,7 @@ export class ChatPanel {
 
   private showNewConversationDialog(): void {
     if (this.newBtn.disabled || !this.masterId) return;
+    if (this.pendingConversation?.id === this.masterId) { this.checkConversation(); return; }
     if (!this.newConversationDialog) {
       const dialog = document.createElement("dialog");
       dialog.className = "md-dialog chat-new-dialog";
@@ -593,9 +656,20 @@ export class ChatPanel {
       confirm.addEventListener("click", () => {
         const target = this.newConversationTarget;
         if (!target || target !== this.masterId || this.newBtn.disabled) return;
+        let request: { requestId: string; oldThreadId: string } | undefined;
+        if (this.codexReadOnly) {
+          if (!this.currentThreadId || this.currentThreadId !== this.newConversationThread || !this.conversationAuthority) return;
+          try {
+            request = { requestId: crypto.randomUUID(), oldThreadId: this.currentThreadId };
+            const saved = { id: target, ...request, authoritySha256: this.conversationAuthority };
+            sessionStorage.setItem("negi-master-conversation-" + this.conversationAuthority, JSON.stringify(saved));
+            this.pendingConversation = saved;
+          } catch { this.showHint("会話の確認要求をこのタブへ保存できません。保存設定を確認してください。会話は切り替えていません。", "error"); return; }
+        }
         dialog.close();
         // Only the server's cleared event resets the transcript and metrics.
-        this.onNew(target);
+        this.onNew(target, request);
+        this.syncControls();
       });
       actions.append(cancel, confirm);
       dialog.append(title, copy, actions);
@@ -606,6 +680,10 @@ export class ChatPanel {
       this.newConversationConfirm = confirm;
     }
     this.newConversationTarget = this.masterId;
+    this.newConversationThread = this.currentThreadId;
+    this.newConversationDialog.querySelector("p")!.textContent = this.codexReadOnly
+      ? "今の会話を終了し、空の会話を準備します。これまでの文脈は新しい会話へ引き継ぎません。入力中のメッセージと過去の記録は残ります。作成結果を確認してから画面を切り替えます。"
+      : "現在の応答と未回答の確認を終了し、新しい会話を準備します。準備が整ってから表示と使用量を切り替えます。入力中のメッセージと過去の記録は残ります。";
     this.newConversationConfirm!.disabled = false;
     if (!this.newConversationDialog.open) this.newConversationDialog.showModal();
   }
@@ -724,7 +802,7 @@ export class ChatPanel {
       el.title = this.codexReadOnly && m.key === "cost"
         ? "Codex App Server の金額は取得できません"
         : this.codexReadOnly && m.key === "ctx"
-          ? "App Server で観測した文脈入力 / context window。新しい会話はこの統合では未対応です"
+          ? "App Server で観測した文脈入力 / context window"
           : m.title;
       this.statsEl.appendChild(el);
     });

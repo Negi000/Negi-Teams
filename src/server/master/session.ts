@@ -121,6 +121,7 @@ export interface MasterSessionOptions {
   /** メモリ保持するイベント数（snapshot 用）。 */
   snapshotLimit?: number;
   restartPolicy?: MasterRestartPolicy;
+  registeredConversations?: boolean;
   /** テスト用の差し替え口（既定は createMasterBrain）。 */
   createBrain?: (
     id: MasterBrainId,
@@ -290,6 +291,11 @@ export class MasterSession {
   get pendingCount(): number {
     return this.pending;
   }
+  get currentThreadId(): string | null {
+    // A provider can create a thread before its durable binding is confirmed.
+    // Keep the displayed identity until startup/rotation has actually succeeded.
+    return this.opts.registeredConversations ? this.lastSessionId : this.brain?.sessionId() ?? this.lastSessionId;
+  }
 
   /** 会話としての累計コスト(USD)。プロセスを跨いで足す（`--resume` で 0 に戻るため）。 */
   get totalCostUsd(): number {
@@ -406,7 +412,15 @@ export class MasterSession {
       }
       try {
         this.pid = brain.pid ?? null;
+        if (this.opts.registeredConversations) this.lastSessionId = brain.sessionId();
         options.onReady?.();
+        const boundary = brain.conversationBoundary;
+        if (boundary && !this.ring.some(item => item.event.kind === "cleared" && item.event.requestId === boundary.requestId)) {
+          const recorded = await this.log.boundaryRecorded(boundary.requestId);
+          if (this.shutdownRequested) throw new Error("サーバ終了中です。");
+          if (recorded === false) this.emitChat({ kind: "cleared", ...boundary });
+          else if (recorded === null) this.handlers.onNotice(this.id, "保存済みの会話を復元しました。古い表示境界の記録は確認できないため、現在の表示履歴を保持しています。");
+        }
         this.pump = this.runPump(brain, generation);
         this.setState("idle");
       } catch (error) {
@@ -764,9 +778,37 @@ export class MasterSession {
    *
    * 自動復帰（scheduleRestart）と競合しないよう、停止中は stopping を立てて exit を吸収する。
    */
-  async newConversation(): Promise<void> {
+  async newConversation(request?: { requestId: string; oldThreadId: string }): Promise<void> {
     if (this.opts.brainId === "codex") {
-      throw new Error("Codex master の新しい会話は結果照合とrun台帳の接続後に利用できます");
+      const brain = this.brain;
+      if (!this.opts.registeredConversations || !brain?.newConversation)
+        throw new Error("Codex master の新しい会話は結果照合とrun台帳の接続後に利用できます");
+      if (!request || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(request.requestId) ||
+          typeof request.oldThreadId !== "string" || !request.oldThreadId || request.oldThreadId.length > 200)
+        throw new Error("新しい会話の確認要求が不正です。");
+      if (this.shutdownRequested || this.resetting || this.launching || this.stateValue !== "idle" || this.codexTurnPending || this.pending)
+        throw new Error("統括の実行・会話切替・終了が進行中です。新しい要求は開始していません。");
+      if (brain.sessionId() !== request.oldThreadId) throw new Error("確認した会話が切り替わっています。現在の会話を確認してください。");
+      this.resetting = true;
+      let finishReset!: () => void;
+      this.resetFinished = new Promise(resolve => { finishReset = resolve; });
+      this.setState("starting");
+      try {
+        const boundary = await brain.newConversation(request);
+        if (this.shutdownRequested) throw new Error("サーバ終了中です。会話の保存結果を再接続後に確認してください。");
+        this.lastSessionId = boundary.newThreadId;
+        if (!this.ring.some(item => item.event.kind === "cleared" && item.event.requestId === boundary.requestId)) {
+          this.costLedger.reset();
+          this.emitChat({ kind: "cleared", ...boundary });
+          this.emit({ kind: "session", sessionId: boundary.newThreadId, model: this.opts.model,
+            apiKeySource: null, mcpServers: [], capabilities: ["read-only", "registered-conversations"] });
+        }
+        this.setState("idle");
+      } catch (error) {
+        this.setState("stopped");
+        throw error;
+      } finally { this.resetting = false; finishReset(); }
+      return;
     }
     if (!this.startInvoked || this.shutdownRequested || this.resetting || this.launching || this.stateValue === "starting")
       throw new Error("統括の会話切替・起動・終了が進行中です。新しい要求は開始していません。");
@@ -834,7 +876,10 @@ export class MasterSession {
    */
   snapshot(opts: { before?: number; limit?: number } = {}): { events: MasterChatEnvelope[]; hasMore: boolean } {
     const limit = Math.max(1, Math.min(opts.limit ?? this.snapshotLimit, this.snapshotLimit));
-    const pool = opts.before == null ? this.ring : this.ring.filter((e) => e.seq < opts.before!);
+    const threadId = this.opts.registeredConversations ? this.currentThreadId : null;
+    const visible = threadId ? this.ring.filter(item => item.threadId === threadId ||
+      item.event.kind === "cleared" && item.event.newThreadId === threadId) : this.ring;
+    const pool = opts.before == null ? visible : visible.filter((e) => e.seq < opts.before!);
     const events = pool.slice(-limit);
     // まだメモリ上に古いものが残っている、または ring から溢れた分がある（＝ JSONL にはある）。
     const oldestIsRingOldest =
@@ -870,7 +915,9 @@ export class MasterSession {
 
   private emitChat(event: MasterChatEvent): void {
     this.seq += 1;
-    const envelope: MasterChatEnvelope = { seq: this.seq, ts: Date.now(), event };
+    const envelope: MasterChatEnvelope = { seq: this.seq, ts: Date.now(), event,
+      ...(this.opts.registeredConversations ? { threadId: event.kind === "session" ? event.sessionId :
+        event.kind === "cleared" ? event.newThreadId ?? this.currentThreadId : this.currentThreadId } : {}) };
     this.ring.push(envelope);
     if (this.ring.length > this.snapshotLimit) {
       this.ring.splice(0, this.ring.length - this.snapshotLimit);

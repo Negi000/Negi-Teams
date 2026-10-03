@@ -181,6 +181,9 @@ export interface MasterBrain {
   stop(): Promise<void>;
   /** この backend が実装できない機能（UI が事前に灰色表示するため）。 */
   readonly unsupported: readonly (keyof MasterBrainCapabilities)[];
+  /** Optional registered resident lifecycle; legacy adapters do not implement it. */
+  newConversation?(request: { requestId: string; oldThreadId: string }): Promise<{ requestId: string; oldThreadId: string; newThreadId: string }>;
+  readonly conversationBoundary?: { requestId: string; oldThreadId: string; newThreadId: string } | null;
 }
 
 /** capabilities から unsupported（false のキー）を導出する純関数。二重管理を作らない。 */

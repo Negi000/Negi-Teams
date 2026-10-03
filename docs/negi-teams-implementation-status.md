@@ -2,7 +2,25 @@
 
 2026-10-03（JST）。基準は `NEGI_TEAMS_MASTER_PLAN.ja.md` のPhase 0〜8と `REQUIREMENTS_TRACEABILITY.ja.md`。この表は実装・合成テスト・実モデル観測・人間受入を分ける。Git管理外の実行証拠も参照しており、実装差分の公開を全Phaseの完了宣言とは扱わない。
 
-## 2026-10-03: 登録済み保存先の通常起動
+## 2026-10-03: 常駐統括の会話保存・再開とM3確認
+
+[会話ライフサイクル](negi-teams-conversation-lifecycle.md#2026-10-03-常駐codexの会話を保存再開する)を、保存済みsetupのindexed通常起動へ接続した。初回threadの永続記録、同じthreadの再起動resume、idle時の確認付きrotate、要求IDを保持した再接続照会、起動保留中の`/storage`読取を実装した。provider待機ではMaster ownerを保持して共有root guardを解放する。完了の保存前は確認済みの会話ID・表示・下書きを保持し、表示ログの欠落を境界不存在の証明に使わない。
+
+この限定構成のCodex「新しい会話」は未有効化から実装済みへ進む。以下の経緯にある未接続・拒否は、その追加時点の記録である。旧Master/CLI/PTY/MCPの全面移行、外部の同権限clientによる同じthreadの操作、unknown処理の汎用修復、Job/broker、実provider再開/切替、規模と性能、実機と人間受入は継続する。全73要件・Phase0–8のゴールはACTIVE。
+
+### 今回の検証
+
+- 関連9ファイル244/244成功、失敗/取消/skip 0（842420.9935ms、実際のexit 0）。実行中のsrc/scripts/test 324ファイルのSHA一致を確認した。先行する並列試験は243件中241成功・通常起動の観測期限超過2件で、成功へ合算しない。試験を直列化し、fixtureの観測上限を60秒から120秒へ変更した。製品の待機・処理速度を改善した証拠ではない。
+- Windowsのnative保存、実サーバー/子processの合成providerで、初回保存、同じthreadの再開、切断後の同一要求照会、重複/古い要求の拒否、provider待機中の別scheduler追記、未知の戻り値、第一stage前のowner保持、履歴欠落/重複、provider ID変更後の保存失敗でも旧表示を保持することを確認した。未認証GET・不正UUID・POSTを拒否し、保留中の状態照会で新しいRPCを呼ばなかった。
+- ビルド済みChrome画面でログイン→作業一覧→統括→確認のキャンセル/Tab循環/Enter/Escape→空会話への切替→下書き保持→同じ要求の再読→再起動resume→結果不明→保留再起動→保存状態の同じ要求照会を確認した。GUIの合成送信2件、正常切替1件、不明な切替1件。初回を含む合成thread/start 3件、resume 1件。保留再起動のprovider要求0、Task/Jev/実モデルturn 0。破損した別Masterの保留IDでUIを塞がないことも確認した。
+- 244件の後は、2ファイルの表示文と確認カードの順序だけを調整した。保留要求のカードを保存状態画面の上部へ置き、通信失敗と未確定結果の案内を日本語で揃えた。型検査・ビルド成功。最終の読取専用Chrome確認では1440/375/320pxそれぞれの明暗で横超過0、同じ要求の操作48px、reduced motion 0s。320pxの確認操作bottom616.27px < 下部navigation top740px。通常起動のチャット送信bottom712px < navigation top740pxも確認した。
+- 最終の読取確認でprovider launch試行0。通信失敗で古い進行リンクを隠し、要求IDを保持し、再読と再読み込みで回復した。予期しないconsole/page errorは0。サーバー再起動中の接続拒否5件と、二つのGUI確認区間の意図したGET中断各1件は区別する。Browser plugin not availableのため既存Playwright/Chromeを使い、画像・合成記録は公開差分の外へ保存した。開始したQA browser/server/helperは終了した。
+
+独立レビューで共有guardの長期保持、再接続時の要求取りこぼし、古い確認、履歴境界の欠落、保存前のprovider identity露出、異なるMasterの保留情報を修正した。最後の限定再レビューに追加の阻害要因はなかった。初期のprototype由来のtool limit回帰1件、観測期限超過、theme selectorとWindows file URL/quoteのQA手順失敗は別に保持する。
+
+実providerのmetadata確認用probeは完了報告を得られず、成功として数えていない。モデルturnを呼ばないscriptだったが、空threadの作成結果は未確認であり自動再試行しなかった。所有する診断用nodeだけを終了し、既存desktop brokerは操作していない。実providerの再開/切替と外部brokerの終了保証は、合成プロトコルの成功で代用しない。最終assetsは`index-CvLJ6iRB.css`/`index-BNK5AJMY.js`。
+
+## 先行記録: 登録済み保存先の通常起動
 
 [保存済み設定のindexed通常起動](negi-teams-indexed-startup.md)を接続し、初回登録からM3作業一覧・統括チャットへ進む経路を実装した。サーバー専用の明示選択、既存root/index/Master idleの検査、登録済みscheduler、モデル/ログイン/設定版の保留を保持する。通常サーバー＋合成providerで送信1回と再起動時の自動再送0を確認した。関連60件、最後の画面・案内修正の13件は成功し、集合は重複する。PC/320/375px・明暗・キーボード・通信失敗回復・新しいTaskへの遷移はビルド済みGUIで確認した。
 

@@ -1,6 +1,22 @@
 # 会話切替と統括のライフサイクル
 
-2026-10-03更新。Material 3の会話切替を、実際の起動・終了状態に合わせる。Codexの新規会話を有効にした記録ではない。
+2026-10-03更新。Material 3 Expressiveの会話切替を、実際の起動・終了状態に合わせる。現在の有効化範囲は、保存済みsetupを使うindexed通常起動の単一Codex統括である。
+
+## 2026-10-03: 常駐Codexの会話を保存・再開する
+
+- 初回の空threadを署名付き要求と索引へ保存する。正常な再起動では保存済みの同じthreadを照合し、`thread/resume`で再開する。表示ログのsession IDをauthorityとして採用しない。
+- `cwd/model/provider/effort/settings`、approval policy、read-only/network無効、threadの状態とterminal turn集合を照合する。設定・外部turn・未解決claim・残存owner・不足した記録は開始を保留する。入力の自動再送はない。
+- idle時の「新しい会話」はM3確認dialogで空の文脈へ切り替える意思を確認し、UUIDと旧threadを同じタブへ保存してから送る。旧threadが変わった確認は拒否する。通常の切替は同じApp Server内で行う。
+- Master ownerを保持し、各段階の保存だけ共有root guardを取得する。provider待機中も別Taskの保存は進められる。同じMasterの入力と切替は同時に受理しない。dispatch intentを永続化してからRPCを呼び、完了の保存後だけ表示境界・使用量を切り替える。
+- 切断、timeout、provider戻り値の不一致、保存結果不明は同じ要求の照合待ちへ残す。status照会と同じUUIDの重複要求で再作成しない。切替失敗は所有する接続を終了し、元の記録を保持する。
+- 要求IDは保存先の登録SHAとMasterへ束縛する。再接続は同じ要求の状態を読む。通常統括が起動できない場合も、`/storage`の「会話の作成結果」で保持した要求を認証付きGETにより確認できる。この画面はproviderを起動しない。第一stage前の署名済みownerも不明な結果として保持する。
+- best-effortな表示ログへserver-owned thread IDを付け、現在のthreadの表示だけを復元する。完全なseq履歴だけが境界の不存在を示せる。切れた・欠落・重複したログは不存在の証明に使わず、現在の履歴を消す境界を追加しない。表示ログはprovider authorityではない。
+
+既定legacy・未登録の構成はCodex切替を有効にしない。過去のturnに署名済み初回thread/chainがない場合は移行の照合を保留し、新しい空threadで回避しない。外部の同権限provider clientや別serverによる同じthreadの同時操作、Job/broker終了の保証、unknown turnやownerの汎用修復、実provider・実機・人間受入、10,000件規模の性能と保持/移行は残る条件である。全Phaseの完成ではない。
+
+実装・合成試験・ブラウザー確認の最新結果は[実装状況](negi-teams-implementation-status.md)へ記録する。以下の節は追加時点の履歴であり、indexed通常起動が未接続という過去の状態は上記の限定接続により更新された。
+
+## 先行実装の記録
 
 最新の候補実装では、server内部で`stageStorage: "indexed"`を明示登録したauthorityのowner preview・解除・保存済み確認IDの照会まで索引へ接続した。[owner復旧の方式と検証](negi-teams-master-conversation-inventory.md#2026-10-03-明示登録したauthorityのowner復旧と同じ確認idの照会)。3種類のownerを対象に、元receipt/UUID/proofを再利用し、不明なACK・別owner・別記録の欠落を保留する。owner解除はprovider操作の完了ではない。既定legacy、通常入力/起動/providerの互換gateとCodex新規会話の拒否は維持する。production caller・HTTP・認証済み人間確認UIはまだ接続していない。これらの確認画面はauthority/APIの受入後に既存のMaterial 3 PC/スマホ導線へ統合する。
 
