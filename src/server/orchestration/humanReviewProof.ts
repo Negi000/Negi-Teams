@@ -41,6 +41,16 @@ export class HumanReviewProofStore {
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     }
+    return this.openExisting(root, maxReceiptBytes);
+  }
+
+  /** Read an existing authority without creating a directory or signing key. */
+  static async openExisting(directory: string,maxReceiptBytes=24_000): Promise<HumanReviewProofStore> {
+    if(!Number.isSafeInteger(maxReceiptBytes)||maxReceiptBytes<24_000||maxReceiptBytes>2_000_000)
+      throw Error("Review receipt bound invalid");
+    const target = resolve(directory), folder = await lstat(target);
+    if (!folder.isDirectory() || folder.isSymbolicLink()) throw new Error("Review storage cannot be linked or missing");
+    const root = await realpath(target), path = join(root, "server-signing-key");
     const entry = await lstat(path);
     if (!entry.isFile() || entry.isSymbolicLink() || entry.size !== 32)
       throw new Error("Review signing key is invalid");

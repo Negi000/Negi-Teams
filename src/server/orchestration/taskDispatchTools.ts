@@ -6,6 +6,7 @@ import type { LocalTaskService, TaskRunView, TaskRequestOrigin } from "./taskSer
 import type { TaskResultContext } from "./taskResults.ts";
 import type { LocalTaskAuthoringService } from "./taskAuthoring.ts";
 import { TaskDecompositionKeyError } from "./taskDecomposition.ts";
+import { taskResultRecipient } from "../../shared/taskResults.ts";
 
 const runId = { type: "string", pattern: "^[a-zA-Z0-9._-]{1,100}$" };
 const baselineId = { type: "string", pattern: "^base-[a-f0-9]{24}$" };
@@ -112,8 +113,10 @@ export function registeredTaskTools(service: LocalTaskService, masterId: string,
         }
       } else if (call.tool === "negi_list_task_results") {
         argumentsObject(call.arguments, []);
-        value = { notifications: (await service.resultNotifications()).filter(n => !n.supersededBy && n.origin.kind === "master" &&
-          n.origin.masterId === masterId && n.origin.threadId === call.threadId).slice(0, 8), frozenAtNotification: true };
+        value = { notifications: (await service.resultNotifications()).filter(n => {
+          const recipient = taskResultRecipient(n);
+          return !n.supersededBy && recipient?.masterId === masterId && recipient.threadId === call.threadId;
+        }).slice(0, 8), frozenAtNotification: true };
       } else if (call.tool === "negi_list_tasks") {
         const args = argumentsObject(call.arguments, ["project", "offset"]), offset = args.offset ?? 0;
         if (!Number.isSafeInteger(offset) || Number(offset) < 0 || Number(offset) > 100 ||

@@ -6,7 +6,7 @@ import type {
   UsageMessage,
   ChatConversationResultMessage,
 } from "../shared/protocol.ts";
-import { taskResultDeliveryLabels, taskResultUpdateLabel } from "../shared/taskResults.ts";
+import { taskResultDeliveryLabel, taskResultRecipient, taskResultUpdateLabel } from "../shared/taskResults.ts";
 import { taskStatusLabels } from "../shared/workspace.ts";
 import { taskOriginHref } from "../shared/conversations.ts";
 import {
@@ -1214,11 +1214,11 @@ function buildItem(
       heading.textContent = result.title + " · " + taskResultUpdateLabel(result);
       const state = div("md-chip"); state.textContent = taskStatusLabels[result.status] ?? result.status;
       const copy = document.createElement("p");
-      copy.textContent = taskResultDeliveryLabels[result.delivery.state];
+      copy.textContent = taskResultDeliveryLabel(result);
       if (["unknown", "prepared", "dispatching", "failed"].includes(result.delivery.state)) copy.className = "task-result-attention";
       const note = document.createElement("small");
       note.textContent = result.supersededBy ? "この通知より新しい結果があります。Taskで現在の成果と受入を確認してください。" : ["pending", "not_sent"].includes(result.delivery.state)
-        ? "通知時点の結果です。委任元と同じ会話の次の依頼で現在を照合し、有効な結果を添付します。現在のTaskと人間受入は詳細で確認できます。"
+        ? "通知時点の結果です。この会話の次の依頼で現在を照合し、有効な結果を添付します。現在のTaskと人間受入は詳細で確認できます。"
         : result.delivery.state === "completed"
         ? "通知時点の結果への統括の応答を記録しました。成果の人間受入は別に確認してください。"
         : result.delivery.state === "bound"
@@ -1227,9 +1227,10 @@ function buildItem(
       const actions = div("md-actions"), task = document.createElement("a");
       task.className = "md-button md-tonal"; task.href = "/tasks?run=" + encodeURIComponent(result.runId); task.textContent = "Taskを確認";
       actions.append(task);
-      if (result.origin.kind === "master") {
+      if (taskResultRecipient(result)) {
         const source = document.createElement("a"); source.className = "md-button md-tonal";
-        source.href = taskOriginHref(result.runId); source.textContent = "委任元の会話"; actions.append(source);
+        source.href = taskOriginHref(result.runId, result.origin.kind === "master" ? "requested" : "created");
+        source.textContent = result.origin.kind === "master" ? "委任元の会話" : "契約案を作った会話"; actions.append(source);
       }
       if (result.reviewId) {
         const review = document.createElement("a"); review.className = "md-button md-primary";

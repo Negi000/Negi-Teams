@@ -20,8 +20,8 @@ export interface ConversationSource {
   outcomeSha256: string | null;
 }
 
-export function taskOriginHref(runId: string): string {
-  return "/conversations?run=" + encodeURIComponent(runId) + "&source=requested";
+export function taskOriginHref(runId: string, source: "requested" | "created" = "requested"): string {
+  return "/conversations?run=" + encodeURIComponent(runId) + "&source=" + source;
 }
 
 export function conversationTarget(url: URL) {

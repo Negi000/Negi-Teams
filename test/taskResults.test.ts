@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { TaskResultStore } from "../src/server/orchestration/taskResults.ts";
-import type { TaskResultNotice } from "../src/shared/taskResults.ts";
+import { taskResultRecipient, type TaskResultNotice } from "../src/shared/taskResults.ts";
 import { ChatTranscript } from "../src/client/chatModel.ts";
 
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -23,6 +23,45 @@ async function fixture(run: (store: TaskResultStore, root: string) => Promise<vo
 const current = async () => true;
 const terminal = { turnId: "reply-turn", status: "completed" as const, finalText: "Result observed; human review remains",
   contextInputTokens: null, contextWindow: null, lastUsage: null };
+
+test("browser execution keeps its origin and delivers only to its verified creation conversation without replay", async () => {
+  await fixture(async (store, root) => {
+    const createdBy = resultNotice().origin as NonNullable<TaskResultNotice["createdBy"]>;
+    const notice = { ...resultNotice(), origin: { kind: "browser" as const }, createdBy };
+    await store.publish(notice, { resultRevision: 0, artifactSha256: null });
+    assert.deepEqual(taskResultRecipient((await store.list())[0]), createdBy);
+    assert.equal(await store.prepareContext("another", "thread", "input", current), null);
+    assert.equal(await store.prepareContext("master", "another", "input", current), null);
+    const context = (await store.prepareContext("master", "thread", "user followup", current))!;
+    const packed = JSON.parse(context.text.split("\n").at(-1)!)[0];
+    assert.deepEqual(packed.origin, { kind: "browser" }); assert.deepEqual(packed.createdBy, createdBy);
+    await context.dispatching(); await context.unknown();
+    const restored = await TaskResultStore.open(root);
+    assert.equal((await restored.list())[0].delivery.state, "unknown");
+    assert.equal(await restored.prepareContext("master", "thread", "never replay", current), null);
+    await assert.rejects(store.publish({ ...notice, createdBy: { ...createdBy, threadId: "reassigned" } },
+      { resultRevision: 0, artifactSha256: null }), /origin changed/);
+    await assert.rejects(store.publish({ ...notice, createdBy: undefined }, { resultRevision: 0, artifactSha256: null }), /origin changed/);
+    await assert.rejects(store.publish({ ...resultNotice("invalid"), createdBy }), /creation origin/);
+  });
+});
+
+test("legacy browser result gains creation provenance in a new notice without overwriting its historical bytes", async () => {
+  await fixture(async (store, root) => {
+    const initial = { ...resultNotice(), origin: { kind: "browser" as const } };
+    await store.publish(initial); const original = await readFile(join(root, "results.jsonl"), "utf8");
+    assert.equal(await store.prepareContext("master", "thread", "before upgrade", current), null);
+    const next = { ...initial, sourceSha256: sha("signed creation metadata"), createdBy: resultNotice().origin as NonNullable<TaskResultNotice["createdBy"]> };
+    await store.publish(next, { resultRevision: 0, artifactSha256: null });
+    const notices = await store.list(); assert.equal(notices.length, 2);
+    assert.equal(notices[0].createdBy, undefined); assert.equal(notices[0].supersededBy, notices[1].id);
+    assert.equal((await readFile(join(root, "results.jsonl"), "utf8")).startsWith(original), true);
+    assert.equal((JSON.parse(await readFile(join(root, "pre-v2-log.json"), "utf8"))).legacyLog, original);
+    const context = (await store.prepareContext("master", "thread", "after upgrade", current))!;
+    assert.deepEqual(JSON.parse(context.text.split("\n").at(-1)!).map((n: TaskResultNotice) => n.id), [notices[1].id]);
+    await context.notSent();
+  });
+});
 
 test("result publication freezes initial facts, deduplicates recovery and rejects reused run configuration", async () => {
   await fixture(async store => {

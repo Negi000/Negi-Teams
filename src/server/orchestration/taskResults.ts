@@ -4,7 +4,7 @@ import { lstat, mkdir, open, readFile, realpath, unlink } from "node:fs/promises
 import { join } from "node:path";
 import { setTimeout as wait } from "node:timers/promises";
 import type { CodexTurnObservation } from "../master/appServerClient.ts";
-import type { TaskResultNotice, TaskResultSummary, TaskResultDeliveryState } from "../../shared/taskResults.ts";
+import { taskResultRecipient, type TaskResultNotice, type TaskResultSummary, type TaskResultDeliveryState } from "../../shared/taskResults.ts";
 
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 const sha = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
@@ -20,7 +20,12 @@ type Action = { type: "notice"; notice: TaskResultNotice } | { type: "prepare"; 
 interface Event { key: string; at: string; action: Action }
 interface State { notices: TaskResultNotice[]; deliveries: Delivery[] }
 const latestForRun = (state: State, runId: string) => [...state.notices].reverse().find(n => n.runId === runId);
-function sameOrigin(a: TaskResultNotice, b: TaskResultNotice) { return JSON.stringify(a.origin) === JSON.stringify(b.origin); }
+function sameOrigin(a: TaskResultNotice, b: TaskResultNotice) {
+  // A legacy browser notice may gain verified creation provenance in a new
+  // immutable update. Once bound, it cannot move to another conversation.
+  return JSON.stringify(a.origin) === JSON.stringify(b.origin) &&
+    (!a.createdBy || JSON.stringify(a.createdBy) === JSON.stringify(b.createdBy));
+}
 function updateKind(previous: TaskResultNotice, next: TaskResultNotice,
                     facts: {resultRevision:number;artifactSha256:string|null}): NonNullable<TaskResultNotice["update"]>["kind"] {
   if (next.status === "review_revoked") return "revoked";
@@ -50,6 +55,8 @@ function reduce(state: State, event: Event): State {
       (n.reason === null || (typeof n.reason === "string" && n.reason.length <= 1000)) &&
       ["browser", "master"].includes(n.origin?.kind), "notice shape");
     if (n.origin.kind === "master") check([n.origin.masterId, n.origin.threadId, n.origin.turnId, n.origin.callId].every(label), "notice origin");
+    if (n.createdBy !== undefined) check(n.createdBy && n.origin.kind === "browser" && n.createdBy.kind === "master" && Object.keys(n.createdBy).length === 5 &&
+      [n.createdBy.masterId, n.createdBy.threadId, n.createdBy.turnId, n.createdBy.callId].every(label), "notice creation origin");
     const previous = latestForRun(next, n.runId), u = n.update;
     check(!next.notices.some(old => old.id === n.id), "duplicate notice");
     if (u) {
@@ -72,7 +79,8 @@ function reduce(state: State, event: Event): State {
       !next.deliveries.some(old => old.id === d.id), "delivery identity");
     for (const id of d.noticeIds) {
       const n = next.notices.find(n => n.id === id), old = [...next.deliveries].reverse().find(d => d.noticeIds.includes(id));
-      check(n?.origin.kind === "master" && n.origin.masterId === d.masterId && n.origin.threadId === d.threadId &&
+      const recipient = n && taskResultRecipient(n);
+      check(n && recipient?.masterId === d.masterId && recipient.threadId === d.threadId &&
         latestForRun(next,n.runId)?.id === n.id &&
         (!old || old.state === "not_sent"), "delivery must match the originating conversation without replay");
     }
@@ -230,7 +238,8 @@ export class TaskResultStore {
     const current = new Map<string, string>(), snapshot = (await this.read()).state;
     for (const n of snapshot.notices) {
       if(latestForRun(snapshot,n.runId)?.id!==n.id)continue;
-      if (n.origin.kind !== "master" || n.origin.masterId !== masterId || n.origin.threadId !== threadId) continue;
+      const recipient = taskResultRecipient(n);
+      if (recipient?.masterId !== masterId || recipient.threadId !== threadId) continue;
       const latest = [...snapshot.deliveries].reverse().find(d => d.noticeIds.includes(n.id));
       if (latest && latest.state !== "not_sent") continue;
       if (await stillCurrent(n)) current.set(n.id, hash(JSON.stringify(n)));
@@ -241,14 +250,15 @@ export class TaskResultStore {
       const notices: TaskResultNotice[] = [];
       for (const n of state.notices) {
         if(latestForRun(state,n.runId)?.id!==n.id)continue;
-        if (n.origin.kind !== "master" || n.origin.masterId !== masterId || n.origin.threadId !== threadId) continue;
+        const recipient = taskResultRecipient(n);
+        if (recipient?.masterId !== masterId || recipient.threadId !== threadId) continue;
         const latest = [...state.deliveries].reverse().find(d => d.noticeIds.includes(n.id));
         if (latest && latest.state !== "not_sent") continue;
         if (current.get(n.id) === hash(JSON.stringify(n))) notices.push(n);
         if (notices.length === 8) break;
       }
       if (!notices.length) return;
-      text = input + "\n\n[Negi-Teams: 同じ会話から委任したTaskの固定結果]\n" +
+      text = input + "\n\n[Negi-Teams: この会話から委任または契約化したTaskの固定結果]\n" +
         "以下はserverが保存した結果通知です。通知時点の機械検証と人間受入を区別し、必要ならnegi_read_taskで現在を確認してください。結果不明の作業を再委任しないでください。\n" +
         JSON.stringify(notices);
       check(Buffer.byteLength(text) <= 100_000 && Buffer.byteLength(JSON.stringify(notices)) <= 16_000, "result context bound");

@@ -21,6 +21,7 @@ import { readTaskRevision, replayRevisionReview, revisionMatchesTask, taskManife
   taskRevisionHash, writeTaskRevisionPointer, type PinnedTaskRevision, type TaskRevisionJournal } from "./taskRevision.ts";
 import { TaskResultStore, TaskResultSourceChangedError, type TaskResultContext } from "./taskResults.ts";
 import type { TaskResultNotice, TaskResultSummary } from "../../shared/taskResults.ts";
+import { loadApprovedTaskOrigin } from "./approvedTaskPlan.ts";
 import type { MasterOrigin } from "../../shared/conversations.ts";
 import { readMasterTurnOrigin } from "./masterTurnRecords.ts";
 import { TaskExecutionOwner } from "./taskExecutionOwner.ts";
@@ -240,7 +241,8 @@ export class LocalTaskService {
     const core = { runId: view.id, title: view.title.replace(/[\r\n\0]/g, " "), project: view.project,
       taskId: view.taskId, version: view.version, configSha256: view.configSha256,
       status: view.status, verificationOutcome: view.verificationOutcome, acceptedBy: view.acceptedBy,
-      reviewId: view.reviewId, reason: view.error ? "詳細な状態をTask画面で確認してください。" : null, origin: request.requestedBy ?? { kind: "browser" as const } };
+      reviewId: view.reviewId, reason: view.error ? "詳細な状態をTask画面で確認してください。" : null, origin: request.requestedBy ?? { kind: "browser" as const },
+      ...(request.requestedBy?.kind === "browser" && run.config.approvedPlan ? { createdBy: await loadApprovedTaskOrigin(run.config) } : {}) };
     return { core, sourceSha256: hash(JSON.stringify({ core, requestId: request.requestId, ledger, entry })),
       facts:{resultRevision:view.resultRevisionCount,artifactSha256:this.manifests.get(id)?.review.verifiedArtifactSha256??null} };
   }
@@ -275,8 +277,10 @@ export class LocalTaskService {
   async prepareResultContext(masterId: string, threadId: string, input: string): Promise<TaskResultContext | null> {
     // Refresh originating runs before selecting a version. This repairs a saved
     // review/revision whose notification append was interrupted, without a turn.
-    for(const run of this.runs){const origin=(await this.request(run))?.requestedBy;
-      if(origin?.kind==="master"&&origin.masterId===masterId&&origin.threadId===threadId)await this.publishResult(run.config.runId);
+    for(const run of this.runs){const request=await this.request(run);
+      const origin=request?.requestedBy?.kind==="master"?request.requestedBy:
+        request?.requestedBy?.kind==="browser"?await loadApprovedTaskOrigin(run.config):null;
+      if(origin?.masterId===masterId&&origin.threadId===threadId)await this.publishResult(run.config.runId);
     }
     return this.resultStore.prepareContext(masterId, threadId, input, async notice => {
       if (!this.runs.some(run => run.config.runId === notice.runId && run.configSha256 === notice.configSha256)) return false;
@@ -764,15 +768,18 @@ export class LocalTaskService {
     let state = (await this.ledger(run).read()).state;
     const entry = (await this.scheduler.read()).state?.entries.find((item) => item.work.id === id);
     const active = this.active.get(id);
+    // This server still owns preflight after persisting the request. A reader
+    // without that live operation must keep the missing submission uncertain.
+    const preparing = Boolean(request && this.starts.has(id) && !state && !entry);
     // A running/queued Task has no result adoption to perform. Its status read
     // must remain available while another accepted baseline holds the gate.
-    const executing=Boolean(active||entry?.status==="queued");
+    const executing=Boolean(active||preparing||entry?.status==="queued");
     const manifest = executing ? this.manifests.get(id)??null : await this.ensureReview(run);
     if (manifest&&!executing) { await this.syncReview(run, manifest); state=(await this.ledger(run).read()).state; }
     const error = await readJson(join(this.root, `${id}.error.json`)) as { error?: string } | null;
     const interrupted = !active && entry && ["running", "needs_reconciliation"].includes(entry.status);
     let status = interrupted ? "needs_reconciliation" : state?.status ?? entry?.status ??
-      (request ? error ? "preflight_failed" : "needs_reconciliation" : "not_started");
+      (request ? error ? "preflight_failed" : preparing ? "queued" : "needs_reconciliation" : "not_started");
     let reviewError: string | null = null;
     if (manifest) {
       const review = await this.reviews!.snapshot(manifest.review.id,{includeRelations:false});
@@ -792,7 +799,7 @@ export class LocalTaskService {
       outOfScope: scope?.out ?? [], invariants: run.contract.invariants as string[] ?? [],
       verification: run.contract.verification as string[], astra: run.config.astra, sol: run.config.sol,
       status, executionPhase: entry?.phase ?? null, canStart: !request && !entry && !state && !this.closing && !startError,
-      canStop: Boolean(active || entry?.status === "queued"), live: Boolean(active),
+      canStop: Boolean(active || entry?.status === "queued"), live: Boolean(active || preparing && !error),
       stopRequested: active?.controller.signal.aborted ?? false,
       error: error?.error ?? reviewError ?? state?.stopReason ?? entry?.reason ?? startError,
       verificationOutcome: state?.verification?.outcome ?? null, acceptedBy: state?.acceptedBy ?? null,
@@ -834,14 +841,24 @@ export class LocalTaskService {
     if (!(await this.snapshot(id)).canStart) throw new Error("Task cannot be dispatched again");
     await writeNew(this.requestPath(id), { runId: id, requestId, configSha256: run.configSha256,
       requestedBy, at: new Date().toISOString() });
+    let stage: "prepare" | "scheduler_submission" = "prepare";
     try {
       if (hash(await readFile(run.config.snapshot)) !== run.snapshotSha256) throw new Error("Task snapshot changed");
       const prepared = await this.runtime.prepare(run.config);
       if (this.closing) throw new Error("Server stopped before Task submission");
+      stage = "scheduler_submission";
       await this.runtime.submit(prepared, this.scheduler);
       this.prepared.set(id, prepared);
-    } catch {
-      await writeNew(join(this.root, `${id}.error.json`), { error: "実行前の確認に失敗しました。契約・認証・checkout・台帳を確認してください。" });
+    } catch (cause) {
+      const detail = cause instanceof Error ? cause : new Error("Non-Error preflight failure");
+      const rawCode = (detail as NodeJS.ErrnoException).code;
+      const code = ["ENOENT", "EEXIST", "EPERM", "EACCES", "EIO", "ENOSPC", "ETIMEDOUT", "SQLITE_BUSY", "SQLITE_LOCKED"].includes(rawCode ?? "")
+        ? rawCode : detail.name === "MasterStorageHeldError" ? "STORAGE_HELD" : "PREFLIGHT_ERROR";
+      // Persist before any journal/helper observation. A failure alone cannot
+      // establish absence of a scheduler intent or permit another dispatch.
+      await writeNew(join(this.root, `${id}.error.json`), { error: "実行前の確認に失敗しました。契約・認証・checkout・台帳を確認してください。",
+        failure: { schema: "negi-task-preflight-failure/1", stage, code, at: new Date().toISOString(), schedulerSubmission: "unknown",
+          classificationSha256: hash(JSON.stringify({ stage, code })) } });
       await this.publishResult(id);
     }
     return this.snapshot(id);

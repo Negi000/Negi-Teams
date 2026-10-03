@@ -135,7 +135,7 @@ interface Harness {
   rateLimits: Partial<UsageRateLimits>[];
 }
 
-function makeSession(opts: { snapshotLimit?: number; brainId?: MasterBrainId;
+function makeSession(opts: { snapshotLimit?: number; brainId?: MasterBrainId; registeredConversations?: boolean;
   failStart?: boolean; configureBrain?: (brain: FakeBrain, index: number) => void;
   configureHandlers?: (handlers: MasterSessionHandlers) => void } = {}): Harness {
   const brains: FakeBrain[] = [];
@@ -173,6 +173,7 @@ function makeSession(opts: { snapshotLimit?: number; brainId?: MasterBrainId;
     logPath: null,
     handlers,
     ...(opts.snapshotLimit === undefined ? {} : { snapshotLimit: opts.snapshotLimit }),
+    ...(opts.registeredConversations ? { registeredConversations: true } : {}),
     restartPolicy: { baseDelayMs: 5, maxDelayMs: 10, maxConsecutiveFailures: 3, minHealthyMs: 10_000 },
     createBrain: (id, o) => {
       const b = new FakeBrain(id);
@@ -188,8 +189,26 @@ function makeSession(opts: { snapshotLimit?: number; brainId?: MasterBrainId;
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+test("registered conversation only displays results addressed to its current thread, including browser-started authored Tasks", async () => {
+  const h = makeSession({ registeredConversations: true, configureBrain: brain => { brain.sessionId = () => "current-thread"; } });
+  try {
+    await h.session.start(); const before = h.events.length;
+    const result: TaskResultSummary = { id: "a".repeat(64), createdAt: "2026-10-03T00:00:00Z", runId: "run",
+      title: "Authored result", project: "fixture", taskId: "TASK", version: 1, configSha256: "b".repeat(64),
+      sourceSha256: "c".repeat(64), status: "ready_for_review", verificationOutcome: "passed", acceptedBy: null,
+      reviewId: null, reason: null, origin: { kind: "browser" },
+      createdBy: { kind: "master", masterId: "master", threadId: "old-thread", turnId: "plan-turn", callId: "plan-call" },
+      delivery: { state: "pending", threadId: null, turnId: null } };
+    h.session.notifyTaskResult(result); assert.equal(h.events.length, before);
+    h.session.notifyTaskResult({ ...result, createdBy: { ...result.createdBy!, threadId: "current-thread" } });
+    assert.equal(h.events.length, before + 1); assert.equal(h.events.at(-1)!.threadId, "current-thread");
+    assert.deepEqual(h.brains[0].sent, []);
+    h.session.notifyTaskResult({ ...result, origin: { ...result.createdBy!, kind: "master" }, createdBy: undefined });
+    assert.equal(h.events.length, before + 1);
+  } finally { await h.session.stop(); }
+});
 test("Task notification belongs to its Master, updates its card, and never sends a user or provider turn", async () => {
-  const h = makeSession();
+  const h = makeSession({ configureBrain: brain => { brain.sessionId = () => "origin-thread"; } });
   try {
     await h.session.start();
     const result: TaskResultSummary = { id: "a".repeat(64), createdAt: "2026-10-01T00:00:00Z", runId: "run",
@@ -206,6 +225,9 @@ test("Task notification belongs to its Master, updates its card, and never sends
     h.session.notifyTaskResult({ ...result, delivery: { state: "completed", threadId: "origin-thread", turnId: "response" } });
     assert.equal(h.events.length, 2); assert.equal(h.events.some(e => e.event.kind === "user"), false);
     assert.equal(h.session.snapshot().events.length, 2); assert.deepEqual(h.brains[0].sent, []);
+    h.brains[0].sessionId = () => "new-thread";
+    h.session.notifyTaskResult({ ...result, id: "d".repeat(64) });
+    assert.equal(h.events.length, 2); assert.deepEqual(h.brains[0].sent, []);
   } finally { await h.session.stop(); }
 });
 /** イベントが n 件たまるまで待つ（タイムアウトしたらそのまま返す）。 */

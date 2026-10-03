@@ -2,6 +2,38 @@
 
 2026-10-03（JST）。基準は `NEGI_TEAMS_MASTER_PLAN.ja.md` のPhase 0〜8と `REQUIREMENTS_TRACEABILITY.ja.md`。この表は実装・合成テスト・実モデル観測・人間受入を分ける。Git管理外の実行証拠も参照しており、実装差分の公開を全Phaseの完了宣言とは扱わない。
 
+## 2026-10-03追加: 契約案の元会話へ結果を返す
+
+[契約案を作った会話への結果通知](negi-teams-master-task-tools.md#2026-10-03追加-契約案を作った会話への結果通知)を通常のTask/統括へ接続した。Task画面から開始した事実はbrowserとして保持し、署名済み契約承認の作成元を別に照合する。同じ会話へMaterial 3の通知と参照を表示し、次の明示入力に現在と一致する固定結果を一度だけ渡す。通知だけではturnを起動せず、人間受入も行わない。legacy Masterでも別threadの通知を混ぜない。
+
+### 検証の順序
+
+- 関連8ファイル151/151成功、失敗/取消/skip 0（368972.8038ms、exit 0）。型検査・ビルドも成功し、実行中のsrc/scripts/test 323ファイルは一致した。この後、登録ツール定義の文言を直前の公開版と同一へ戻し、Taskの事前確認表示を修正した。151件をこれら最終変更後の全件実行とは扱わない。
+- 事前確認の専用テスト1件成功（他の22件は名前指定による除外）。同じserviceの進行表示、同じ要求の重複実行なし、別readerの照合待ち、実行1回を確認した。限定した独立再レビューで指摘はなかった。
+- 最終のTask service/作成済み結果/結果保存の3ファイル38/38成功、失敗/取消/skip 0（79037.9057ms、exit 0）。登録済み8ツールの定義・schema・配列順が直前の公開版と同一であること、型検査、ビルドも成功した。実行中のsrc/scripts/test 323ファイルの一致を確認した。先行する151件との重複は合算しない。client assetsは`index-CvLJ6iRB.css`/`index-BZfQJqL-.js`。
+- 後続の診断記録は、prepare、submission前、submission後、partial journal、結果読取の停止という5件の障害注入で確認した。失敗記録は読取より先に保存し、登録intentの状態はunknownとする。生message/path/tokenはhashにも含めず、固定のstage/codeだけを分類hashにする。独立再レビューの2指摘を修正後、追加診断に新たな指摘はなかった。既存の結果読取が停止した場合のadmission保持と、preflight要求の明示回復は残る。
+- 診断修正後の同じ3ファイル43/43成功、失敗/取消/skip 0（81748.2384ms、exit 0）。8ツール定義の一致、型検査、ビルドも成功し、実行中のsrc/scripts/test 323ファイルは一致した。先行38件/151件との重複は合算しない。
+
+最初の隔離した実provider試験は、実Astraの案保存後、Taskの事前確認中に停止した。保存した要求だけがありledger/scheduler entryがまだ無い状態を「照合待ち」と表示していたため、QAの観測側が終端と誤認してサーバーを終了させた。TaskのSol attempt/submitは記録されておらず、Solの失敗とは扱わない。その要求を再実行していない。修正後は同じserviceが所有する事前確認だけを実行待ち/liveとして扱い、別readerと再起動後は照合待ちを保持する。
+
+この最初の契約案には、Astraの「保存で終える」という段階の指示が、後のTaskの実装も禁止する境界として混ざっていた。QAがその矛盾を確定前に確認しなかったことも手順の失敗として残す。署名済みの旧契約を改変せず、次の独立した隔離試験ではAstra段階とSol実装の許可を依頼文で区別し、契約の禁止事項を確定前に確認する。
+
+二つ目の隔離試験では、実Astraの契約案保存と、画面での境界確認・確定・Task開始を観測したが、要求保存から約7.47秒後に事前確認失敗となった。Taskのscheduler intent/entryとSol attemptは0。後の読み取り診断では、同一configの署名/固定契約/検証範囲/出力先/実CLI認証が通り、compiled `prepareVaultRun`も489msで成功した。保存済みschedulerへ正確なsubmit eventを純粋に適用しても成立した。元の汎用エラーから例外原因を復元できないため、一時的なlock/guard/I/O等のいずれかとは断定しない。再起動・同じ要求の再投入で成功へ書き換えていない。
+
+この二つ目の観測scriptはpreflight_failedを終端条件へ含め忘れていた。Taskの失敗、attempt 0、使用枠0を保存してから当該QAサーバーだけを終了し、browserと観測processの終了を確認した。最終scriptの通信切断エラーを製品の失敗原因には換算しない。別の隔離した診断ではcompiled通常サーバーの実認証/prepareとsubmitが成功した。診断用executeはprovider処理を明示拒否したためqueuedのままで、scriptの待機期限超過は手順側の結果として保持する。実モデル処理は0であり、Sol成功や通常の実行一巡の証明ではない。
+
+実Astra→Sol→成果レビュー→Astraでの結果伝達という一巡は、今回の実provider試験では未達である。現在確認済みの実装/合成テストをこの一巡や人間受入へ置き換えず、新しい診断記録を今後の照合に使う。最初と二つ目の失敗要求は保持し、自動再送しない。
+
+### 最終のMaterial 3画面確認
+
+保存済みの実Codex会話をcompiled通常サーバーで同じIDへresumeし、ログイン→作業一覧→チーム→実行前失敗の結果カード→「契約案を作った会話」→開始済みTaskの保持状態を確認した。Chrome1440×1000/375×812/320×812の明暗6画面で横幅がviewportと一致し、測定したTaskリンクは48px。320pxでは結果カード全体と二つの参照操作が入力欄・下部navigationより上へ収まることを画像で直接確認した。テーマ/幅変更中の未送信入力も保持した。これは失敗結果の表示と参照の確認であり、Sol成功結果の実provider一巡ではない。
+
+最終のUI観測は59.1820秒（resume起動約45.2秒、画面操作約8.4秒）、exit 0。新しいthread/start、inject、model turn、chatSend、Task attemptは0。通知のdeliveryはpending、人間受入はnullのままで、既存の停止ログも保持した。予期しないconsole warning/errorとpage errorは0。browserと当該サーバーを終了してからnative runtimeを検査しclean、元fixtureのGitとVault仕様は不変。観測中のsrc/scripts/test 323ファイルも一致した。
+
+一つ前のUI観測は画面操作後、起動中サーバーと別processの保存検査がnative guardで競合して失敗した。ロックを削除・横取りせず終了し、観測順序だけを修正して別記録で再確認した。Browser plugin not availableのため既存Playwright core/Chromeを使用した。今回記録したQAサーバー、provider root PID、観測processとその直接の子は終了確認済みで、既存desktop brokerは操作していない。これはWindows Job/外部brokerの全子孫の包含保証ではない。実行証跡・wire metadata・画像と失敗fixtureは公開差分の外に保持した。
+
+全73要件・Phase0–8を維持する。今回の関連付けはNT-004/008/051/064/067/073の進捗であり、未知のprovider/部分作成の汎用照合・取消・再開、旧dispatchの全面移行、外部clientとの同時操作、Windows Job/brokerの包含、Jev全gate・日本語校正・残高上限、知識の競合/寿命/派生失効、政策の比較/承認/適用/rollback、変化中履歴の最新性/性能/保持/形式移行、実機safe-area/キーボードと利用者による受入は残る。ゴールはACTIVE。
+
 ## 2026-10-03追加: 実Codexの空会話とM3通常起動
 
 実Codex CLI 0.159.2の空threadは、`thread/start`成功だけでは終了後に再開できなかった。[固定developer contextによる履歴保存](negi-teams-conversation-lifecycle.md#2026-10-03追加-実codexで空会話を保存する)を初回と明示切替へ追加し、ACK・identity・空のturn集合を確認してから完了を保存する。結果不明を自動再実行しない。旧版の完全な設定hashが一致する会話は履歴/記録を保持してresumeし、次の明示切替で新しい保存方式へ移る。旧版の再開不能な空threadは保留したままである。

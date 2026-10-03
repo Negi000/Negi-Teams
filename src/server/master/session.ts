@@ -39,7 +39,7 @@ import { ChatLog } from "./chatLog.ts";
 import { createMasterBrain } from "./index.ts";
 import { parseRateLimitEvent } from "./rateLimit.ts";
 import { MasterInputNotSentError } from "../orchestration/masterTurnAdmission.ts";
-import type { TaskResultSummary } from "../../shared/taskResults.ts";
+import { taskResultRecipient, type TaskResultSummary } from "../../shared/taskResults.ts";
 
 /**
  * プロセス死亡からの `--resume` 自動復帰ポリシー（設計書 §8-R1）。
@@ -717,7 +717,8 @@ export class MasterSession {
   }
   /** Display a server-owned Task result. This neither starts a turn nor creates user speech. */
   notifyTaskResult(result: TaskResultSummary): void {
-    if (result.origin.kind !== "master" || result.origin.masterId !== this.id) return;
+    const recipient = taskResultRecipient(result);
+    if (recipient?.masterId !== this.id || recipient.threadId !== this.currentThreadId) return;
     const previous = [...this.ring].reverse().find(envelope => envelope.event.kind === "taskResult" && envelope.event.result.id === result.id);
     if (previous?.event.kind === "taskResult" && JSON.stringify(previous.event.result) === JSON.stringify(result)) return;
     this.emitChat({ kind: "taskResult", result: structuredClone(result) });

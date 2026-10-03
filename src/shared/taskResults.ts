@@ -10,6 +10,8 @@ export interface TaskResultNotice {
     kind: "initial" | "revision" | "accepted" | "revoked" | "state";
     resultRevision: number; artifactSha256: string | null };
   origin: { kind: "browser" } | { kind: "master"; masterId: string; threadId: string; turnId: string; callId: string };
+  /** Signed contract creation origin; never changes who requested execution. */
+  createdBy?: Extract<TaskResultNotice["origin"], { kind: "master" }>;
 }
 export interface TaskResultSummary extends TaskResultNotice {
   delivery: { state: TaskResultDeliveryState; threadId: string | null; turnId: string | null };
@@ -27,5 +29,9 @@ export const taskResultDeliveryLabels: Record<TaskResultDeliveryState, string> =
   interrupted: "統括の応答を中断", not_sent: "未送信・次の依頼で伝達", unknown: "伝達結果の照合が必要",
 };
 export function taskResultDeliveryLabel(result: TaskResultSummary): string {
-  return result.origin.kind === "browser" ? "Task画面から依頼した作業の結果" : taskResultDeliveryLabels[result.delivery.state];
+  return result.origin.kind === "browser" ? "Task画面から依頼した作業の結果" +
+    (result.createdBy ? " · " + taskResultDeliveryLabels[result.delivery.state] : "") : taskResultDeliveryLabels[result.delivery.state];
+}
+export function taskResultRecipient(result: TaskResultNotice) {
+  return result.origin.kind === "master" ? result.origin : result.createdBy ?? null;
 }

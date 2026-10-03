@@ -135,10 +135,11 @@ export class Workbench {
       group.append(this.row(result.title, [result.project,taskResultUpdateLabel(result),taskResultDeliveryLabel(result)].join(" · "),
         `/tasks?run=${encodeURIComponent(result.runId)}`, "task", taskStatusLabels[result.status] ?? result.status,
         ["unknown", "dispatching", "prepared", "failed"].includes(result.delivery.state)));
-      if (result.origin.kind === "master") {
+      if (result.origin.kind === "master" || result.createdBy) {
         const source = document.createElement("a"); source.className = "md-button md-text";
-        source.href = taskOriginHref(result.runId); source.textContent = "委任元の会話";
-        source.setAttribute("aria-label", result.title + "の委任元の会話"); group.append(source);
+        source.href = taskOriginHref(result.runId, result.origin.kind === "master" ? "requested" : "created");
+        source.textContent = result.origin.kind === "master" ? "委任元の会話" : "契約案を作った会話";
+        source.setAttribute("aria-label", result.title + "の" + source.textContent); group.append(source);
       }
       resultList.append(group);
     }

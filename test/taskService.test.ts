@@ -18,6 +18,7 @@ import type { VaultTaskContract } from "../src/server/orchestration/vaultTaskCon
 import { LocalReviewService, ReviewDecisionBusyError } from "../src/server/orchestration/reviewService.ts";
 import { FileReviewChain } from "../src/server/orchestration/reviewChain.ts";
 import { registeredTaskTools } from "../src/server/orchestration/taskDispatchTools.ts";
+import { MasterStorageHeldError } from "../src/server/orchestration/masterStorageGuard.ts";
 
 async function fixture(run: (data: { dir: string; config: VaultRunConfig; catalog: unknown;
   contract: VaultTaskContract; prepare: (config: VaultRunConfig) => Promise<PreparedVaultRun> }) => Promise<void>) {
@@ -90,6 +91,94 @@ test("busy review decision keeps queued work until the lock is released, then di
    const events=(await new FileScheduler(config.schedulerPath).read()).events;assert.equal(events.filter(e=>e.action.type==="claim").length,1);assert.equal(events.filter(e=>e.action.type==="cancel_queued").length,0);
   }finally{busy=false;await service.close()}
  });
+});
+
+test("a live Task preflight stays pending without publishing an uncertain result, while another reader holds the request", async () => {
+  await fixture(async ({ catalog, prepare, config }) => {
+    let release!: () => void, ready!: () => void, count = 0;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const entered = new Promise<void>(resolve => { ready = resolve; });
+    const runtime = { prepare: async (input: typeof config) => { ready(); await gate; return prepare(input); },
+      submit: submitVaultRun, execute: async (...args: Parameters<typeof completed>) => { count++; return completed(...args); } };
+    const service = await LocalTaskService.open(catalog, runtime);
+    const initial = await service.snapshot(config.runId), requestId = randomUUID();
+    const starting = service.start(initial.id, initial.configSha256, requestId);
+    try {
+      await entered;
+      const pending = await service.snapshot(initial.id); assert.equal(pending.status, "queued");
+      assert.equal(pending.live, true); assert.equal(pending.canStart, false); assert.equal(pending.canStop, false);
+      assert.deepEqual(await service.resultNotifications(), []); assert.equal(count, 0);
+      assert.equal((await service.start(initial.id, initial.configSha256, requestId)).status, "queued");
+      const other = await LocalTaskService.open(catalog, runtime);
+      try { const held = await other.snapshot(initial.id); assert.equal(held.status, "needs_reconciliation");
+        assert.equal(held.live, false); assert.equal(held.canStart, false); assert.equal(count, 0); }
+      finally { await other.close(); }
+      release(); await starting;
+      await until(async () => (await service.snapshot(initial.id)).status === "ready_for_review");
+      assert.equal(count, 1);
+    } finally { release(); await starting; await service.close(); }
+  });
+});
+
+for (const point of ["prepare", "before-submit", "after-submit", "uncertain-journal"] as const) {
+  test(`Task preflight failure at ${point} saves private-safe evidence without replay`, async () => {
+    await fixture(async ({ dir, catalog, config, prepare }) => {
+      let executions = 0, prepares = 0, submits = 0;
+      const privateDetail = "PRIVATE_FIXTURE_PATH_AND_TOKEN";
+      let originalLog = "";
+      const runtime = { prepare: async (input: VaultRunConfig) => {
+        prepares++; if (point === "prepare") throw new MasterStorageHeldError(privateDetail); return prepare(input);
+      }, submit: async (prepared: PreparedVaultRun, scheduler: FileScheduler) => {
+        submits++;
+        if (point === "after-submit") await submitVaultRun(prepared, scheduler);
+        if (point === "uncertain-journal") { originalLog = await readFile(config.schedulerPath, "utf8");
+          await writeFile(config.schedulerPath, originalLog + "partial-intent"); }
+        throw Object.assign(new Error(privateDetail), { code: "EIO" });
+      }, execute: async (...args: Parameters<typeof completed>) => { executions++; return completed(...args); } };
+      const service = await LocalTaskService.open(catalog, runtime);
+      try {
+        const initial = await service.snapshot(config.runId), requestId = randomUUID();
+        const start = service.start(initial.id, initial.configSha256, requestId);
+        if (point === "uncertain-journal") await assert.rejects(start); else await start;
+        const bytes = await readFile(join(dir, "task-state", initial.id + ".error.json"), "utf8"), failure = JSON.parse(bytes).failure;
+        assert.equal(bytes.includes(privateDetail), false); assert.equal(failure.schema, "negi-task-preflight-failure/1");
+        assert.equal(failure.stage, point === "prepare" ? "prepare" : "scheduler_submission");
+        assert.equal(failure.code, point === "prepare" ? "STORAGE_HELD" : "EIO");
+        assert.match(failure.classificationSha256, /^[a-f0-9]{64}$/); assert.ok(Number.isFinite(Date.parse(failure.at)));
+        assert.equal(failure.schedulerSubmission, "unknown"); assert.equal("causeSha256" in failure, false);
+        if (point === "uncertain-journal") await writeFile(config.schedulerPath, originalLog);
+        const held = await service.start(initial.id, initial.configSha256, requestId);
+        assert.equal(held.canStart, false); assert.equal(held.live, false);
+        assert.equal(held.status, point === "after-submit" ? "queued" : "preflight_failed");
+        await assert.rejects(service.start(initial.id, initial.configSha256, randomUUID()), /already requested/);
+        await service.close(); const restored = await LocalTaskService.open(catalog, runtime);
+        try { assert.equal((await restored.start(initial.id, initial.configSha256, requestId)).canStart, false); }
+        finally { await restored.close(); }
+        assert.equal(prepares, 1); assert.equal(submits, point === "prepare" ? 0 : 1); assert.equal(executions, 0);
+      } finally { if (point === "uncertain-journal" && originalLog) await writeFile(config.schedulerPath, originalLog); await service.close(); }
+    });
+  });
+}
+
+test("Task failure evidence is durable before a stalled scheduler observation", async () => {
+  await fixture(async ({ dir, catalog, config }) => {
+    let service!: LocalTaskService, release!: () => void, entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; }), stalled = new Promise<void>(resolve => { entered = resolve; });
+    const runtime = { prepare: async () => {
+      const scheduler = service.registeredScheduler(config.schedulerPath), read = scheduler.read.bind(scheduler);
+      scheduler.read = async () => { entered(); await gate; return read(); };
+      throw new MasterStorageHeldError("PRIVATE_FAILURE");
+    }, submit: submitVaultRun, execute: completed };
+    service = await LocalTaskService.open(catalog, runtime);
+    const initial = await service.snapshot(config.runId), starting = service.start(initial.id, initial.configSha256, randomUUID());
+    try {
+      await stalled;
+      const failure = JSON.parse(await readFile(join(dir, "task-state", initial.id + ".error.json"), "utf8")).failure;
+      assert.equal(failure.stage, "prepare"); assert.equal(failure.schedulerSubmission, "unknown");
+      assert.deepEqual(Object.keys(failure).sort(), ["at", "classificationSha256", "code", "schedulerSubmission", "schema", "stage"]);
+      release(); assert.equal((await starting).status, "preflight_failed");
+    } finally { release(); await starting; await service.close(); }
+  });
 });
 
 test("native planner uses the UI scheduler once and persists its origin without human acceptance", async () => {
