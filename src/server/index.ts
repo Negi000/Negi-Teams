@@ -64,7 +64,7 @@ import { createReviewHttp } from "./orchestration/reviewHttp.ts";
 import { LocalKnowledgeService } from "./orchestration/knowledgeService.ts";
 import { createKnowledgeHttp } from "./orchestration/knowledgeHttp.ts";
 import { LocalIntegrationReviewService } from "./orchestration/integrationReviewService.ts";
-import { LocalTaskService } from "./orchestration/taskService.ts";
+import { LocalTaskService,preflightClosureForStartup } from "./orchestration/taskService.ts";
 import { createTaskHttp } from "./orchestration/taskHttp.ts";
 import { LocalTaskAuthoringService } from "./orchestration/taskAuthoring.ts";
 import { createTaskAuthoringHttp } from "./orchestration/taskAuthoringHttp.ts";
@@ -179,7 +179,8 @@ try{
     const reviews=reviewConfigPath?await readServiceConfig(reviewConfigPath):setupStartup?.reviews;
     if(reviews)reviewService=await LocalReviewService.open(reviews);
     if(taskCatalog)taskService=await LocalTaskService.open(taskCatalog,undefined,
-      taskStorageForStartup(storageMode,{saved:!!setupStartup,legacyConfigured:legacyProjectConfiguration}));
+      {...taskStorageForStartup(storageMode,{saved:!!setupStartup,legacyConfigured:legacyProjectConfiguration}),
+        ...preflightClosureForStartup(process.env.NEGI_PREFLIGHT_CLOSURE)});
     if(taskService&&reviewService)await taskService.connectReviews(reviewService);
     if(process.env.NEGI_TASK_AUTHORING_CONFIG){
       if(!taskService)throw Error("Task authoring requires authenticated Tasks");
@@ -2096,17 +2097,17 @@ function shutdown(): void {
   if (shuttingDown) return;
   shuttingDown = true;
   const operationsClosed = Promise.allSettled([taskService?.close(),
-    integrationExecutionService?.close(), integrationReviewService?.close()]);
+    integrationExecutionService?.close(), integrationReviewService?.close(),masterSession?.stop()]);
   console.log("\n[ebi-team] 終了処理: 全 agent を kill します");
   // 固定エビの監視を先に止め、kill による exit で再起動が走らないようにする。
   fixedEbi.stop();
   // chat master（PTY を持たない）は registry.killAll() の対象外なので個別に止める。
-  void masterSession?.stop().catch(() => {});
   registry.killAll();
   for (const ws of clients) ws.close();
-  httpServer.close(() => { void operationsClosed.then(() => process.exit(0)); });
-  // close が詰まる場合の保険。
-  setTimeout(() => process.exit(0), 5000);
+  httpServer.close(() => { clearTimeout(closeConnections);void operationsClosed.then(() => process.exit(0)); });
+  // Close only this server's connections after the grace period. A storage
+  // helper may still be committing: elapsed time cannot authorize process exit.
+  const closeConnections=setTimeout(()=>{for(const ws of clients)ws.terminate();httpServer.closeAllConnections();},5000);
 }
 
 process.on("SIGINT", shutdown);

@@ -130,6 +130,6 @@ Material 3の作業一覧とチャットには、利用者がTask画面から開
 
 Task開始要求を保存してから事前確認が終わるまで、同じserviceが所有している操作は「実行待ち」として表示する。ここでは停止可能なproviderはまだ存在しない。別serviceや再起動後にはprocess内の所有証拠がないため「照合が必要」を維持し、同じ開始要求の照会も再投入しない。事前確認の失敗は実行前失敗として保存する。
 
-新しい事前確認失敗は、後続の結果読取より先に`negi-task-preflight-failure/1`として保存する。段階（契約/認証等のprepare、schedulerへのsubmission）、固定allowlistのerror code、時刻、公開分類だけのhashを含む。元の例外message/stack/path/tokenは保存もhash化もしない。失敗だけでは登録intentの不在を確定できないため`schedulerSubmission`はunknownを維持する。旧失敗記録も読み取れるが、失われた例外を遡って復元しない。結果読取のhelper停止、preflight要求の明示取消・閉鎖・再試行は別の未完了gateであり、今回の診断記録を再実行許可に使わない。
+新しい事前確認失敗は、後続の結果読取より先に`negi-task-preflight-failure/1`として保存する。段階（契約/認証等のprepare、schedulerへのsubmission）、固定allowlistのerror code、時刻、公開分類だけのhashを含む。元の例外message/stack/path/tokenは保存もhash化もしない。失敗だけでは登録intentの不在を確定できないため`schedulerSubmission`はunknownを維持する。旧失敗記録も読み取れるが、失われた例外を遡って復元しない。この時点で未接続だった読取helper停止と未実行要求の明示終了は、[開始前の失敗の復旧](negi-teams-preflight-recovery.md)で追加した。同じ要求の再試行と未知の登録intentの再送は許可しない。
 
 今回の進捗はNT-004/008/051/064/067/073に対応する。未知のprovider結果の汎用復旧、旧dispatchの全面移行、任意の成果の品質、実機と利用者による受入は引き続き残る。最新の試験と実provider/UI観測は[実装状況](negi-teams-implementation-status.md)に記録する。

@@ -27,6 +27,8 @@ import { readMasterTurnOrigin } from "./masterTurnRecords.ts";
 import { TaskExecutionOwner } from "./taskExecutionOwner.ts";
 import { LocalTaskReconciliation, type InspectTaskProvider, type TaskReconciliationView } from "./taskReconciliation.ts";
 import { RuntimeJournalInventory } from "./runtimeJournalInventory.ts";
+import { TaskPreflightRecovery, withTaskPreflightLock, type PreflightRecoveryView } from "./taskPreflightRecovery.ts";
+import type { VaultTaskContract } from "./vaultTaskContract.ts";
 
 const hash = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
 function inside(root: string, path: string): boolean {
@@ -89,6 +91,9 @@ export interface TaskRunView {
   reviewId: string | null;
   approvals: Array<TaskOperationApproval & { approvalSha256: string; canDecide: boolean }>;
   resultRevisionCount: number;
+  canInspectPreflight?: boolean;
+  preflightClosed?: boolean;
+  preflightCloseHeld?: boolean;
   requestedBy?: TaskRequestOrigin;
   resultNotificationError?: string;
 }
@@ -100,7 +105,12 @@ interface Runtime {
   inspectProvider?: InspectTaskProvider;
 }
 /** Fixed server registration after explicit baseline; never read from a Task or browser payload. */
-export interface TaskServiceStorageOptions { storage?: "indexed" }
+export interface TaskServiceStorageOptions { storage?: "indexed";preflightClosure?:"close_unsubmitted/1" }
+export function preflightClosureForStartup(value:string|undefined):Pick<TaskServiceStorageOptions,"preflightClosure">{
+  if(value===undefined||value==="")return {};
+  if(value!=="close_unsubmitted/1")throw Error("Preflight closure activation invalid");
+  return {preflightClosure:value};
+}
 export interface TaskStorageRegistration { root: string; turnRoot: string; schedulerPath: string }
 
 export class LocalTaskService {
@@ -151,7 +161,8 @@ export class LocalTaskService {
     private readonly scheduler: FileScheduler, private readonly runtime: Runtime,
     private readonly operationProofs: HumanReviewProofStore, private readonly resultStore: TaskResultStore,
     private readonly reconciliation: LocalTaskReconciliation, private readonly indexedRuntime: boolean,
-    private readonly runtimeInventory: RuntimeJournalInventory | null) {
+    private readonly runtimeInventory: RuntimeJournalInventory | null, private readonly preflightRecovery: TaskPreflightRecovery,
+    private readonly preflightClosureEnabled:boolean) {
     resultStore.subscribe(results => this.resultListener?.(results.filter(n =>
       runs.some(run => run.config.runId === n.runId && run.configSha256 === n.configSha256))));
   }
@@ -212,7 +223,9 @@ export class LocalTaskService {
     await scheduler.ensureSubscriptionConfiguration(capacity);
     const results = await TaskResultStore.open(join(root, "task-results"));
     const reconciliation=await LocalTaskReconciliation.open(join(root,"reconciliation-proofs"),runtime.inspectProvider);
-    return new LocalTaskService(root, runs, scheduler, runtime, operationProofs, results,reconciliation,inventory !== null,inventory);
+    if(options.preflightClosure!==undefined&&options.preflightClosure!=="close_unsubmitted/1")throw Error("Preflight closure activation invalid");
+    return new LocalTaskService(root, runs, scheduler, runtime, operationProofs, results,reconciliation,inventory !== null,inventory,
+      await TaskPreflightRecovery.open(root),options.preflightClosure==="close_unsubmitted/1");
   }
   /** Internal services share this exact writer, including its fixed runtime journal. */
   registeredScheduler(path: string): FileScheduler {
@@ -436,10 +449,18 @@ export class LocalTaskService {
   }
   private async ensureReview(run: CatalogRun): Promise<TaskReviewManifest | null> {
     if(!this.reviews)return null;
-    const cached=this.manifests.get(run.config.runId);if(cached)return cached;
-    if(!await readJson(join(run.config.outputDir,"review-manifest.json"))&&
-      !await readJson(join(run.config.outputDir,"review-current.json")))return null;
+    const cached=this.manifests.get(run.config.runId);
+    if(!cached){let present=false;for(const name of ["review-manifest.json","review-current.json"]){
+      try{await lstat(join(run.config.outputDir,name));present=true;break}
+      catch(e){if((e as NodeJS.ErrnoException).code!=="ENOENT")throw e}
+    }if(!present)return null;}
+    if(await this.preflightReviewHeld(run))return null;
+    if(cached)return cached;
     return this.withResultSource(()=>this.ensureReviewLocked(run));
+  }
+  private async preflightReviewHeld(run:CatalogRun):Promise<boolean>{
+    const entry=(await this.scheduler.read()).state?.entries.find(e=>e.work.id===run.config.runId);
+    return Boolean(entry?.status==="cancelled"&&entry.claimKey===null&&entry.evidenceRef?.startsWith("user:preflight-close:"));
   }
   private async ensureReviewLocked(run: CatalogRun): Promise<TaskReviewManifest | null> {
     const pending = this.manifestLoads.get(run.config.runId);
@@ -450,6 +471,7 @@ export class LocalTaskService {
   }
   private async ensureReviewOnce(run: CatalogRun): Promise<TaskReviewManifest | null> {
     if (!this.reviews) return null;
+    if(await this.preflightReviewHeld(run))return null;
     if (this.manifests.has(run.config.runId)) return this.manifests.get(run.config.runId)!;
     const pointer = await readJson(join(run.config.outputDir, "review-current.json")) as
       { schema?: string; number?: number; revisionRef?: string } | null;
@@ -514,6 +536,30 @@ export class LocalTaskService {
         if(this.runtimeInventory&&(await this.runtimeInventory.audit()).state!=="clean")
           throw Error("Task inspection storage requires reconciliation");
       }};
+  }
+  private preflightSource(run:CatalogRun){
+    return {root:this.root,config:run.config,configSha256:run.configSha256,snapshotSha256:run.snapshotSha256,
+      contract:run.contract as unknown as VaultTaskContract,ledger:this.ledger(run),scheduler:this.scheduler,
+      isActive:()=>this.starts.has(run.config.runId)||this.active.has(run.config.runId)||this.closing,
+      withStorage:<T>(operation:()=>Promise<T>)=>this.runtimeInventory?this.runtimeInventory.withStorage(async()=>{
+        if((await this.runtimeInventory!.audit()).state!=="clean")throw Error("Preflight storage requires reconciliation");
+        return operation();
+      }):operation()};
+  }
+  async inspectPreflight(id:string,configSha256:string,requestId:string):Promise<PreflightRecoveryView>{
+    const run=this.registered(id);if(configSha256!==run.configSha256)throw Error("Preflight configuration changed");
+    await this.request(run);
+    const view=await this.preflightRecovery.inspect(this.preflightSource(run),requestId);
+    if(!this.preflightClosureEnabled){view.canClose=false;view.heldReasons.push("終了操作は無効です。管理者に保存形式の更新を確認してください。")}
+    return view;
+  }
+  async closePreflight(id:string,configSha256:string,requestId:string,inspectionId:string,dossierSha256:string):Promise<TaskRunView>{
+    const run=this.registered(id);if(configSha256!==run.configSha256)throw Error("Preflight configuration changed");
+    if(!this.preflightClosureEnabled)throw Error("Preflight closure requires explicit writer activation after all readers are upgraded");
+    await this.request(run);
+    await this.configurationAdmission(()=>this.preflightRecovery.close(this.preflightSource(run),requestId,inspectionId,dossierSha256));
+    await this.publishResult(id).catch(()=>{});
+    return this.snapshot(id);
   }
   async inspectReconciliation(id:string,configSha256:string,requestId:string):Promise<TaskReconciliationView>{
     const run=this.registered(id);if(configSha256!==run.configSha256)throw Error("Task reconciliation target changed");
@@ -766,7 +812,10 @@ export class LocalTaskService {
     const run = this.registered(id);
     const request = await this.request(run);
     let state = (await this.ledger(run).read()).state;
-    const entry = (await this.scheduler.read()).state?.entries.find((item) => item.work.id === id);
+    const schedule=await this.scheduler.read(),entry=schedule.state?.entries.find((item)=>item.work.id===id);
+    const closedProjection=Boolean(entry?.status==="cancelled"&&entry.claimKey===null&&entry.evidenceRef?.startsWith("user:preflight-close:"));
+    let preflightClosed=false;
+    if(closedProjection)try{preflightClosed=await this.preflightRecovery.verifyClosed(this.preflightSource(run),entry!,schedule.events)}catch{}
     const active = this.active.get(id);
     // This server still owns preflight after persisting the request. A reader
     // without that live operation must keep the missing submission uncertain.
@@ -774,12 +823,13 @@ export class LocalTaskService {
     // A running/queued Task has no result adoption to perform. Its status read
     // must remain available while another accepted baseline holds the gate.
     const executing=Boolean(active||preparing||entry?.status==="queued");
-    const manifest = executing ? this.manifests.get(id)??null : await this.ensureReview(run);
+    const manifest = closedProjection ? null : executing ? this.manifests.get(id)??null : await this.ensureReview(run);
     if (manifest&&!executing) { await this.syncReview(run, manifest); state=(await this.ledger(run).read()).state; }
     const error = await readJson(join(this.root, `${id}.error.json`)) as { error?: string } | null;
     const interrupted = !active && entry && ["running", "needs_reconciliation"].includes(entry.status);
     let status = interrupted ? "needs_reconciliation" : state?.status ?? entry?.status ??
       (request ? error ? "preflight_failed" : preparing ? "queued" : "needs_reconciliation" : "not_started");
+    if(closedProjection&&!preflightClosed)status="needs_reconciliation";
     let reviewError: string | null = null;
     if (manifest) {
       const review = await this.reviews!.snapshot(manifest.review.id,{includeRelations:false});
@@ -801,8 +851,11 @@ export class LocalTaskService {
       status, executionPhase: entry?.phase ?? null, canStart: !request && !entry && !state && !this.closing && !startError,
       canStop: Boolean(active || entry?.status === "queued"), live: Boolean(active || preparing && !error),
       stopRequested: active?.controller.signal.aborted ?? false,
-      error: error?.error ?? reviewError ?? state?.stopReason ?? entry?.reason ?? startError,
-      verificationOutcome: state?.verification?.outcome ?? null, acceptedBy: state?.acceptedBy ?? null,
+      error: closedProjection&&!preflightClosed ? "終了判断の署名記録を照合できません。元の記録を保持して保存状態を確認してください。" :
+        preflightClosed ? entry?.reason ?? null : error?.error ?? reviewError ?? state?.stopReason ?? entry?.reason ?? startError,
+      canInspectPreflight:Boolean(request&&error&&!state&&!entry&&!this.starts.has(id)&&!this.closing),preflightClosed,
+      preflightCloseHeld:closedProjection&&!preflightClosed,
+      verificationOutcome: closedProjection?null:state?.verification?.outcome ?? null, acceptedBy: closedProjection?null:state?.acceptedBy ?? null,
       attempts: state?.attempts.map((attempt) => ({ role: attempt.role,
         model: attempt.resolvedModel ?? attempt.requestedModel, state: attempt.state, usage: attempt.usage })) ?? [],
       reviewId: manifest?.review.id ?? null,
@@ -832,11 +885,15 @@ export class LocalTaskService {
     try { return await operation; } finally { this.starts.delete(id); }
   }
   private async startNew(run: CatalogRun, requestId: string, requestedBy: TaskRequestOrigin): Promise<TaskRunView> {
-    const guard=this.admissionGuards.get(run.config.runId),operation=()=>this.startNewOnce(run,requestId,requestedBy);
-    const result=await this.configurationAdmission(()=>guard?guard(operation):operation());
-    void this.pump().catch(()=>{});return result;
+    const guard=this.admissionGuards.get(run.config.runId),operation=()=>withTaskPreflightLock(this.root,run.config.runId,run.configSha256,
+      ()=>this.startNewOnce(run,requestId,requestedBy));
+    await this.configurationAdmission(()=>guard?guard(operation):operation());
+    // Notification/status reads run after the configuration writer and preflight
+    // owner have been released. A failed helper read cannot hold that writer.
+    await this.publishResult(run.config.runId).catch(()=>{});
+    void this.pump().catch(()=>{});return this.snapshot(run.config.runId);
   }
-  private async startNewOnce(run: CatalogRun, requestId: string, requestedBy: TaskRequestOrigin): Promise<TaskRunView> {
+  private async startNewOnce(run: CatalogRun, requestId: string, requestedBy: TaskRequestOrigin): Promise<void> {
     const id = run.config.runId;
     if (!(await this.snapshot(id)).canStart) throw new Error("Task cannot be dispatched again");
     await writeNew(this.requestPath(id), { runId: id, requestId, configSha256: run.configSha256,
@@ -859,9 +916,7 @@ export class LocalTaskService {
       await writeNew(join(this.root, `${id}.error.json`), { error: "実行前の確認に失敗しました。契約・認証・checkout・台帳を確認してください。",
         failure: { schema: "negi-task-preflight-failure/1", stage, code, at: new Date().toISOString(), schedulerSubmission: "unknown",
           classificationSha256: hash(JSON.stringify({ stage, code })) } });
-      await this.publishResult(id);
     }
-    return this.snapshot(id);
   }
   private async pump(): Promise<void> {
     if (this.closing) return;
@@ -967,7 +1022,7 @@ export class LocalTaskService {
   async close(): Promise<void> {
     this.closing = true;
     for (const entry of this.active.values()) entry.controller.abort();
-    await Promise.allSettled([...this.settlements]);
+    await Promise.allSettled([...this.starts.values(),...this.settlements]);
     this.detachReviewResults?.();this.detachReviewResults=null;
   }
 }

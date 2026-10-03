@@ -531,3 +531,17 @@ Browser plugin not availableのため既存Playwright CLI/Chromeでビルド済�
 Browser plugin not availableのためPlaywright CLI/Chromeを使い、compiled実serverでstate parentだけのfixtureから製品操作による初回鍵/root/turns作成、保存後応答切断→元ID照合→全native identityとkey/両receipt SHA不変、初回だけの通常起動保留、stage/runtime登録まで確認した。1440/768/375/320px・明暗・Space確認・theme/reduced motion・設定往復、空白/overlayなし・予期しないerror0（expected応答切断1）を確認。GUI証拠は公開差分外。通常indexed実行は開始しない。
 
 全Master選択・全旧writer/version参加/外部静止測定、通常indexed activation、owner/欠落stage/部分bootstrap等の完全な復旧、保持/版移行/性能/外部anchor・実停電/UNC/Linux、実provider/停止/transport、実機safe-area/keyboardと全導線の人による受入を継続する。contextを省いたtrusted内部呼出しは製品consoleのcross-root保証外。Codex新規会話は未有効化。Task/Jev/知識/Policy/履歴を含む全73要件・Phase0–8の全体ゴールはACTIVEで、このlocal/native/GUI検証を完成/release/CI成功と扱わない。
+
+## 2026-10-03追加: 開始前失敗の確認・明示終了
+
+[操作・移行・残る条件](negi-teams-preflight-recovery.md)。Material 3 ExpressiveのTask画面に未実行の確認、差分の表示、明示確認、開始要求の終了、署名記録欠落時の保留画面を接続した。開始・確認・終了を同じ排他的ownerで順序付け、実行台帳/登録/出力記録なし、固定契約・現在のGit・signed plan・clean native indexを再照合する。元要求・失敗・差分・通知を保持し、一つのterminal scheduler eventで古いrunの再登録を止める。新規契約による続行と同じ要求の再送を区別する。
+
+新しい終了writerは既定off。全reader/writerの停止・backup・一括更新後に、trusted server起動のNEGI_PREFLIGHT_CLOSURE=close_unsubmitted/1だけで有効にする。旧readerの固定fixtureは新eventをfail closedし、初回close後の旧binary downgrade/混在は非対応。外部processの参加・停止を自動測定したことにはしない。
+
+終了後も署名鎖・原要求・失敗・snapshot・signed planと現在の実行記録の不在を照合する。欠測・破損・後発owner/ledger/artifactは保持表示とし、未知のreviewを読取中に採用しない。読取helperだけ20秒で停止要求し、実process closeまでguardを保持する。書込みhelperは期限でkill/再試行しない。configuration writer解放後に通知を読み、shutdownは開始処理・精算・Master停止を待つ。
+
+最終関連2filesは40/40成功、失敗/取消/skip 0（81094.8081ms、actual exit0）。型検査/build/差分検査成功。実行中のruntime/test/固定fixture 327 filesのSHA不変を確認する。先行4files 67/67は独立レビュー修正前であり、最終40件へ合算しない。旧reader試験のVM realm比較と、activationが既定offになった後の合成reader設定を修正した途中失敗も私有証拠に保持する。
+
+Browser plugin not availableのため既存Playwright/Chromeを使用。合成prepare失敗と実native索引・compiled HTTPで確認→Space明示確認→終了→再読込→close intent欠落の保持画面を検証する。1440/375/320px、明暗、48px操作、320pxのカード下端/下部ナビ、theme保持、横はみ出し/overlay/予期しないconsole/page errorなしを確認する。GUI証拠は公開差分外で、実Codexモデルの成功とは扱わない。
+
+全73要件・Phase0〜8と全体ゴールはACTIVE。旧実モデル要求を再送しておらず、その元例外も復元しない。実Astra→Sol→レビュー→Astra、stale/未知ownerと部分作成の汎用復旧、全reader移行の実証、directory metadataを含む停電/UNC/Linux、外部writer隔離、Jev・知識・Policy・履歴・旧dispatch全面移行、実機safe-area/keyboardと利用者受入を継続する。draft進捗でありproduction activation・release・全体完成・CI成功ではない。

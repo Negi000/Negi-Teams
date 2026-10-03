@@ -7,6 +7,7 @@ import type { MasterTurnJournal } from "./masterTurnAdmission.ts";
 import { FileScheduler, type SchedulerJournal } from "./scheduler.ts";
 import { masterStorageTicket, withMasterStorageGuard } from "./masterStorageGuard.ts";
 import { runtimeStoragePaths } from "./runtimeStoragePaths.ts";
+import { observeRuntimeHelper } from "./runtimeHelperObservation.ts";
 
 export interface RuntimeHead { seq: number; sha256: string }
 export interface RuntimeBaselinePreview { proofSha256: string; schedulerSha256: string; schedulerBytes: number; schedulerPresent: boolean; artifactCount: number }
@@ -51,18 +52,8 @@ export class RuntimeJournalInventory {
       const info = await lstat(filename); check(info.isFile() && !info.isSymbolicLink(), "fixed helper unavailable");
       const input = JSON.stringify({ action, root: this.root, context: this.context, ...frozen, storageTicket: masterStorageTicket(this.root) }) + "\n";
       check(Buffer.byteLength(input) <= 8_000_000, "input too large");
-      const output = await new Promise<string>((accept, reject) => {
-        const child = spawn("python", ["-B", filename], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, PYTHONIOENCODING: "utf-8" } });
-        let stdout = "", stderr = "", size = 0, failure: Error | null = null;
-        // Baseline and mutation may have committed already. Wait for actual exit;
-        // an elapsed deadline must not kill its transaction/cleanup and retry it.
-        child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8");
-        child.stdout.on("data", (chunk: string) => { size += Buffer.byteLength(chunk); if (size > 8_000_000) { failure = Error("Runtime inventory: output limit; inspect saved intent"); child.kill(); } else stdout += chunk; });
-        child.stderr.on("data", (chunk: string) => { stderr = (stderr + chunk).slice(0, 300); });
-        child.on("error", error => { failure = error; }); child.stdin.on("error", error => { failure ??= error; });
-        child.on("close", code => { if (failure) reject(failure); else if (code !== 0) reject(Error("Runtime inventory held: " + stderr.trim())); else accept(stdout); });
-        child.stdin.end(input);
-      });
+      const child = spawn("python", ["-B", filename], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, PYTHONIOENCODING: "utf-8" } });
+      const output = await observeRuntimeHelper(child,input,["preview","audit","auditScheduler"].includes(action));
       const value: unknown = JSON.parse(output);
       check(value && typeof value === "object" && !Array.isArray(value) && JSON.stringify(value) + "\n" === output, "noncanonical helper result");
       const row = value as Record<string, unknown>;

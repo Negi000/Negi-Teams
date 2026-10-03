@@ -60,7 +60,7 @@ function git(root:string,args:string[]){
   return execFileSync("git",["-c","core.fsmonitor=false",...args],{cwd:root,windowsHide:true,timeout:10_000,
     maxBuffer:8_000_000,env:{...process.env,GIT_OPTIONAL_LOCKS:"0"},stdio:["ignore","pipe","pipe"]});
 }
-async function checkoutFacts(config:VaultRunConfig,allowed:string[]):Promise<TaskReconciliationDossier["checkout"]>{
+export async function checkoutFacts(config:VaultRunConfig,allowed:string[]):Promise<TaskReconciliationDossier["checkout"]>{
   const root=await realpath(config.checkout),top=await realpath(git(root,["rev-parse","--show-toplevel"]).toString().trim());
   if(root!==top)throw Error("Task reconciliation requires the registered Git root");
   const changedPaths=[...new Set(Buffer.concat([git(root,["diff","--name-only","--no-renames","-z","HEAD"]),
