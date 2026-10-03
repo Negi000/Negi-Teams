@@ -12,7 +12,7 @@ import { setup } from "./taskAuthoringFixture.ts";
 
 // A real child process speaking a synthetic provider protocol. No model access.
 const provider = String.raw`
-const fs=require('node:fs');let data='';const statePath=process.argv[2];
+const fs=require('node:fs');let data='';const statePath=process.argv[2],volatileThreads={};
 const load=()=>fs.existsSync(statePath)?JSON.parse(fs.readFileSync(statePath,'utf8')):{threads:{},nextThread:0,nextTurn:0};
 const save=s=>fs.writeFileSync(statePath,JSON.stringify(s));
 const reply=t=>({thread:{...t,turns:[]},cwd:t.cwd,model:t.model,modelProvider:t.modelProvider,reasoningEffort:t.reasoningEffort,approvalPolicy:'on-request',approvalsReviewer:'user',sandbox:{type:'readOnly',networkAccess:false}});
@@ -23,7 +23,8 @@ process.stdin.on('data',chunk=>{data+=chunk;let end;while((end=data.indexOf('\n'
  if(q.method==='account/read')result={account:{type:'chatgpt'},requiresOpenaiAuth:true};
  if(q.method==='model/list')result={data:['gpt-6-astra','gpt-6.1-sol'].map(model=>({model,supportedReasoningEfforts:[{reasoningEffort:'medium'}],inputModalities:['text']})),nextCursor:null};
  const state=load();let activeThread,activeTurn;
- if(q.method==='thread/start'){activeThread='fixture-thread-'+(++state.nextThread);const t={id:activeThread,cwd:q.params.cwd,model:q.params.model,modelProvider:'openai',reasoningEffort:q.params.config.model_reasoning_effort,ephemeral:false,status:{type:'idle'},turns:[],dynamicTools:q.params.dynamicTools};state.threads[activeThread]=t;save(state);result=reply(t);if(state.fault==='response-cwd')result.cwd='E:/foreign';}
+ if(q.method==='thread/start'){activeThread='fixture-thread-'+(++state.nextThread);const t={id:activeThread,cwd:q.params.cwd,model:q.params.model,modelProvider:'openai',reasoningEffort:q.params.config.model_reasoning_effort,ephemeral:false,status:{type:'idle'},turns:[],dynamicTools:q.params.dynamicTools};volatileThreads[activeThread]=t;save(state);result=reply(t);if(state.fault==='response-cwd')result.cwd='E:/foreign';}
+ if(q.method==='thread/inject_items'){const t=volatileThreads[q.params.threadId];if(!t||q.params.items.length!==1||q.params.items[0].role!=='developer')throw Error('invalid history bootstrap');t.bootstrap=q.params.items;state.threads[t.id]=t;save(state);if(state.fault==='inject-ack')result={unexpected:true};}
  if(q.method==='thread/resume')result=reply(state.threads[q.params.threadId]);
  if(q.method==='thread/read')result={thread:{...state.threads[q.params.threadId],turns:[]}};
  if(q.method==='thread/turns/list')result={data:state.threads[q.params.threadId].turns,nextCursor:null};

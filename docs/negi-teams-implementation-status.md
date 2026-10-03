@@ -2,11 +2,28 @@
 
 2026-10-03（JST）。基準は `NEGI_TEAMS_MASTER_PLAN.ja.md` のPhase 0〜8と `REQUIREMENTS_TRACEABILITY.ja.md`。この表は実装・合成テスト・実モデル観測・人間受入を分ける。Git管理外の実行証拠も参照しており、実装差分の公開を全Phaseの完了宣言とは扱わない。
 
+## 2026-10-03追加: 実Codexの空会話とM3通常起動
+
+実Codex CLI 0.159.2の空threadは、`thread/start`成功だけでは終了後に再開できなかった。[固定developer contextによる履歴保存](negi-teams-conversation-lifecycle.md#2026-10-03追加-実codexで空会話を保存する)を初回と明示切替へ追加し、ACK・identity・空のturn集合を確認してから完了を保存する。結果不明を自動再実行しない。旧版の完全な設定hashが一致する会話は履歴/記録を保持してresumeし、次の明示切替で新しい保存方式へ移る。旧版の再開不能な空threadは保留したままである。
+
+### 最新の検証
+
+- client/Brain/会話/通常起動の4ファイル79/79成功、失敗/取消/skip 0（785225.3307ms、exit 0）。実行中のsrc/scripts/test 321ファイルのSHAは一致した。その後の変更は旧版hash互換と専用テストであり、79件を最終互換版の全件再実行とは扱わない。
+- 互換修正後の専用2/2成功、型検査・ビルド成功。保存済みの旧recordを維持したresume、次の明示切替での新hash、再起動後の同じ要求の照会、設定変更の拒否、再開不能な旧threadでstart/inject/inputが0であることを合成providerとBrainで確認した。authority署名やnative保存そのものの追加証明ではない。限定した独立再レビューに追加指摘はなかった。
+- 最終ビルドの通常サーバー、Windowsのnative保存、実CodexとChromeを接続し、ログイン→作業一覧→チーム→入力前の空会話→サーバー再起動で同じIDのresume→M3確認のキャンセル→明示切替→未送信下書き保持→再起動で切替後の同じIDのresumeを確認した。実thread/start 2、inject 2、resume 2、モデルturn/GUI chatSend/Task/Jevは0。GUIのchatNewは確認後の1件だけ。
+- 実Codexの準備/初回/切替後を含む観測は222.3156秒。最初の通常起動は約80.6秒、再起動は約42.2秒と40.4秒、確認/切替は約47.3秒であり、操作性能の改善を示すものではない。実行中のsrc/scripts/test 322ファイルのSHAは一致した。
+- 1440×1000/375×812/320×812の明暗6画面で文書幅がviewportと一致し、送信操作は52px。PCの確認dialogと320pxの下端を直接画像で確認した。通常画面の予期しないconsole warning/errorとpage errorは0。意図したサーバー停止中のWebSocket接続拒否6件は別に保持した。native runtime inventoryはclean、元のfixture Git/文書/Vault仕様は一致した。
+- QAのNodeサーバー3件、記録した実Codex root PID 3件、ブラウザーと親観測processは終了した。既存desktop brokerは操作していない。この終了確認はWindows Jobや外部brokerの全子孫の終了保証ではない。実行証拠、wire metadata、画像は公開差分の外へ保存した。最終client assetsは`index-CvLJ6iRB.css`/`index-BNK5AJMY.js`であり、今回の保存修正でUIデザイン自体は変更していない。
+
+先行する応答未確認probeについては、同じcwdのactive保存threadを読取専用で照会し0件だった。未保存/archivedを含む作成不存在の証明ではなく、元の結果不明は成功へ変更しない。後続の互換診断は独立した一時cwdで実施し、モデルturnなしで失敗再現、空items拒否、固定developer履歴の保存と同じIDのresume、製品clientの初回/切替後のresumeをそれぞれ記録した。
+
+これで実providerの空会話metadataの保存・再開・明示切替は確認できた。実Astra→Sol→レビュー→Astra継続という作業全体、未知の作成結果の汎用修復、全面dispatch移行、外部clientとの同時操作、Job/broker、規模/性能、実機safe-area/キーボードと人間受入は残る。全73要件・Phase0–8のゴールはACTIVE。
+
 ## 2026-10-03: 常駐統括の会話保存・再開とM3確認
 
 [会話ライフサイクル](negi-teams-conversation-lifecycle.md#2026-10-03-常駐codexの会話を保存再開する)を、保存済みsetupのindexed通常起動へ接続した。初回threadの永続記録、同じthreadの再起動resume、idle時の確認付きrotate、要求IDを保持した再接続照会、起動保留中の`/storage`読取を実装した。provider待機ではMaster ownerを保持して共有root guardを解放する。完了の保存前は確認済みの会話ID・表示・下書きを保持し、表示ログの欠落を境界不存在の証明に使わない。
 
-この限定構成のCodex「新しい会話」は未有効化から実装済みへ進む。以下の経緯にある未接続・拒否は、その追加時点の記録である。旧Master/CLI/PTY/MCPの全面移行、外部の同権限clientによる同じthreadの操作、unknown処理の汎用修復、Job/broker、実provider再開/切替、規模と性能、実機と人間受入は継続する。全73要件・Phase0–8のゴールはACTIVE。
+この限定構成のCodex「新しい会話」は未有効化から実装済みへ進む。以下の検証は実provider確認前の記録であり、再開/切替のmetadataは上記の追加検証へ更新された。旧Master/CLI/PTY/MCPの全面移行、外部の同権限clientによる同じthreadの操作、unknown処理の汎用修復、Job/broker、規模と性能、実機と人間受入は継続する。全73要件・Phase0–8のゴールはACTIVE。
 
 ### 今回の検証
 

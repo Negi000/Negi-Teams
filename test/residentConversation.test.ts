@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { WebSocket } from "ws";
-import { CodexAppServerClient, type CodexThreadOptions } from "../src/server/master/appServerClient.ts";
+import { CODEX_RESIDENT_HISTORY_BOOTSTRAP, CodexAppServerClient, type CodexThreadOptions } from "../src/server/master/appServerClient.ts";
 import { LocalTaskService } from "../src/server/orchestration/taskService.ts";
 import { RuntimeJournalInventory } from "../src/server/orchestration/runtimeJournalInventory.ts";
 import { FileScheduler } from "../src/server/orchestration/scheduler.ts";
@@ -17,7 +17,8 @@ import { CODEX_READ_ONLY_BRAIN_CAPABILITIES } from "../src/server/master/codexAp
 import type { MasterBrain, MasterEvent } from "../src/server/master/brain.ts";
 
 const options: CodexThreadOptions = { cwd: process.cwd(), model: "fixture-astra", sandbox: "read-only", resident: { effort: "medium", modelProvider: "openai" } };
-function clientFixture(patch: (method: string, result: Record<string, unknown>) => Record<string, unknown> = (_method, result) => result) {
+function clientFixture(patch: (method: string, result: Record<string, unknown>) => Record<string, unknown> = (_method, result) => result,
+  injection?: (respond: () => void) => void) {
   const input = new PassThrough(), output = new PassThrough(), messages: Array<{ id: number; method: string; params: Record<string, unknown> }> = [];
   let buffer = "", count = 0, current = "";
   const metadata = () => ({ id: current, cwd: options.cwd, model: options.model, modelProvider: "openai", reasoningEffort: "medium", status: { type: "idle" }, ephemeral: false, turns: [] });
@@ -35,7 +36,8 @@ function clientFixture(patch: (method: string, result: Record<string, unknown>) 
       if (q.method === "thread/read") { current = q.params.threadId; result = { thread: metadata() }; }
       if (q.method === "thread/turns/list") result = { data: [], nextCursor: null };
       if (q.method === "turn/start") result = { turn: { id: "active-turn" } };
-      input.write(JSON.stringify({ id: q.id, result: patch(q.method, result) }) + "\n");
+      const respond = () => input.write(JSON.stringify({ id: q.id, result: patch(q.method, result) }) + "\n");
+      if (q.method === "thread/inject_items" && injection) injection(respond); else respond();
     }
   });
   const client = new CodexAppServerClient(input, output);
@@ -53,6 +55,56 @@ test("resident rotation pins the old identity and cannot rotate while a turn is 
   } finally { f.client.close(); }
 });
 
+test("resident creation persists only fixed application context before returning an identity", async () => {
+  let respond!: () => void, ready!: () => void;
+  const received = new Promise<void>(accept => { ready = accept; });
+  const f = clientFixture(undefined, reply => { respond = reply; ready(); });
+  try {
+    await f.init(); const pending = f.client.startThread(options); await received;
+    assert.equal(f.client.currentThread, null);
+    await assert.rejects(f.client.startTurn("not admitted during persistence", "medium"));
+    assert.deepEqual(f.messages.at(-1)!.params, { threadId: "thread-1", items: [CODEX_RESIDENT_HISTORY_BOOTSTRAP.item] });
+    respond(); assert.equal((await pending).threadId, "thread-1");
+    assert.deepEqual(f.messages.filter(q => q.method.startsWith("thread/")).map(q => q.method),
+      ["thread/start", "thread/inject_items", "thread/read", "thread/turns/list"]);
+    assert.equal(f.messages.some(q => q.method === "turn/start"), false);
+  } finally { f.client.close(); }
+});
+
+test("lost persistence acknowledgement never reinjects initial context or admits input", async () => {
+  let ready!: () => void; const received = new Promise<void>(accept => { ready = accept; });
+  const f = clientFixture(undefined, () => { ready(); });
+  try {
+    await f.init(); const pending = f.client.startThread(options); await received;
+    f.client.close(new Error("fixture lost persistence acknowledgement")); await assert.rejects(pending);
+    assert.equal(f.client.currentThread, null); assert.equal(f.client.dispatchBlocked, true);
+    await assert.rejects(f.client.startThread(options)); await assert.rejects(f.client.startTurn("do not replay", "medium"));
+    assert.equal(f.messages.filter(q => q.method === "thread/start").length, 1);
+    assert.equal(f.messages.filter(q => q.method === "thread/inject_items").length, 1);
+    assert.equal(f.messages.some(q => q.method === "turn/start"), false);
+  } finally { f.client.close(); }
+});
+
+for (const phase of ["ack", "turns", "ephemeral"] as const) test("resident preserves the confirmed thread when persistence " + phase + " differs", async () => {
+  let fail = false;
+  const f = clientFixture((method, result) => {
+    if (!fail) return result;
+    if (phase === "ack" && method === "thread/inject_items") return { unexpected: true };
+    if (phase === "turns" && method === "thread/turns/list") return { data: [{ id: "foreign", status: "inProgress" }], nextCursor: null };
+    if (phase === "ephemeral" && method === "thread/read") return { thread: { ...(result.thread as object), ephemeral: true } };
+    return result;
+  });
+  try {
+    await f.init(); const first = await f.client.startThread(options); fail = true;
+    await assert.rejects(f.client.rotateThread(options, first.threadId));
+    assert.equal(f.client.currentThread!.threadId, first.threadId); assert.equal(f.client.dispatchBlocked, true);
+    await assert.rejects(f.client.rotateThread(options, first.threadId)); await assert.rejects(f.client.startTurn("do not replay", "medium"));
+    assert.equal(f.messages.filter(q => q.method === "thread/start").length, 2);
+    assert.equal(f.messages.filter(q => q.method === "thread/inject_items").length, 2);
+    assert.equal(f.messages.some(q => q.method === "turn/start"), false);
+  } finally { f.client.close(); }
+});
+
 for (const field of ["cwd", "policy", "effort", "network", "state", "long-id", "control-id"] as const) test("resident rejects returned " + field + " mismatch before admitting input", async () => {
   const f = clientFixture((method, result) => {
     if (method !== "thread/start") return result;
@@ -62,7 +114,8 @@ for (const field of ["cwd", "policy", "effort", "network", "state", "long-id", "
     if (field === "network") return { ...result, sandbox: { type: "readOnly", networkAccess: true } };
     if (field === "long-id" || field === "control-id") return { ...result, thread: { ...(result.thread as object), id: field === "long-id" ? "a".repeat(201) : "bad\nid" } };
     return { ...result, thread: { ...(result.thread as object), status: { type: "active" } } };
-  }); try { await f.init(); await assert.rejects(f.client.startThread(options)); assert.equal(f.client.dispatchBlocked, true); await assert.rejects(f.client.startTurn("do not replay", "medium")); }
+  }); try { await f.init(); await assert.rejects(f.client.startThread(options)); assert.equal(f.client.dispatchBlocked, true); await assert.rejects(f.client.startTurn("do not replay", "medium"));
+    assert.equal(f.messages.some(q => q.method === "thread/inject_items"), false); }
   finally { f.client.close(); }
 });
 
@@ -72,6 +125,7 @@ test("resume verifies terminal turn inventory and does not resend inputs", async
     await f.client.resumeThread("saved", options.model, options); assert.equal(f.client.dispatchBlocked, true);
     await f.client.verifyResidentTurns("saved", options, []); f.client.markReconciled("saved", null, "signed-fixture");
     assert.equal(f.client.dispatchBlocked, false); assert.equal(f.messages.filter(q => q.method === "thread/start" || q.method === "turn/start").length, 0);
+    assert.equal(f.messages.some(q => q.method === "thread/inject_items"), false);
   } finally { f.client.close(); }
   for (const status of ["completed", "inProgress"]) {
     const changed = clientFixture((method, result) => method === "thread/turns/list" ? { data: [{ id: "foreign-turn", status }], nextCursor: null } : result);
@@ -160,6 +214,34 @@ async function connect(base: string) {
   return { ws, messages, until, close };
 }
 
+test("normal startup resumes initial and rotated empty conversations without a model turn", windows, async () => {
+  const f = await indexedStartupFixture(); let server: Awaited<ReturnType<typeof f.launch>> | undefined;
+  let socket: Awaited<ReturnType<typeof connect>> | undefined;
+  try {
+    await f.prepare(); server = await f.launch({ mode: "indexed" }); await server.until(v => !v.executionHeld);
+    socket = await connect(server.base); await socket.until(() => socket!.messages.some(q => q.type === "chatSnapshot" && q.threadId));
+    const initial = socket.messages.find(q => q.type === "chatSnapshot")!.threadId;
+    assert.equal((await server.messages()).filter(q => q.method === "thread/inject_items").length, 1);
+    await socket.close(); socket = undefined; await server.stop(); server = await f.launch({ mode: "indexed" }); await server.until(v => !v.executionHeld);
+    assert.equal((await server.messages()).find(q => q.method === "thread/resume")!.params.threadId, initial);
+    assert.equal((await server.messages()).some(q => ["thread/start", "thread/inject_items", "turn/start"].includes(q.method)), false);
+    socket = await connect(server.base); const requestId = randomUUID();
+    socket.ws.send(JSON.stringify({ type: "chatNew", id: "negi-master", requestId, oldThreadId: initial }));
+    await socket.until(() => socket!.messages.some(q => q.type === "chatConversationResult" && q.requestId === requestId && q.state === "completed"));
+    const rotated = socket.messages.find(q => q.type === "chatConversationResult" && q.requestId === requestId)!.newThreadId;
+    assert.notEqual(rotated, initial); assert.equal((await server.messages()).filter(q => q.method === "thread/inject_items").length, 1);
+    await socket.close(); socket = undefined; await server.stop(); server = await f.launch({ mode: "indexed" }); await server.until(v => !v.executionHeld);
+    const wire = await server.messages(); assert.equal(wire.find(q => q.method === "thread/resume")!.params.threadId, rotated);
+    assert.equal(wire.some(q => ["thread/start", "thread/inject_items", "turn/start"].includes(q.method)), false);
+    const saved = JSON.parse(await readFile(f.providerState, "utf8"));
+    assert.equal(saved.nextTurn, 0); assert.equal(Object.keys(saved.threads).length, 2);
+    for (const thread of Object.values(saved.threads) as Array<{ bootstrap: unknown; turns: unknown[] }>) {
+      assert.deepEqual(thread.bootstrap, [CODEX_RESIDENT_HISTORY_BOOTSTRAP.item]); assert.deepEqual(thread.turns, []);
+    }
+    assert.equal((await new RuntimeJournalInventory(f.registration).audit()).state, "clean");
+  } finally { await socket?.close(); await server?.stop(); await f.close(); }
+});
+
 test("normal server rotates once, queries after disconnect, rejects stale confirmation and restores the rotated thread", windows, async () => {
   const f = await indexedStartupFixture(); let server: Awaited<ReturnType<typeof f.launch>> | undefined;
   let socket: Awaited<ReturnType<typeof connect>> | undefined;
@@ -185,13 +267,15 @@ test("normal server rotates once, queries after disconnect, rejects stale confir
     const requests = await server.messages(); assert.equal(requests.filter(q => q.method === "thread/start" || q.method === "turn/start").length, 0);
     assert.equal(requests.find(q => q.method === "thread/resume")!.params.threadId, result.newThreadId);
     assert.equal((await new RuntimeJournalInventory(f.registration).audit()).state, "clean");
-    const state = JSON.parse(await readFile(f.providerState, "utf8")); state.fault = "response-cwd"; await writeFile(f.providerState, JSON.stringify(state));
+    const state = JSON.parse(await readFile(f.providerState, "utf8")); state.fault = "inject-ack"; await writeFile(f.providerState, JSON.stringify(state));
     socket = await connect(server.base); const unknown = randomUUID(); socket.ws.send(JSON.stringify({ type: "chatNew", id: "negi-master", requestId: unknown, oldThreadId: result.newThreadId }));
     await socket.until(() => socket!.messages.some(q => q.type === "chatConversationResult" && q.requestId === unknown && q.state === "attention"));
     assert.equal((await server.messages()).filter(q => q.method === "thread/start").length, 1);
+    assert.equal((await server.messages()).filter(q => q.method === "thread/inject_items").length, 1);
     socket.ws.send(JSON.stringify({ type: "chatNew", id: "negi-master", requestId: unknown, oldThreadId: result.newThreadId }));
     await socket.until(() => socket!.messages.filter(q => q.type === "chatConversationResult" && q.requestId === unknown).length >= 2);
     assert.equal((await server.messages()).filter(q => q.method === "thread/start").length, 1);
+    assert.equal((await server.messages()).filter(q => q.method === "thread/inject_items").length, 1);
     await socket.close(); socket = undefined; await server.stop(); server = undefined;
     server = await f.launch({ mode: "indexed" }); await server.until(v => v.executionHeld);
     const held = await server.messages(); assert.equal(held.filter(q => ["thread/start", "thread/resume", "turn/start"].includes(q.method)).length, 0);

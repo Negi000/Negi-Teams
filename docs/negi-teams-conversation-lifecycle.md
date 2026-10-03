@@ -2,6 +2,21 @@
 
 2026-10-03更新。Material 3 Expressiveの会話切替を、実際の起動・終了状態に合わせる。現在の有効化範囲は、保存済みsetupを使うindexed通常起動の単一Codex統括である。
 
+## 2026-10-03追加: 実Codexで空会話を保存する
+
+実際にインストールされているCodex CLI 0.159.2では、入力前の`thread/start`が成功しても、履歴を持たないthreadはprocess終了後に再開できなかった。独立した一時cwdの診断で、終了後のreadは`thread not loaded`、同じIDのresumeは`no rollout found`を返した。合成providerだけの先行検証からは分からなかった製品不具合である。
+
+常駐統括の初回作成と明示した切替では、返されたcwd/model/provider/effort/policy/idleを先に照合し、固定のdeveloper contextを`thread/inject_items`で一度だけ保存する。その空ACKとread/terminal turn集合の一致を確認するまで、新しいidentityを呼出元へ返さない。[公式App Server文書](https://learn.chatgpt.com/docs/app-server)も、このAPIによる履歴保存はuser turnを開始しないことを説明している。モデル処理やユーザー入力の代替は行わない。
+
+保存するcontextは`negi-resident-history/1`の固定文であり、アプリによる会話初期化であることと、明示された入力まで作業を待つことを指定する。ユーザーのメッセージでもモデルの回答でもない。後続の明示入力ではモデルのcontextに含まれる。UIへ架空の発言として表示しない。
+
+- ACK喪失、不正ACK、外部turn、ephemeralな履歴、照合中の状態変化は結果不明として保留する。inject/start/inputを自動で繰り返さない。切替中は元の確認済みidentityを保持する。
+- bootstrapを含む設定hashを新規会話へ保存する。保存済みの旧版は、従来の完全な設定hashが一致する場合だけそのままresumeする。旧recordや履歴を書き換えず、resumeでinjectしない。
+- 旧版からの次の明示切替で新しいhashを記録する。完了保存後だけ現在のhashを更新する。異なるモデル/effort/設定は依然として拒否する。
+- 旧版の空threadが既に再開不能な場合は保留を維持する。新しいthreadを作って記録を回避する復旧は追加していない。
+
+関連79件の試験は互換修正前に成功し、その後の旧版互換2件と型検査・ビルドも成功した。前後の試験を最終ソースの全件81件とは数えない。実CLIと通常サーバー/M3画面の最新の証拠は[実装状況](negi-teams-implementation-status.md)に記す。実モデルを使う作業全体、外部clientとの同時操作、Job/broker、実機と人間受入、未知の作成結果の汎用修復は引き続き残る。
+
 ## 2026-10-03: 常駐Codexの会話を保存・再開する
 
 - 初回の空threadを署名付き要求と索引へ保存する。正常な再起動では保存済みの同じthreadを照合し、`thread/resume`で再開する。表示ログのsession IDをauthorityとして採用しない。
@@ -12,7 +27,7 @@
 - 要求IDは保存先の登録SHAとMasterへ束縛する。再接続は同じ要求の状態を読む。通常統括が起動できない場合も、`/storage`の「会話の作成結果」で保持した要求を認証付きGETにより確認できる。この画面はproviderを起動しない。第一stage前の署名済みownerも不明な結果として保持する。
 - best-effortな表示ログへserver-owned thread IDを付け、現在のthreadの表示だけを復元する。完全なseq履歴だけが境界の不存在を示せる。切れた・欠落・重複したログは不存在の証明に使わず、現在の履歴を消す境界を追加しない。表示ログはprovider authorityではない。
 
-既定legacy・未登録の構成はCodex切替を有効にしない。過去のturnに署名済み初回thread/chainがない場合は移行の照合を保留し、新しい空threadで回避しない。外部の同権限provider clientや別serverによる同じthreadの同時操作、Job/broker終了の保証、unknown turnやownerの汎用修復、実provider・実機・人間受入、10,000件規模の性能と保持/移行は残る条件である。全Phaseの完成ではない。
+既定legacy・未登録の構成はCodex切替を有効にしない。過去のturnに署名済み初回thread/chainがない場合は移行の照合を保留し、新しい空threadで回避しない。外部の同権限provider clientや別serverによる同じthreadの同時操作、Job/broker終了の保証、unknown turnやownerの汎用修復、実モデルの作業全体・実機・人間受入、10,000件規模の性能と保持/移行は残る条件である。全Phaseの完成ではない。
 
 実装・合成試験・ブラウザー確認の最新結果は[実装状況](negi-teams-implementation-status.md)へ記録する。以下の節は追加時点の履歴であり、indexed通常起動が未接続という過去の状態は上記の限定接続により更新された。
 

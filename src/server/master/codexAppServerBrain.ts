@@ -5,7 +5,7 @@ import { unsupportedOf, type MasterBrain, type MasterBrainCapabilities,
   type MasterBrainInput, type MasterBrainStartOptions, type MasterEvent,
   type MasterUsage } from "./brain.ts";
 import type { CodexTurnObservation } from "./appServerClient.ts";
-import type { CodexThreadOptions } from "./appServerClient.ts";
+import { CODEX_RESIDENT_HISTORY_BOOTSTRAP, type CodexThreadOptions } from "./appServerClient.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
@@ -92,6 +92,7 @@ export class CodexAppServerBrain implements MasterBrain {
   private rotating = false;
   private threadOptions: CodexThreadOptions | null = null;
   private settingsSha256: string | null = null;
+  private nextSettingsSha256: string | null = null;
   private binding: MasterConversationResult | null = null;
 
   constructor(private readonly options: CodexAppServerBrainOptions) {}
@@ -144,13 +145,19 @@ export class CodexAppServerBrain implements MasterBrain {
           (this.options.taskTools?.authoring ? authoringInstructions : "") } : {}),
       ...(this.options.taskTools ? { dynamicTools: this.options.taskTools.definitions, dynamicToolLimits: this.options.taskTools.limits } : {}),
       ...(this.options.conversations ? { resident: { effort: this.options.effort } } : {}) };
-    this.settingsSha256 = createHash("sha256").update(JSON.stringify({ ...this.threadOptions,
-      executable: this.options.executable, args: this.options.args, subscriptionOnly: this.options.subscriptionOnly === true })).digest("hex");
+    const launchSettings = { executable: this.options.executable, args: this.options.args, subscriptionOnly: this.options.subscriptionOnly === true };
+    const legacySettingsSha256 = createHash("sha256").update(JSON.stringify({ ...this.threadOptions, ...launchSettings })).digest("hex");
+    this.nextSettingsSha256 = createHash("sha256").update(JSON.stringify({ ...this.threadOptions,
+      ...(this.options.conversations ? { historyBootstrap: CODEX_RESIDENT_HISTORY_BOOTSTRAP } : {}),
+      ...launchSettings })).digest("hex");
     const saved = await this.options.conversations?.resident(cwd);
-    if (saved?.current && (saved.current.request.settingsSha256 !== this.settingsSha256 ||
+    if (saved?.current && (![this.nextSettingsSha256, legacySettingsSha256].includes(saved.current.request.settingsSha256) ||
         saved.current.request.model !== options.model || saved.current.request.effort !== this.options.effort ||
         (options.resumeSessionId && options.resumeSessionId !== saved.current.identity!.threadId)))
       throw new Error("保存済みの会話と担当設定が異なります。設定と会話の記録を確認してください。");
+    // Preserve a matching legacy conversation's exact settings and history.
+    // Only the next explicit rotation introduces the persisted bootstrap.
+    this.settingsSha256 = saved?.current?.request.settingsSha256 ?? this.nextSettingsSha256;
     if (this.closed || this.stopping) throw new Error("Codex brain stopped before App Server launch");
     this.startOptions = { cwd, model: options.model };
     const process = (this.options.launch ?? AppServerProcess.launch)({
@@ -242,7 +249,7 @@ export class CodexAppServerBrain implements MasterBrain {
 
   async newConversation(request: { requestId: string; oldThreadId: string }) {
     const authority = this.options.conversations, process = this.process, options = this.threadOptions;
-    if (!authority || !process || !options || !this.options.masterId || !this.settingsSha256)
+    if (!authority || !process || !options || !this.options.masterId || !this.settingsSha256 || !this.nextSettingsSha256)
       throw new Error("Codex master の新しい会話は結果照合とrun台帳の接続後に利用できます");
     if (this.rotating || this.starting || this.pendingSend || this.settlement || this.closed || this.stopping)
       throw new Error("統括の実行または会話切替が進行中です。");
@@ -265,11 +272,12 @@ export class CodexAppServerBrain implements MasterBrain {
       await process.client.verifyResidentTurns(request.oldThreadId, expected, pinned.turns);
       this.binding = await authority.start({ requestId: request.requestId, masterId: this.options.masterId, mode: "rotate",
         oldThreadId: request.oldThreadId, cwd: options.cwd, model: options.model, effort: this.options.effort,
-        provider: pinned.current.identity.modelProvider, settingsSha256: this.settingsSha256 }, async mark => {
+        provider: pinned.current.identity.modelProvider, settingsSha256: this.nextSettingsSha256 }, async mark => {
         process.client.assertQuiescent();
         if (this.closed || this.stopping) throw new Error("resident stopped before rotation");
         await mark(); return process.client.rotateThread(expected, request.oldThreadId);
       }, { resident: true });
+      this.settingsSha256 = this.binding.request.settingsSha256;
       return { requestId: request.requestId, oldThreadId: request.oldThreadId, newThreadId: this.binding.identity!.threadId };
     } catch (error) {
       // The Session holds after an unsuccessful rotation. Stop this owned

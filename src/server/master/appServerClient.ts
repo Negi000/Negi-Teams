@@ -25,6 +25,13 @@ function identityToken(value: unknown, field: string): string {
   return result;
 }
 
+/** App-owned context, never a user message or model-generated answer. */
+export const CODEX_RESIDENT_HISTORY_BOOTSTRAP = {
+  version: "negi-resident-history/1",
+  item: { type: "message", role: "developer", content: [{ type: "input_text",
+    text: "Negi-Teams resident conversation initialized. This is application context, not a user request or a task. Wait for an explicit user message before doing any work." }] },
+} as const;
+
 export interface CodexModelCapability {
   model: string;
   efforts: string[];
@@ -273,12 +280,27 @@ export class CodexAppServerClient {
       }));
       const threadId = identityToken(record(result?.thread)?.id, "thread.id");
       const resolvedModel = requiredString(result?.model, "model");
+      const modelProvider = identityToken(result?.modelProvider, "modelProvider");
       if (options.resident) this.verifyResidentResponse(result, options);
       if (options.resident && (!Array.isArray(record(result?.thread)?.turns) || (record(result?.thread)!.turns as unknown[]).length))
         throw new Error("new resident conversation is not empty");
       if (oldThreadId && threadId === oldThreadId) throw new Error("provider did not create a new conversation");
+      if (options.resident) {
+        if (resolvedModel !== options.model) throw new Error("resident provider rerouted the requested model");
+        // Codex 0.159.2 defers the rollout until history is written. An empty
+        // thread/start response alone cannot be resumed after process exit.
+        // This fixed developer context persists history without turn/start.
+        // A missing ACK is uncertain; never inject or start again automatically.
+        const persisted = record(await this.transport.request("thread/inject_items", {
+          threadId, items: [structuredClone(CODEX_RESIDENT_HISTORY_BOOTSTRAP.item)],
+        }));
+        if (!persisted || Object.keys(persisted).length) throw new Error("resident history persistence acknowledgement differs");
+        await this.verifyResidentTurns(threadId, { ...options, resident: { ...options.resident, modelProvider } }, []);
+        if (this.closedReason || this.needsReconciliation || this.activeTurnId || this.activeDynamicCalls.size || this.approvals.size)
+          throw new Error("resident provider changed while persisting initial history");
+      }
       this.identity = { threadId, requestedModel: options.model, resolvedModel,
-        modelProvider: identityToken(result?.modelProvider, "modelProvider"),
+        modelProvider,
         rerouted: resolvedModel !== options.model };
       return { ...this.identity };
     } catch (error) { this.needsReconciliation = true; throw error; }
@@ -321,7 +343,7 @@ export class CodexAppServerClient {
   async verifyResidentTurns(threadId: string, expected: CodexThreadOptions, turns: Array<{ id: string; status: string }>): Promise<void> {
     const read = record(await this.transport.request("thread/read", { threadId, includeTurns: false })), thread = record(read?.thread);
     const normalize = (value: unknown) => typeof value === "string" ? (process.platform === "win32" ? resolve(value).toLowerCase() : resolve(value)) : null;
-    if (thread?.id !== threadId || normalize(thread.cwd) !== normalize(expected.cwd) ||
+    if (thread?.id !== threadId || thread.ephemeral !== false || normalize(thread.cwd) !== normalize(expected.cwd) ||
         thread.modelProvider !== expected.resident!.modelProvider || thread.model !== expected.model ||
         thread.reasoningEffort !== expected.resident!.effort || !["idle", "notLoaded"].includes(String(record(thread.status)?.type)))
       throw new Error("saved provider conversation identity or state differs");
