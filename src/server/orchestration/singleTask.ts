@@ -3,6 +3,7 @@
 import { open, readFile, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { mkdir } from "node:fs/promises";
+import { validTaskWorkerProfileSelection, type TaskWorkerProfileSelection } from "./taskProfileSelection.ts";
 
 export type TaskStatus = "queued" | "planning" | "ready_for_worker" | "working" |
   "verifying" | "ready_for_review" | "accepted" | "blocked" | "stopped" | "needs_reconciliation";
@@ -34,11 +35,13 @@ export interface ContractRef {
   sourceNotes?: Array<{ id: string; kind: string; version: number; sha256: string; path: string }>;
   contextPacks?: { astra: { sha256: string; path: string }; sol?: { sha256: string; path: string }; luna?: { sha256: string; path: string } };
   approvedPlan?: { approvalRef: string; threadId: string; turnId: string; callId: string };
+  workerProfileSelection?: TaskWorkerProfileSelection;
 }
 export interface Attempt {
   id: string;
   role: TaskRole;
   requestedModel: string;
+  requestedEffort?: string;
   resolvedModel: string | null;
   threadId: string | null;
   turnId: string | null;
@@ -86,7 +89,7 @@ export interface TaskSnapshot {
 export type TaskAction =
   | { type: "create"; runId: string; contract: ContractRef }
   | { type: "adopt_approved_plan"; approvalRef: string; outputRef: string }
-  | { type: "start_attempt"; attemptId: string; role: TaskRole; requestedModel: string }
+  | { type: "start_attempt"; attemptId: string; role: TaskRole; requestedModel: string; requestedEffort?: string }
   | { type: "bind_thread"; attemptId: string; threadId: string }
   | { type: "bind_provider"; attemptId: string; threadId: string; turnId: string }
   | { type: "complete_attempt"; attemptId: string; resolvedModel: string | null;
@@ -152,6 +155,8 @@ export function reduceTask(state: TaskSnapshot | null, event: TaskEvent): TaskSn
       /^[a-z][a-z0-9_.-]{0,79}$/.test(a.contract.taskClass),"invalid Task class");
     if(a.contract.contextPacks)requireState(Object.keys(a.contract.contextPacks).sort().join()===
       ["astra",a.contract.taskClass==="read_only_research"?"luna":"sol"].sort().join(),"context pack roles differ from Task class");
+    if(a.contract.workerProfileSelection)requireState(a.contract.taskClass === "read_only_research" &&
+      validTaskWorkerProfileSelection(a.contract.workerProfileSelection), "invalid pinned worker profile");
     return { runId: a.runId, contract: structuredClone(a.contract), status: "queued",
       attempts: [], approvals: [], providerObservations: [], verification: null,
       stopReason: null, stoppedFrom: null,
@@ -176,7 +181,13 @@ export function reduceTask(state: TaskSnapshot | null, event: TaskEvent): TaskSn
       const expectedRole = next.status === "queued" ? "astra" :
         next.status === "ready_for_worker" ? next.contract.taskClass === "read_only_research" ? "luna" : "sol" : null;
       requireState(a.role === expectedRole, "role or status invalid");
+      const profile = next.contract.workerProfileSelection;
+      requireState(a.requestedEffort === undefined || typeof a.requestedEffort === "string" &&
+        /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/.test(a.requestedEffort), "attempt effort invalid");
+      if(profile && a.role === "luna")requireState(a.requestedModel === profile.model &&
+        a.requestedEffort === profile.effort, "attempt differs from pinned worker profile");
       next.attempts.push({ id: a.attemptId, role: a.role, requestedModel: a.requestedModel,
+        ...(a.requestedEffort !== undefined ? { requestedEffort: a.requestedEffort } : {}),
         resolvedModel: null, threadId: null, turnId: null, state: "running", outputRef: null,
         usage: null });
       next.status = a.role === "astra" ? "planning" : "working";

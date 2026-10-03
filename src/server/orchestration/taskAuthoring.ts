@@ -207,6 +207,9 @@ export class LocalTaskAuthoringService {
     ...(p.config.taskMode?{executionInstructions:"Lunaの読み取り専用調査です。implementationPlanには調査手順を指定してください。ファイル変更・権限昇格・外部送信はできません。成果は調査レビューで確認し、訂正や後続作業は新しい契約で依頼してください。"}:{}),
     decomposition:{maxTasks:8, executable:"independent_roots", successors:p.config.taskMode?"new_research_contract":"new_plan_after_integration"} })); }
   /** Trusted server composition only. No HTTP/tool endpoint exposes configuration mutation. */
+  policyWritableRoots(): string[] {
+    return [...new Set(this.profiles.flatMap(p => [p.repository, p.worktreeRoot, p.config.vault, p.config.checkout]))];
+  }
   integrationConfiguration() { return { storageRoot:join(this.root,"integrations"), profiles:structuredClone(this.profiles.filter(p=>p.config.taskMode!=="read_only_research")) }; }
   async bindIntegration(options:IntegrationReviewOptions,manifest:IntegrationReviewManifest,reviews:LocalReviewService):Promise<void> {
     for(const path of new Set([options.checkout,...reviews.modelWritableRoots(),...options.sources.flatMap(s=>[s.config.checkout,s.config.vault])])){

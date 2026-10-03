@@ -31,6 +31,8 @@ import { LocalTaskReconciliation, type InspectTaskProvider, type TaskReconciliat
 import { RuntimeJournalInventory } from "./runtimeJournalInventory.ts";
 import { TaskPreflightRecovery, withTaskPreflightLock, type PreflightRecoveryView } from "./taskPreflightRecovery.ts";
 import type { VaultTaskContract } from "./vaultTaskContract.ts";
+import type { ReadOnlyPolicySource } from "./policyService.ts";
+import type { TaskWorkerProfileSelection } from "./taskProfileSelection.ts";
 
 const hash = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
 type RegisteredTaskReview = TaskReviewManifest | ReadOnlyTaskReviewManifest;
@@ -87,6 +89,8 @@ export interface TaskRunView {
   outOfScope: string[]; invariants: string[];
   astra: VaultRunConfig["astra"]; sol: VaultRunConfig["sol"];
   taskMode?:"read_only_research"; luna?:VaultRunConfig["luna"];
+  lunaPolicy?: "approved-policy/1";
+  workerProfileSelection?: TaskWorkerProfileSelection;
   status: string; canStart: boolean; canStop: boolean; live: boolean;
   startHoldReason?: string;
   executionPhase: ScheduledPhase | null;
@@ -152,6 +156,7 @@ export class LocalTaskService {
   private closing = false;
   private reviews: LocalReviewService | null = null;
   private knowledgeProofDirectory?: string;
+  private approvedResearchPolicy?: ReadOnlyPolicySource;
   private readonly manifests = new Map<string, RegisteredTaskReview>();
   private readonly reviewSyncs = new Map<string, Promise<void>>();
   private readonly manifestLoads = new Map<string, Promise<RegisteredTaskReview | null>>();
@@ -419,6 +424,12 @@ export class LocalTaskService {
     if (this.knowledgeProofDirectory && this.knowledgeProofDirectory !== proofDirectory)
       throw new Error("Knowledge authority cannot change during a server session");
     this.knowledgeProofDirectory = proofDirectory;
+  }
+  /** Trusted startup binding; Task/HTTP input cannot replace the authority. */
+  connectResearchPolicy(source: ReadOnlyPolicySource): void {
+    if(this.approvedResearchPolicy && this.approvedResearchPolicy !== source)
+      throw Error("Research Policy authority cannot change during a server session");
+    this.approvedResearchPolicy = source;
   }
   async knowledgeSource(id: string): Promise<{ vault: string; project: string; taskClass: string;
     sourceNotes: Array<{ id: string; version: number; sha256: string; path: string }> }> {
@@ -893,6 +904,8 @@ export class LocalTaskService {
     if(!request&&!entry&&!state&&!this.closing)try{startError=await this.startChecks.get(id)?.()??null}
     catch{startError="開始条件を照合できません。契約案の状態を確認してください。"}
     if(run.config.taskMode==="read_only_research"&&!this.reviews)startError="調査成果のレビューを準備してから開始してください。";
+    if(run.config.lunaPolicy && !this.approvedResearchPolicy && !request && !entry && !state)
+      startError="調査の設定を確認できません。比較画面と管理設定を確認してください。";
     // The default native composition must expose its hold before creating an
     // execution request. Trusted synthetic runtimes can still exercise review
     // flows; the unconditional native prepare/execute/client gates own safety.
@@ -908,6 +921,8 @@ export class LocalTaskService {
       outOfScope: scope?.out ?? [], invariants: run.contract.invariants as string[] ?? [],
       verification: run.contract.verification as string[], astra: run.config.astra, sol: run.config.sol,
       ...(run.config.taskMode==="read_only_research"?{taskMode:run.config.taskMode,luna:run.config.luna}:{}),
+      ...(run.config.lunaPolicy?{lunaPolicy:run.config.lunaPolicy}:{}),
+      ...(state?.contract.workerProfileSelection?{workerProfileSelection:structuredClone(state.contract.workerProfileSelection)}:{}),
       status, executionPhase: entry?.phase ?? null, canStart: !request && !entry && !state && !this.closing && !startError && !startHoldReason,
       ...(startHoldReason?{startHoldReason}:{}),
       canStop: Boolean(active || entry?.status === "queued"), live: Boolean(active || preparing && !error),
@@ -999,6 +1014,7 @@ export class LocalTaskService {
             Date.now()+prepared.contract.limits.timeLimitMinutes*60_000):undefined,
           onCapacityReleased: () => this.pump(),
           knowledgeProofDirectory: this.knowledgeProofDirectory,
+          approvedResearchPolicy: this.approvedResearchPolicy,
           contextCacheDirectory: join(this.root, "context-cache"),
           verifyApproval: ({ event, state }) => this.verifyOperationDecision(this.registered(id), event, state),
           onApproval: (approval, decide) => {

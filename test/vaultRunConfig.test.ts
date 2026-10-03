@@ -26,6 +26,8 @@ test("research registration is explicit and contains no legacy Sol write profile
   assert.deepEqual(parsed,raw);assert.equal("sol" in parsed,false);
   assert.deepEqual(vaultWorker(parsed),{role:"luna",profile:raw.luna,checkoutMode:"read"});
   assert.doesNotThrow(()=>assertVaultWorkerContract(parsed,{taskClass:"read_only_research"}));
+  assert.deepEqual(parseVaultRunConfig({...raw,lunaPolicy:"approved-policy/1"}), {...raw,lunaPolicy:"approved-policy/1"});
+  assert.throws(()=>parseVaultRunConfig({...base,lunaPolicy:"approved-policy/1"}),/invalid|ambiguous/);
   assert.throws(()=>assertVaultWorkerContract(parsed,{}),/explicit Luna/);
   assert.throws(()=>assertVaultWorkerContract(parseVaultRunConfig(base),{taskClass:"read_only_research"}),/explicit Luna/);
   for(const value of [{...raw,sol},{...raw,sol:undefined},{...common,luna:raw.luna},

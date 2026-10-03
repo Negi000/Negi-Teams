@@ -1,6 +1,7 @@
 // Explicit, local configuration for the reusable Vault Task CLI.
 import { lstat, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { validTaskWorkerProfileSelection, type TaskWorkerProfileSelection } from "./taskProfileSelection.ts";
 
 export interface VerificationCommand {
   requirement: string;
@@ -23,8 +24,10 @@ export interface VaultRunBase {
   approvedPlan?: { proofDirectory: string; requestId: string };
 }
 export type VaultRunConfig = VaultRunBase & (
-  { sol: { model: string; effort: string }; taskMode?: never; luna?: never } |
-  { taskMode: "read_only_research"; luna: { model: string; effort: string }; sol?: never }
+  { sol: { model: string; effort: string }; taskMode?: never; luna?: never; lunaPolicy?: never } |
+  { taskMode: "read_only_research"; luna: { model: string; effort: string }; sol?: never;
+    /** The configured Luna profile is the fixed baseline; absent means explicit. */
+    lunaPolicy?: "approved-policy/1" }
 );
 export function vaultWorker(config: VaultRunConfig) {
   return config.taskMode === "read_only_research"
@@ -34,6 +37,14 @@ export function vaultWorker(config: VaultRunConfig) {
 export function assertVaultWorkerContract(config: VaultRunConfig, contract: { taskClass?: string }): void {
   if ((config.taskMode === "read_only_research") !== (contract.taskClass === "read_only_research"))
     throw Error("Read-only research requires its explicit Luna configuration and Vault task class");
+}
+/** Replays keep the original selection; current activation/rollback is irrelevant. */
+export function assertTaskWorkerProfileRegistration(config: VaultRunConfig,
+  contract: { workerProfileSelection?: TaskWorkerProfileSelection }): void {
+  const selected = contract.workerProfileSelection;
+  if(config.lunaPolicy ? !selected || !validTaskWorkerProfileSelection(selected) ||
+      selected.defaultProfile.model !== config.luna!.model || selected.defaultProfile.effort !== config.luna!.effort :
+      selected !== undefined) throw Error("Task policy selection differs from its fixed registration");
 }
 
 function object(value: unknown): Record<string, unknown> | null {
@@ -64,10 +75,11 @@ export function parseVaultRunConfig(value: unknown): VaultRunConfig {
   // No Sol alias is serialized for a read-only run. Historical parsers require
   // sol and therefore reject this registration rather than grant write access.
   const readOnly = row.taskMode === "read_only_research";
-  if (row.lunaPolicy !== undefined || (readOnly ? "sol" in row :
+  if (row.lunaPolicy !== undefined && (!readOnly || row.lunaPolicy !== "approved-policy/1") || (readOnly ? "sol" in row :
       row.taskMode !== undefined || row.luna !== undefined))
     throw Error("Vault run worker mode invalid or ambiguous");
-  const worker = readOnly ? { taskMode: "read_only_research" as const, luna: role(row.luna, "luna") } : { sol: role(row.sol, "sol") };
+  const worker = readOnly ? { taskMode: "read_only_research" as const, luna: role(row.luna, "luna"),
+    ...(row.lunaPolicy === "approved-policy/1" ? { lunaPolicy: "approved-policy/1" as const } : {}) } : { sol: role(row.sol, "sol") };
   if (!Array.isArray(row.verification) || row.verification.length > 10 ||
       !Array.isArray(row.resources) || row.resources.length > 20) {
     throw new Error("Vault run verification/resources invalid");

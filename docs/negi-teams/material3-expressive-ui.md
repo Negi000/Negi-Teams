@@ -169,6 +169,12 @@ Browser plugin not availableのため既存Playwright CLIを利用。最初のfi
 
 Chromium1440/375/320pxの両テーマ、48px、reduced motion、ログイン後の指定会話への復帰、各入口の往復、キーボード、長いtoken、旧応答の破棄、通信失敗の回復を確認した。最終の予期しないconsole/page errorは0。関連75/75と最終source/auth/Master試験49/49、型検査・ビルド成功。試験集合は重複する。provider/model送信を行った証拠ではなく、一時Git/Vaultと合成runtimeでの確認である。全会話復元・10,000件超の履歴索引・Codexの新しい会話・実機と人の受入は残る。
 
+### 調査Taskの固定された設定
+
+通常のLuna Taskで承認済みPolicyを使う設定を明示した場合、契約詳細の「調査の設定」に開始前の固定方針と、保存後の適用版/既定設定を表示する。「担当」は台帳へ保存した選択effortを使う。更新・再起動・Policy authority未設定時の保存済み読取でも元の表示を保持する。[選択と検証の境界](../negi-teams-phase7.md#2026-10-03-通常のluna-taskへの固定版接続)を参照。
+
+compiled通常serverと合成保存TaskでChromium1440/375/320px・両テーマ、契約のキーボード開閉、更新後pin保持、48px操作、横超過/overlay/console/page error0、開始前案内とHTTP409、再起動後の版を確認した。計8case。Browser plugin not availableのため既存Playwrightを使用し、私有画像/ログを公開差分外に保存した。native modelは起動しておらず、実機safe-area/keyboard・人の操作とPolicy受入は残る。
+
 ### 会話切替の準備・失敗・終了
 
 [会話のライフサイクル](../negi-teams-conversation-lifecycle.md)へ既存Claude/Geminiの確認操作を接続した。準備中に二重操作や入力を開始せず、新しい統括の準備完了後だけ表示と使用量を切り替える。失敗時は入力・元の表示・使用量を保ち、終了済みの質問を回答不可にする。サーバ終了後に再起動しない。Codexは準備中の説明と無効状態を維持する。

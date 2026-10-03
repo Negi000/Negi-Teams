@@ -48,6 +48,8 @@ export interface ReadOnlyPolicySelection {
 export interface ReadOnlyPolicySource {
   select(input: { role: ScheduledRole; taskClass: "read_only_research";
     defaultProfile: { model: string; effort: string };
+    /** Opted-in Tasks hold a matching active version if evidence/catalog is unavailable. */
+    holdUnavailableActive?: true;
     catalog: Array<{ model: string; efforts: string[]; inputModalities: string[] }> }): Promise<ReadOnlyPolicySelection | null>;
 }
 
@@ -284,9 +286,9 @@ export class LocalPolicyService implements ReadOnlyPolicySource {
   async select(input: Parameters<ReadOnlyPolicySource["select"]>[0]): Promise<ReadOnlyPolicySelection | null> {
     return withMasterStorageGuard(this.root, async () => {
       const current = await this.read();
-      const selected = selectReadOnlyProfile(current.state, { ...input, explicitProfile: null });
-      if (!selected) return null;
-      let root = current.candidates.find(row => row.policy.id === selected.policyId)!;
+      const entry = current.state.entries.find(row => row.policy.id === current.state.activeId);
+      if(!entry || entry.policy.taskClass !== input.taskClass || entry.policy.role !== input.role) return null;
+      let root = current.candidates.find(row => row.policy.id === entry.policy.id)!;
       const active = root;
       const seen = new Set<string>();
       while (root.policy.parentId !== null) {
@@ -295,6 +297,13 @@ export class LocalPolicyService implements ReadOnlyPolicySource {
       }
       const baseline = root.pairs[0].baseline.profile;
       if (baseline.model !== input.defaultProfile.model || baseline.effort !== input.defaultProfile.effort) return null;
+      if (input.holdUnavailableActive && active.evidenceError)
+        throw Error("Active policy evidence unavailable; inspect or roll back the policy");
+      const selected = selectReadOnlyProfile(current.state, { ...input, explicitProfile: null });
+      if (!selected) {
+        if(input.holdUnavailableActive)throw Error("Active policy profile is unavailable in the provider catalog");
+        return null;
+      }
       if (active.evidenceError) throw Error("Active policy evidence unavailable; inspect or roll back the policy");
       return { ...selected, stateSha256: current.snapshotSha256 };
     });

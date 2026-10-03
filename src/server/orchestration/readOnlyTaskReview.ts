@@ -9,7 +9,7 @@ import { parseMarkdown } from "../../client/markdown.ts";
 import type { RegisteredReviewCase } from "./reviewService.ts";
 import type { TaskReviewPresentation } from "./reviewPresentation.ts";
 import type { TaskSnapshot } from "./singleTask.ts";
-import { assertVaultWorkerContract, type VaultRunConfig } from "./vaultRunConfig.ts";
+import { assertTaskWorkerProfileRegistration, assertVaultWorkerContract, type VaultRunConfig } from "./vaultRunConfig.ts";
 import { RESEARCH_FINDINGS_BYTES, researchReviewMetadata } from "./researchArtifactPolicy.ts";
 
 const hash=(bytes:Buffer|string)=>createHash("sha256").update(bytes).digest("hex");
@@ -60,13 +60,17 @@ async function derive(config:VaultRunConfig,configSha256:string,title:string,sta
     !["ready_for_review","accepted"].includes(state.status)||state.verification?.outcome!=="passed"||state.resultRevisions?.length)
     throw Error("Research review requires its completed, verified fixed Task");
   const snapshotBytes=await regular(config.snapshot,2_000_000),snapshot=JSON.parse(snapshotBytes.toString("utf8"));
-  const {contextPacks:_packs,approvedPlan:_plan,...contract}=state.contract;
+  assertTaskWorkerProfileRegistration(config,state.contract);
+  const {contextPacks:_packs,approvedPlan:_plan,workerProfileSelection,...contract}=state.contract;
   if(hash(JSON.stringify({config,snapshotSha256:hash(snapshotBytes)}))!==configSha256||!isDeepStrictEqual(contract,snapshot))
     throw Error("Research contract or registration changed after verification");
   const attempt=state.attempts.at(-1);
   if(!attempt||attempt.role!=="luna"||attempt.state!=="completed"||!attempt.threadId||!attempt.turnId||
     !/^[a-zA-Z0-9_-]{1,100}$/.test(attempt.id)||state.attempts.some(a=>a.state!=="completed"||!["astra","luna"].includes(a.role)))
     throw Error("Research review requires the exact completed Luna attempt");
+  if(workerProfileSelection && (attempt.requestedModel !== workerProfileSelection.model ||
+      attempt.resolvedModel !== workerProfileSelection.model || attempt.requestedEffort !== workerProfileSelection.effort))
+    throw Error("Research attempt differs from its pinned Policy profile");
   const artifact=join(config.outputDir,"artifacts",`${attempt.id}.md`),match=attempt.outputRef?.match(/^(.+)#sha256=([a-f0-9]{64})$/);
   if(!match||!samePath(match[1],artifact))throw Error("Research output is not the fixed Luna artifact");
   const findings=await regular(artifact,RESEARCH_FINDINGS_BYTES,config.outputDir);
@@ -88,7 +92,7 @@ async function derive(config:VaultRunConfig,configSha256:string,title:string,sta
   if(git(config,["rev-parse","HEAD"])!==state.contract.baseSha||git(config,["status","--porcelain","--untracked-files=all"]))
     throw Error("Research checkout changed after verification");
   const content=Buffer.from(JSON.stringify({...researchReviewMetadata(state.contract,config.verification.map(c=>c.requirement)),
-    findings:findings.toString("utf8")},null,2)+"\n");
+    findings:findings.toString("utf8"),...(workerProfileSelection?{workerProfileSelection}:{})},null,2)+"\n");
   if(content.length>100_000)throw Error("Research result exceeds bounded web review preview");
   const review:RegisteredReviewCase={id:`task-${hash(config.runId).slice(0,24)}`,title,
     ledgerPath:join(config.outputDir,"review.jsonl"),artifactRoot:config.outputDir,verifiedArtifactSha256:hash(content),

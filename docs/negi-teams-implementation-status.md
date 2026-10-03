@@ -2,6 +2,14 @@
 
 2026-10-03（JST）。基準は `NEGI_TEAMS_MASTER_PLAN.ja.md` のPhase 0〜8と `REQUIREMENTS_TRACEABILITY.ja.md`。この表は実装・合成テスト・実モデル観測・人間受入を分ける。Git管理外の実行証拠も参照しており、実装差分の公開を全Phaseの完了宣言とは扱わない。
 
+## 2026-10-03追加: 通常TaskのPolicy固定とMaterialでの出典表示
+
+[方式・明示設定・検証範囲](negi-teams-phase7.md#2026-10-03-通常のluna-taskへの固定版接続)。通常Luna Taskとauthoring profileへ`lunaPolicy: "approved-policy/1"`を明示した場合だけ、署名済みPolicy authorityを接続する。Astra前に一度だけ選択し、既定/選択profileとPolicy ID/hashをcreate台帳へ保存する。rollbackは次runだけへ適用し、保存済みレビューと結果不明の照合・終了も元pinを保持する。該当activeのcatalog/evidence欠損は既定へfallbackせず停止する。明示指定・write・権限・固定検証は選択対象を広げない。
+
+未登録/非active authoring profileの将来worktreeを含む全固定rootと、Policy config/authority/比較根拠を分離した。独立監査のcatalog fallbackと将来root漏れを修正し、追加再監査に未解決の具体的指摘なし。最終関連14filesは111/111成功・失敗/取消/skip0、型/build成功。通常service接続・署名済み合成版・rollback・再起動・レビュー・結果不明照合/終了・改変とroot overlapを確認した。
+
+M3 Taskの契約詳細で選択effortと「調査の設定」を表示する。compiled通常serverのGUI8case、1440/375/320px・両テーマ、キーボード/48px/更新/restart、横超過/console/page error0、HTTP409・要求未作成・scheduler不変を確認した。Browser plugin not availableのため既存Playwright、証拠は公開差分外。native研究holdは解除しておらず、model turn0。実モデルへのPolicy適用・利益・人間承認、強制隔離、実機safe-area/keyboardと全Phase0–8/73要件の受入は未完。ゴールはACTIVE。
+
 ## 2026-10-03追加: native調査の保留とMaterialの読取継続
 
 [Luna調査の開始保留](negi-teams-luna-tasks.md#2026-10-03追記-native調査の開始を保留する)。Codex 0.160.0の設定再読込競合を私有CODEX_HOMEの実CLIで再現し、model turn0・元設定不変・Job終了を確認した。検査後の未知MCP起動を防ぐ強制policyが未対応のため、native研究のprepare/execute/clientと旧scheduled helperは実行枠・成果作成前に無条件holdする。通常write、metadata照合、保存済み成果のレビューは維持する。独立監査の2指摘を修正後に未解決の具体的指摘はなかった。

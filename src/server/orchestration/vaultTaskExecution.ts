@@ -44,6 +44,7 @@ export interface TaskExecutionHooks {
   admit?:TaskAdmissionGuard;
   knowledgeProofDirectory?: string;
   contextCacheDirectory?: string;
+  approvedResearchPolicy?: import("./policyService.ts").ReadOnlyPolicySource;
   onApproval: (approval: TaskOperationApproval,
     decide: (allow: boolean, approvalRef: string, at: string, requestId: string) => Promise<void>) => void;
   verifyApproval: ReconciliationVerifier;
@@ -100,6 +101,7 @@ export async function executeVaultRun(prepared: PreparedVaultRun, scheduler: Fil
   assertVaultWorkerContract(config,contract);
   const workerProfile=vaultWorker(config),research=workerProfile.role==="luna";
   if(research)assertResearchDispatchIsolation();
+  if(config.lunaPolicy && !hooks?.approvedResearchPolicy) throw Error("Approved research Policy authority is unavailable");
   // One deadline covers both roles and verification, not a fresh budget per turn.
   const deadline = AbortSignal.timeout(contract.limits.timeLimitMinutes * 60_000);
   const deadlineAtMs = Date.now() + contract.limits.timeLimitMinutes * 60_000;
@@ -196,6 +198,7 @@ export async function executeVaultRun(prepared: PreparedVaultRun, scheduler: Fil
           if(signal?.aborted)throw Error("User requested stop");
         };
         return await runSingleTaskFromVault({ ...options,
+          ...(config.lunaPolicy ? { approvedResearchPolicy: hooks!.approvedResearchPolicy } : {}),
           knowledgeProofDirectory: hooks?.knowledgeProofDirectory,
           contextCacheDirectory: hooks?.contextCacheDirectory,
           astra: { client: astra?.client ?? null as never, ...config.astra },

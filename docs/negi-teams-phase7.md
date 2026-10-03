@@ -58,7 +58,33 @@ native guardとrecovery moduleは同梱sourceのSHA-256を固定し、検証し�
 
 `runScheduledReadOnlyTurn`は`approvedPolicy: LocalPolicyService`を**明示的に渡した場合だけ**承認済み設定を選択する。既存の`model/effort`は、このモードでは固定された既定値であり、Policyの最初のbaselineと一致する場合だけ選択対象になる。引数なしは従来どおり明示設定。role、読み取り用checkout/resource、provider catalogのモデル・effort・text対応を確認し、開始前にpolicy ID/hash・state hash・選択モデル/effortを固定ファイルへ保存する。実行中の適用/差し戻しは次のdispatchへ反映する。明示モデルやworkspace-writeのTaskへこのPolicyを注入しない。
 
-この接続の現時点の証拠は、署名付きservice＋scheduler＋provider stubの限定試験。通常のVault Taskは引き続きユーザーが指定したAstra/Solを使う。通常のTask分解でLuna調査を自動登録する経路への接続、実アカウントでのPolicy適用、人間が承認した実Policyは未完了。
+旧helperの接続の証拠は、署名付きservice＋scheduler＋provider stubの限定試験。通常Taskへの追加接続は以下の明示設定に限定する。実アカウントでのPolicy適用、人間が承認した実Policyは未完了。
+
+## 2026-10-03: 通常のLuna Taskへの固定版接続
+
+通常Task catalogとauthoring profileの読み取り専用設定へ、`lunaPolicy: "approved-policy/1"`を明示した場合だけ、通常サーバーの`LocalPolicyService`を使う。設定の`luna.model/effort`は比較の固定baselineになる。設定がなければ従来の明示指定で、write Taskへは登録できない。Astraの設定・権限・検証・外部送信は選択対象に含めない。CLI単独ではauthorityを自動探索しない。
+
+```json
+{
+  "taskMode": "read_only_research",
+  "luna": { "model": "実アカウントで確認したモデル", "effort": "medium" },
+  "lunaPolicy": "approved-policy/1"
+}
+```
+
+これは既存の完全なrun設定へ追加する部分である。HTTPやモデルtoolからauthorityやPolicy IDを指定できない。サーバー起動時に認証・独立した署名秘密・固定比較登録を検査し、同じauthorityをTaskへ一度だけ接続する。未登録authoring profileのrepository/worktreeRoot/Vault/checkoutも、Policy config・authority・比較成果から分離する。非active profileも検査対象で、将来作るTaskが隔離を迂回しない。
+
+選択はAstra turn前に一度だけ行う。role・task class・baselineが一致する署名済みactive版について、現在の根拠とprovider catalogを照合する。該当activeの根拠欠損・改変・effort未対応は開始を保留する。該当activeがない、role/baselineが対象外の場合だけ、設定された既定値を使う。同じモデルのeffort変更に限定し、catalog・返却値のコピーから許可された項目だけを保存する。
+
+runのcreate台帳に`workerProfileSelection`を保存する。既定profile・選択model/effort・出典・Policy ID/hash・state hashを持ち、Luna attemptの`requestedEffort`も照合する。実行中のactivate/rollbackは次のrunだけに適用し、既存runの再実行から再選択しない。レビューの固定成果JSONにもpinを含め、登録baseline・attemptとの一致、元content hashを再照合する。結果不明の照合・明示終了も同じpinを保持する。保存済みrunの読取・レビューは、現在のPolicy authorityが未設定でも行える。
+
+旧research parserは新しい`lunaPolicy`登録を拒否する。既定のwriteや既存research登録・台帳は変更しない。新設定を運用するserver/runnerを揃える必要がある。
+
+**native調査は開始保留のまま。** Codex 0.160.0の設定再読込競合を止めるprocess-local MCP強制policyが未対応で、prepare/execute/client/旧helperの無条件holdが選択より先に効く。この接続の合成成功を、実モデルでPolicyを適用した証拠にしない。
+
+検証は最終関連14files **111/111成功、失敗/取消/skip0（92,907.2525ms、actual exit0）**。署名済み合成Policyの選択→Astra中rollback→次run既定への復帰、catalog/evidence欠損時の停止、明示指定、登録・effort・権限field改変拒否、通常Task serviceからの接続/再起動、固定pinのレビュー/結果不明照合/明示終了、authoringからの設定保持と将来root overlap拒否を含む。型検査/buildも成功した。独立レビューのfallbackとauthoring root漏れを修正し、再レビューに未解決の具体的指摘はない。
+
+Material 3のTask画面では「調査の設定」と実際の選択effortを表示する。compiled通常server＋合成保存履歴を使い、Chromium1440/375/320px・両テーマの6caseと新規開始保留・再起動の計8caseを確認した。URL/title・空白/overlay・横幅・48px操作・キーボードでの契約開閉・更新後pin保持・console/page error0、開始HTTP409・要求未作成・scheduler不変を確認した。Browser plugin not availableのため既存Playwrightを使い、画像・ログは公開差分外へ保存した。私有browser/serverとowned Node placeholderは終了済み。model turn0。実機safe-area/keyboard・人による操作/Policy受入は未確認。
 
 ### 確認した範囲
 
@@ -71,6 +97,6 @@ native guardとrecovery moduleは同梱sourceのSHA-256を固定し、検証し�
 ## 残る境界
 
 - 実験の2課題は小さなコード読取で、実装、検証、修正、ユーザー受入を含まない。処理順やプロバイダー負荷のばらつきも測れていない。
-- 限定した読み取りdispatcherへの明示接続は合成確認済みだが、通常Task分解・旧Master/workerの自動調査への接続は残る。実運用でactiveなPolicyは存在しない。
+- 通常Luna Taskとauthoringからの明示設定・固定版接続は合成確認済み。native調査の強制隔離、旧Master/workerの自動調査への全面接続、実運用でのPolicy適用/利益/人間承認は残る。
 - Jevの7 gateの人間校正、知識再利用、検索改善、受入済み成果あたりの総負担比較は未実施。Phase 7の改善効果は未立証。
 - `FilePolicyLedger`の信頼境界は呼出側の証拠・承認検証関数に依存する。新しい通常UIは独立した`LocalPolicyService`の署名済み履歴を使う。大規模なPolicy履歴の読込性能・整理と、実機での確認は未測定。

@@ -126,6 +126,9 @@ export async function runSingleTask(options: SingleTaskRunOptions): Promise<Task
   const worker = readOnly ? options.luna : options.sol;
   if (!worker || (readOnly ? options.sol !== undefined : options.luna !== undefined))
     throw Error("Task worker must match its fixed read-only or implementation contract");
+  const selected = options.contract.workerProfileSelection;
+  if (selected && (!readOnly || worker.model !== selected.model || worker.effort !== selected.effort))
+    throw Error("Task worker differs from its pinned policy profile");
   if (!options.runId || !options.cwd || !Number.isSafeInteger(options.turnTimeoutMs) ||
       options.turnTimeoutMs < 1 ||
       (options.deadlineAtMs !== undefined && !Number.isSafeInteger(options.deadlineAtMs))) {
@@ -151,7 +154,8 @@ export async function runSingleTask(options: SingleTaskRunOptions): Promise<Task
   async function attempt(role: TaskRole, settings: SingleTaskRunOptions["astra"],
                          prompt: string): Promise<{ state: TaskSnapshot; text: string | null; ref: string | null }> {
     const attemptId = randomUUID();
-    await append({ type: "start_attempt", attemptId, role, requestedModel: settings.model });
+    await append({ type: "start_attempt", attemptId, role, requestedModel: settings.model,
+      ...(role === "luna" && selected ? { requestedEffort: settings.effort } : {}) });
     let identity: CodexThreadIdentity;
     let turnId: string;
     let result: CodexTurnObservation;

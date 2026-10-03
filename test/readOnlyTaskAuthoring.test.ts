@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { readFile, readdir, writeFile } from "node:fs/promises";
+import { readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
@@ -13,6 +13,8 @@ import { loadVaultTaskContract } from "../src/server/orchestration/vaultTaskCont
 import { registeredTaskTools } from "../src/server/orchestration/taskDispatchTools.ts";
 import type { VaultRunConfig } from "../src/server/orchestration/vaultRunConfig.ts";
 import { setup, origin, planner, git } from "./helpers/taskAuthoringFixture.ts";
+import { policyFixture } from "./helpers/policyFixture.ts";
+import { LocalPolicyService } from "../src/server/orchestration/policyService.ts";
 
 function researchConfig(config:VaultRunConfig):VaultRunConfig {
   const {sol, ...fixed}=config;
@@ -25,7 +27,14 @@ function authoringConfig(f:Awaited<ReturnType<typeof setup>>) {
 test("raw research profile produces a signed real Vault research contract, Luna plan and restart without dispatch",async()=>{
   const f=await setup();let restored:LocalTaskService|undefined;
   try {
-    const config=authoringConfig(f),authoring=await LocalTaskAuthoringService.open(config,f.tasks);
+    const config=authoringConfig(f);config.profiles[0].config.lunaPolicy="approved-policy/1";
+    const authoring=await LocalTaskAuthoringService.open(config,f.tasks);
+    const fixed=config.profiles[0];
+    assert.deepEqual(new Set(authoring.policyWritableRoots()),new Set([fixed.repository,fixed.worktreeRoot,fixed.config.vault,fixed.config.checkout]));
+    const policy=await policyFixture();
+    try{await assert.rejects(LocalPolicyService.open({...policy.config,storageRoot:fixed.worktreeRoot},
+      authoring.policyWritableRoots(),policy.secret),/overlaps model-writable/)}
+    finally{await rm(policy.directory,{recursive:true,force:true})}
     const profile=await authoring.readProject("docs-project");
     assert.equal(profile.worker.model,"gpt-6-luna");assert.equal(profile.workerRole,"luna");
     assert.deepEqual(profile.integrationBases,[]);assert.equal(profile.decomposition.successors,"new_research_contract");
@@ -34,6 +43,7 @@ test("raw research profile produces a signed real Vault research contract, Luna 
     assert.equal(draft.taskMode,"read_only_research");assert.equal(draft.worker.model,"gpt-6-luna");
     const approved=await authoring.finalize(draft.id,draft.hash,randomUUID()),run= f.tasks.authoringTemplate(approved.runId!);
     assert.equal(run.config.taskMode,"read_only_research");assert.equal(run.config.sol,undefined);
+    assert.equal(run.config.lunaPolicy,"approved-policy/1");
     const contract=await loadVaultTaskContract(run.config.vault,run.config.snapshot,run.config.checkout);
     assert.equal(contract.taskClass,"read_only_research");
     assert.equal(contract.approvedPlan,undefined);assert.equal(run.contract.taskClass,"read_only_research");

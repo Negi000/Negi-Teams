@@ -229,6 +229,7 @@ if (process.env.NEGI_POLICY_CONFIG && authConfig.token && !executionHeld() &&
   try {
     const writableRoots = [process.cwd(), process.env.EBI_DEFAULT_CWD ?? process.cwd(),
       ...(taskService?.knowledgeRegistrations().flatMap(row => [row.vault, row.checkout]) ?? []),
+      ...(taskAuthoringService?.policyWritableRoots() ?? []),
       ...(reviewService?.knowledgeWritableRoots() ?? [])];
     const configPath = await realpath(process.env.NEGI_POLICY_CONFIG);
     const roots = await Promise.all(writableRoots.map(root => realpath(root)));
@@ -238,6 +239,7 @@ if (process.env.NEGI_POLICY_CONFIG && authConfig.token && !executionHeld() &&
   } catch { /* Only policy use is held; existing explicit Task profiles remain available. */ }
 }
 const policyApi = createPolicyHttp(policyService, authConfig, process.env.NEGI_POLICY_CONFIG ? "held" : "unconfigured");
+if(policyService)taskService?.connectResearchPolicy(policyService);
 const reviewApi = createReviewHttp(reviewService, authConfig);
 // spawn する対象コマンド。claude が PATH に無い環境では EBI_COMMAND=bash 等で fallback。
 const COMMAND = process.env.EBI_COMMAND ?? "claude";

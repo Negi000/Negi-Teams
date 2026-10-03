@@ -14,7 +14,7 @@ import { HumanReviewProofStore, isReviewRequestId, type HumanReviewReceipt } fro
 import { inspectTaskExecutionOwner, type TaskExecutionOwnerView } from "./taskExecutionOwner.ts";
 import { FileTaskLedger, type Attempt, type ProviderTurnEvidence, type ReconciliationVerifier, type TaskSnapshot } from "./singleTask.ts";
 import type { FileScheduler, ScheduledEntry } from "./scheduler.ts";
-import { assertVaultWorkerContract, vaultWorker, type VaultRunConfig } from "./vaultRunConfig.ts";
+import { assertTaskWorkerProfileRegistration, assertVaultWorkerContract, vaultWorker, type VaultRunConfig } from "./vaultRunConfig.ts";
 
 export const reconciliationHash=(value:unknown)=>createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const byteHash=(value:Buffer|string)=>createHash("sha256").update(value).digest("hex");
@@ -119,7 +119,8 @@ async function storedContract(source:TaskReconciliationSource,state:TaskSnapshot
   if(!snapshot||byteHash(snapshot)!==source.snapshotSha256)throw Error("Task snapshot changed before reconciliation");
   const fixed=JSON.parse(snapshot.toString()) as VaultTaskContract;
   assertVaultWorkerContract(source.config,fixed);
-  const {contextPacks,approvedPlan,...original}=state.contract;
+  assertTaskWorkerProfileRegistration(source.config,state.contract);
+  const {contextPacks,approvedPlan,workerProfileSelection,...original}=state.contract;
   if(state.runId!==source.config.runId||!isDeepStrictEqual(original,fixed))throw Error("Execution ledger differs from its fixed Task contract");
   if(contextPacks){
     const worker=fixed.taskClass==="read_only_research"?"luna":"sol";
@@ -135,7 +136,7 @@ async function storedContract(source:TaskReconciliationSource,state:TaskSnapshot
   const plan=await loadApprovedTaskPlan(source.config,fixed);
   const expected=plan?{approvalRef:plan.approvalRef,threadId:plan.threadId,turnId:plan.turnId,callId:plan.callId}:undefined;
   if(!isDeepStrictEqual(approvedPlan,expected))throw Error("Task approved plan identity differs");
-  return reconciliationHash({contextPacks,approvedPlan});
+  return reconciliationHash({contextPacks,approvedPlan,...(workerProfileSelection?{workerProfileSelection}:{})});
 }
 async function localDossier(source:TaskReconciliationSource):Promise<TaskReconciliationDossier>{
   const {config}=source;

@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import type { ContractRef } from "./singleTask.ts";
 import { runSingleTask, type SingleTaskRunOptions } from "./singleTaskRunner.ts";
+import { selectTaskWorkerProfile } from "./taskProfileSelection.ts";
 
 export interface VaultTaskContract extends ContractRef {
   schemaVersion: "negi-task-contract/1";
@@ -256,12 +257,17 @@ export async function runSingleTaskFromVault(options: Omit<SingleTaskRunOptions,
   maxContextChars?: number;
   knowledgeProofDirectory?: string;
   contextCacheDirectory?: string;
+  approvedResearchPolicy?: import("./policyService.ts").ReadOnlyPolicySource;
 }) {
   const contract = await loadVaultTaskContract(options.vaultDirectory, options.snapshotPath, options.cwd);
   const research = contract.taskClass === "read_only_research";
   const workerRole = research ? "luna" : "sol";
   if (research ? !options.luna || options.sol !== undefined : !options.sol || options.luna !== undefined)
     throw Error("Vault worker differs from its fixed Task class");
+  if (options.approvedResearchPolicy && !research) throw Error("Policy selection requires a read-only research Task");
+  if ((await options.ledger.read()).state !== null) throw Error("run ledger already exists; inspect before resuming");
+  const workerProfileSelection = options.approvedResearchPolicy ? await selectTaskWorkerProfile(
+    options.approvedResearchPolicy, options.luna!.client, options.luna!) : undefined;
   const vault = await realpath(resolve(options.vaultDirectory));
   const checkout = await realpath(resolve(options.cwd));
   let contextCacheDirectory: string | undefined;
@@ -292,7 +298,8 @@ export async function runSingleTaskFromVault(options: Omit<SingleTaskRunOptions,
   const out = await artifactDirectory(options.artifactDir, vault, checkout);
   const astraPack = await savePack(out, options.runId, "astra", astraContext);
   const workerPack = await savePack(out, options.runId, workerRole, workerContext);
-  const runContract: ContractRef = { ...contract, contextPacks: { astra: astraPack, [workerRole]: workerPack } };
+  const runContract: ContractRef = { ...contract, contextPacks: { astra: astraPack, [workerRole]: workerPack },
+    ...(workerProfileSelection ? { workerProfileSelection } : {}) };
   const checkpoint=async()=>{
       if(research)await options.beforeWorker?.();else await options.beforeSol?.();
       const current = await loadVaultTaskContract(options.vaultDirectory, options.snapshotPath, options.cwd);
@@ -302,6 +309,8 @@ export async function runSingleTaskFromVault(options: Omit<SingleTaskRunOptions,
       }
     };
   return runSingleTask({ ...options, contract: runContract, artifactDir: out,
+    ...(workerProfileSelection ? { luna: { ...options.luna!, model: workerProfileSelection.model,
+      effort: workerProfileSelection.effort } } : {}),
     astraContext, ...(research ? { lunaContext: workerContext, beforeWorker:checkpoint } : { solContext: workerContext, beforeSol:checkpoint }),
     verify: async (evidence) => {
       try {
