@@ -21,7 +21,8 @@
 //    `phase === "final_answer"`（途中経過は `phase: "commentary"`）。
 //  - 文脈占有量は `thread/tokenUsage/updated` の **`last.inputTokens`**。
 //    `total` はスレッド累計で文脈ではない（claude の result.usage と同型の罠）。
-//    **窓サイズは通知に含まれない**ので、モデル別テーブルを別途持つ必要がある。
+//    旧PoCでは窓サイズ未提供。導入済み0.158.0-alpha.2.1の生成型には
+//    `modelContextWindow` があるが、この経路での実通知は未確認。
 //  - `account/rateLimits/updated` で 5h / 週次の枠使用率と planType が取れる（claude には無い）。
 //  - MCP は既存 `toCodexConfigArgs()` / `toCodexProjectsTrustArgs()` がそのまま流用できる。
 //    `default_tools_approval_mode="approve"` が無いとツール呼び出しのたびに承認で止まる。
@@ -39,7 +40,7 @@ import {
 /**
  * codex 頭脳の capabilities（設計書 §3.2 の射影表 codex 列 + PoC §3 の実測）。
  * `askUserQuestion` は相当機能が無く（`mcpServer/elicitation/request` は MCP 由来のみ）、
- * `contextPct` は窓サイズが通知に無いため「モデル別テーブルを持たない限り出せない」= false。
+ * `contextPct` はstub段階では観測値を供給できないため false。
  */
 export const CODEX_BRAIN_CAPABILITIES: MasterBrainCapabilities = {
   partialText: true,

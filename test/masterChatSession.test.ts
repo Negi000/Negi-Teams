@@ -5,15 +5,18 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import type { TaskResultSummary } from "../src/shared/taskResults.ts";
 import {
   MasterSession,
   replyQuoteLine,
   sanitizeReplyRef,
   toChatEvent,
+  unsettledRequestIds,
   type MasterSessionHandlers,
   type MasterUsageSnapshot,
 } from "../src/server/master/session.ts";
-import type { MasterBrain, MasterBrainInput, MasterEvent } from "../src/server/master/brain.ts";
+import type { MasterBrain, MasterBrainCapabilities, MasterBrainId, MasterBrainInput,
+  MasterEvent } from "../src/server/master/brain.ts";
 import type {
   MasterChatEnvelope,
   MasterChatState,
@@ -22,8 +25,10 @@ import type {
 
 /** 手で MasterEvent を流し込めるブレイン。プロセスも時計も持たない。 */
 class FakeBrain implements MasterBrain {
-  readonly id = "claude" as const;
-  readonly capabilities = {
+  constructor(readonly id: MasterBrainId = "claude") {
+    this.capabilities = { ...this.capabilities, cost: id === "claude" };
+  }
+  readonly capabilities: MasterBrainCapabilities = {
     partialText: true,
     thinking: true,
     permissionPrompt: true,
@@ -39,6 +44,7 @@ class FakeBrain implements MasterBrain {
   /** createBrain に渡ってきたオプション（PR-M3 の partial 有効化の検証用）。 */
   createOpts: { includePartialMessages: boolean } | null = null;
   started: { resumeSessionId: string | null } | null = null;
+  failStart = false;
   readonly sent: string[] = [];
   /** send() に渡った入力そのもの（PR-M4 の画像添付検証用）。 */
   readonly inputs: MasterBrainInput[] = [];
@@ -52,6 +58,7 @@ class FakeBrain implements MasterBrain {
 
   start(opts: { resumeSessionId: string | null }): Promise<void> {
     this.started = { resumeSessionId: opts.resumeSessionId };
+    if (this.failStart) return Promise.reject(new Error("synthetic startup failure"));
     this.closed = false;
     return Promise.resolve();
   }
@@ -128,7 +135,9 @@ interface Harness {
   rateLimits: Partial<UsageRateLimits>[];
 }
 
-function makeSession(opts: { snapshotLimit?: number } = {}): Harness {
+function makeSession(opts: { snapshotLimit?: number; brainId?: MasterBrainId; registeredConversations?: boolean;
+  failStart?: boolean; configureBrain?: (brain: FakeBrain, index: number) => void;
+  configureHandlers?: (handlers: MasterSessionHandlers) => void } = {}): Harness {
   const brains: FakeBrain[] = [];
   const h: Omit<Harness, "session" | "brains"> = {
     events: [],
@@ -151,9 +160,10 @@ function makeSession(opts: { snapshotLimit?: number } = {}): Harness {
     onRateLimits: (_id, limits) => h.rateLimits.push(limits),
     onRegistryChange: () => {},
   };
+  opts.configureHandlers?.(handlers);
   const session = new MasterSession({
     id: "master",
-    brainId: "claude",
+    brainId: opts.brainId ?? "claude",
     cwd: "/tmp",
     model: "opus",
     permissionMode: "auto",
@@ -163,10 +173,13 @@ function makeSession(opts: { snapshotLimit?: number } = {}): Harness {
     logPath: null,
     handlers,
     ...(opts.snapshotLimit === undefined ? {} : { snapshotLimit: opts.snapshotLimit }),
+    ...(opts.registeredConversations ? { registeredConversations: true } : {}),
     restartPolicy: { baseDelayMs: 5, maxDelayMs: 10, maxConsecutiveFailures: 3, minHealthyMs: 10_000 },
-    createBrain: (_id, o) => {
-      const b = new FakeBrain();
+    createBrain: (id, o) => {
+      const b = new FakeBrain(id);
+      b.failStart = opts.failStart ?? false;
       b.createOpts = { includePartialMessages: o.includePartialMessages };
+      opts.configureBrain?.(b, brains.length);
       brains.push(b);
       return b;
     },
@@ -176,6 +189,47 @@ function makeSession(opts: { snapshotLimit?: number } = {}): Harness {
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+test("registered conversation only displays results addressed to its current thread, including browser-started authored Tasks", async () => {
+  const h = makeSession({ registeredConversations: true, configureBrain: brain => { brain.sessionId = () => "current-thread"; } });
+  try {
+    await h.session.start(); const before = h.events.length;
+    const result: TaskResultSummary = { id: "a".repeat(64), createdAt: "2026-10-03T00:00:00Z", runId: "run",
+      title: "Authored result", project: "fixture", taskId: "TASK", version: 1, configSha256: "b".repeat(64),
+      sourceSha256: "c".repeat(64), status: "ready_for_review", verificationOutcome: "passed", acceptedBy: null,
+      reviewId: null, reason: null, origin: { kind: "browser" },
+      createdBy: { kind: "master", masterId: "master", threadId: "old-thread", turnId: "plan-turn", callId: "plan-call" },
+      delivery: { state: "pending", threadId: null, turnId: null } };
+    h.session.notifyTaskResult(result); assert.equal(h.events.length, before);
+    h.session.notifyTaskResult({ ...result, createdBy: { ...result.createdBy!, threadId: "current-thread" } });
+    assert.equal(h.events.length, before + 1); assert.equal(h.events.at(-1)!.threadId, "current-thread");
+    assert.deepEqual(h.brains[0].sent, []);
+    h.session.notifyTaskResult({ ...result, origin: { ...result.createdBy!, kind: "master" }, createdBy: undefined });
+    assert.equal(h.events.length, before + 1);
+  } finally { await h.session.stop(); }
+});
+test("Task notification belongs to its Master, updates its card, and never sends a user or provider turn", async () => {
+  const h = makeSession({ configureBrain: brain => { brain.sessionId = () => "origin-thread"; } });
+  try {
+    await h.session.start();
+    const result: TaskResultSummary = { id: "a".repeat(64), createdAt: "2026-10-01T00:00:00Z", runId: "run",
+      title: "Task result", project: "synthetic", taskId: "TASK", version: 1, configSha256: "b".repeat(64),
+      sourceSha256: "c".repeat(64), status: "ready_for_review", verificationOutcome: "passed", acceptedBy: null,
+      reviewId: null, reason: null, origin: { kind: "master", masterId: "master", threadId: "origin-thread", turnId: "turn", callId: "call" },
+      delivery: { state: "pending", threadId: null, turnId: null } };
+    h.session.notifyTaskResult({ ...result, origin: { kind: "browser" } });
+    h.session.notifyTaskResult({ ...result, origin: { ...result.origin, kind: "master", masterId: "other", threadId: "other", turnId: "turn", callId: "call" } });
+    assert.equal(h.events.length, 0);
+    h.session.notifyTaskResult(result); h.session.notifyTaskResult(result);
+    assert.equal(h.events.length, 1); assert.equal(h.events[0].event.kind, "taskResult");
+    assert.equal(h.session.state, "idle"); assert.deepEqual(h.brains[0].sent, []);
+    h.session.notifyTaskResult({ ...result, delivery: { state: "completed", threadId: "origin-thread", turnId: "response" } });
+    assert.equal(h.events.length, 2); assert.equal(h.events.some(e => e.event.kind === "user"), false);
+    assert.equal(h.session.snapshot().events.length, 2); assert.deepEqual(h.brains[0].sent, []);
+    h.brains[0].sessionId = () => "new-thread";
+    h.session.notifyTaskResult({ ...result, id: "d".repeat(64) });
+    assert.equal(h.events.length, 2); assert.deepEqual(h.brains[0].sent, []);
+  } finally { await h.session.stop(); }
+});
 /** イベントが n 件たまるまで待つ（タイムアウトしたらそのまま返す）。 */
 async function waitEvents(h: Harness, n: number, ms = 1000): Promise<void> {
   const until = Date.now() + ms;
@@ -360,6 +414,83 @@ test("プロセス死亡 → --resume <sessionId> で自動復帰する（R1）"
   await h.session.stop();
 });
 
+test("Codex master の終了後は結果照合まで自動 resume しない", async () => {
+  const h = makeSession({ brainId: "codex" });
+  await h.session.start();
+  h.brains[0]!.emit({ kind: "session", sessionId: "codex-thread-a",
+    model: "gpt-6-astra", apiKeySource: null, mcpServers: [], capabilities: [] });
+  await waitEvents(h, 1);
+  h.brains[0]!.emit({ kind: "exit", code: 1, signal: null });
+  h.brains[0]!.close();
+  await sleep(50);
+  assert.equal(h.brains.length, 1);
+  assert.equal(h.session.state, "stopped");
+  assert.equal(h.notices.some((text) => text.includes("Codex master は自動復帰しません")), true);
+  await h.session.stop();
+});
+
+test("Codex master の起動失敗は自動再試行しない", async () => {
+  const h = makeSession({ brainId: "codex", failStart: true });
+  await h.session.start();
+  await sleep(50);
+  assert.equal(h.brains.length, 1);
+  assert.equal(h.session.state, "stopped");
+  assert.equal(h.notices.some((text) => text.includes("Codex master は自動復帰しません")), true);
+  await h.session.stop();
+});
+
+test("Codex master の手動新規会話は結果照合経路ができるまで拒否する", async () => {
+  const h = makeSession({ brainId: "codex" });
+  await h.session.start();
+  await assert.rejects(h.session.newConversation(), /結果照合とrun台帳/);
+  assert.equal(h.brains.length, 1);
+  assert.equal(h.session.state, "idle");
+  await h.session.stop();
+});
+
+test("Codex master は実行中の二重送信を拒否し、turn終了後に受け付ける", async () => {
+  const h = makeSession({ brainId: "codex" });
+  await h.session.start();
+  assert.equal((await h.session.sendUserText("first")).accepted, true);
+  const second = await h.session.sendUserText("second");
+  assert.equal(second.accepted, false);
+  assert.equal(h.brains[0]!.sent.length, 1);
+  assert.equal(h.events.filter((e) => e.event.kind === "user").length, 1);
+  h.brains[0]!.emit({ kind: "turnEnd", ok: true, aborted: false,
+    usage: null, costUsd: null, errorText: null });
+  await waitEvents(h, 2);
+  assert.equal((await h.session.sendUserText("third")).accepted, true);
+  assert.deepEqual(h.brains[0]!.sent, ["first", "third"]);
+  await h.session.stop();
+});
+
+test("Codex master の投入ACKが無いと発話を受入済みにせず停止する", async () => {
+  const h = makeSession({ brainId: "codex" });
+  await h.session.start();
+  h.brains[0]!.ackResult = false;
+  const result = await h.session.sendUserText("uncertain");
+  assert.equal(result.accepted, false);
+  assert.equal(h.session.state, "stopped");
+  assert.equal(h.events.some((e) => e.event.kind === "user"), false);
+  assert.equal((await h.session.sendUserText("retry")).accepted, false);
+  await h.session.stop();
+});
+
+test("Codex のusageは費用未取得を0 USDへ変換しない", async () => {
+  const h = makeSession({ brainId: "codex" });
+  await h.session.start();
+  h.brains[0]!.emit({ kind: "turnEnd", ok: true, aborted: false,
+    usage: { input: 10, output: 2, cacheRead: 3, cacheCreation: 0,
+      contextTokens: 10, contextSize: 100, contextUsedPct: 10 },
+    costUsd: null, errorText: null });
+  await waitEvents(h, 1);
+  assert.equal(h.usages.at(-1)?.costUsd, null);
+  const event = h.events.at(-1)?.event;
+  assert.equal(event?.kind, "turnEnd");
+  if (event?.kind === "turnEnd") assert.equal(event.totalCostUsd, null);
+  await h.session.stop();
+});
+
 test("停止（stop）後は自動復帰しない", async () => {
   const h = makeSession();
   await h.session.start();
@@ -473,6 +604,152 @@ test("新しい会話の直後も送信できる（新プロセスの stdin へ�
   const r = await h.session.sendUserText("最初の一言");
   assert.equal(r.accepted, true);
   assert.deepEqual(h.brains[1]!.sent, ["最初の一言"]);
+});
+
+test("会話切替中の二重要求と入力を拒否し、サーバ終了を取り消さない", async () => {
+  let entered!: () => void, release!: () => void;
+  const stopEntered = new Promise<void>(resolve => { entered = resolve; });
+  const stopHeld = new Promise<void>(resolve => { release = resolve; });
+  const h = makeSession({ configureBrain: (brain, index) => {
+    if (index !== 0) return;
+    brain.stop = async () => { brain.stopped++; entered(); await stopHeld; brain.close(); };
+  } });
+  await h.session.start();
+  const reset = h.session.newConversation();
+  const resetRejected = assert.rejects(reset, /サーバ終了/);
+  await stopEntered;
+  assert.equal(h.session.state, "starting");
+  await assert.rejects(h.session.newConversation(), /新しい要求は開始していません/);
+  assert.equal((await h.session.sendUserText("keep unsent")).accepted, false);
+  assert.deepEqual(await h.session.deliverFromEbi({ from: "worker", kind: "reply", message: "late", body: "late" }),
+    { ok: false, confirmed: false });
+  await assert.rejects(h.session.answer("old-question", { allow: true }), /起動していません/);
+  let stopped = false;
+  const shutdown = h.session.stop().then(() => { stopped = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(stopped, false); assert.equal(h.brains[0].stopped, 1);
+  release(); await resetRejected; await shutdown;
+  assert.equal(h.session.state, "stopped"); assert.equal(h.brains.length, 1);
+  assert.equal(h.events.some(event => ["cleared", "user", "inbound"].includes(event.event.kind)), false);
+  await assert.rejects(h.session.newConversation(), /新しい要求は開始していません/);
+  await assert.rejects(h.session.start(), /すでに要求/);
+});
+
+test("初回ログ読取前から起動を保護し、会話切替と終了がbrain所有権を奪わない", async () => {
+  const h = makeSession();
+  const start = h.session.start();
+  assert.equal(h.session.state, "starting");
+  await assert.rejects(h.session.newConversation(), /新しい要求は開始していません/);
+  await start;
+  assert.equal(h.brains.length, 1); assert.equal(h.session.state, "idle");
+  assert.equal((await h.session.sendUserText("owned input")).accepted, true);
+  await h.session.stop(); assert.equal(h.brains[0].stopped, 1);
+
+  const stoppedBeforeLaunch = makeSession();
+  const prelaunch = stoppedBeforeLaunch.session.start();
+  const shutdown = stoppedBeforeLaunch.session.stop();
+  await Promise.all([prelaunch, shutdown]);
+  assert.equal(stoppedBeforeLaunch.brains.length, 0);
+  assert.equal(stoppedBeforeLaunch.session.state, "stopped");
+  assert.equal(stoppedBeforeLaunch.events.length, 0);
+});
+
+test("表示通知の例外で既知の会話切替を取り消したり、新brainを孤立させない", async () => {
+  const h = makeSession({ configureHandlers: handlers => {
+    const event = handlers.onEvent;
+    handlers.onEvent = (id, envelope) => {
+      if (envelope.event.kind === "cleared") throw Error("synthetic display observer failed");
+      event(id, envelope);
+    };
+    handlers.onState = () => { throw Error("synthetic state observer failed"); };
+    handlers.onRegistryChange = () => { throw Error("synthetic registry observer failed"); };
+  } });
+  await h.session.start(); await h.session.newConversation();
+  assert.equal(h.session.state, "idle"); assert.equal(h.brains.length, 2);
+  assert.equal(h.session.snapshot().events.filter(event => event.event.kind === "cleared").length, 1);
+  assert.equal(h.notices.some(notice => notice.includes("会話表示への通知に失敗")), true);
+  assert.equal((await h.session.sendUserText("replacement stays owned")).accepted, true);
+  await h.session.stop(); assert.equal(h.brains[1].stopped, 1);
+  assert.equal(h.session.record().pid, null);
+});
+
+test("会話境界で過去の未回答を除外し、同じIDの新しい質問だけを復元する", () => {
+  const question = { kind: "question" as const, id: "reused", header: "確認", question: "合成",
+    options: [{ label: "続ける", description: "合成" }], multi: false };
+  const events: MasterChatEnvelope[] = [{ seq: 1, ts: 1, event: question }, { seq: 2, ts: 2, event: { kind: "cleared" } }];
+  assert.deepEqual(unsettledRequestIds(events), []);
+  events.push({ seq: 3, ts: 3, event: question });
+  assert.deepEqual(unsettledRequestIds(events), ["reused"]);
+  events.push({ seq: 4, ts: 4, event: { kind: "permissionSettled", id: "reused", outcome: "discarded", answer: null } });
+  assert.deepEqual(unsettledRequestIds(events), []);
+});
+
+test("新しい統括の起動失敗では区切りと使用量消去を出さず、自動再実行しない", async () => {
+  const h = makeSession({ configureBrain: (brain, index) => { if (index === 1) brain.failStart = true; } });
+  await h.session.start();
+  h.brains[0].emit({ kind: "turnEnd", ok: true, aborted: false, usage: null, costUsd: 1.5, errorText: null });
+  h.brains[0].emit({ kind: "question", id: "old-question", header: "確認", question: "終了する確認",
+    options: [{ label: "続ける", description: "合成" }], multi: false });
+  await waitEvents(h, 2);
+  await assert.rejects(h.session.newConversation(), /表示と使用量は保持/);
+  assert.equal(h.session.totalCostUsd, 1.5); assert.equal(h.session.state, "stopped");
+  assert.equal(h.events.some(event => event.event.kind === "cleared"), false);
+  assert.equal(h.brains[0].stopped, 1); assert.equal(h.brains[1].stopped, 1);
+  assert.equal(h.events.filter(event => event.event.kind === "permissionSettled" && event.event.id === "old-question" &&
+    event.event.outcome === "discarded").length, 1);
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(h.brains.length, 2);
+  await h.session.stop();
+});
+
+test("起動待ち中の終了は起動完了まで待ち、会話を待機中へ戻さない", async () => {
+  for (const replacement of [false, true]) {
+    let entered!: () => void, release!: () => void;
+    const startEntered = new Promise<void>(resolve => { entered = resolve; });
+    const startHeld = new Promise<void>(resolve => { release = resolve; });
+    const h = makeSession({ configureBrain: (brain, index) => {
+      if (index !== (replacement ? 1 : 0)) return;
+      brain.start = async options => { brain.started = options; entered(); await startHeld; };
+    } });
+    if (replacement) await h.session.start();
+    const start = replacement ? h.session.newConversation() : h.session.start();
+    const observedStart = replacement ? assert.rejects(start, /起動を確認できません/) : start;
+    await startEntered;
+    let stopped = false;
+    const shutdown = h.session.stop().then(() => { stopped = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(stopped, false, String(replacement));
+    release(); await observedStart; await shutdown;
+    assert.equal(h.session.state, "stopped");
+    assert.equal(h.events.some(event => event.event.kind === "cleared"), false);
+    assert.equal((await h.session.sendUserText("must stay unsent")).accepted, false);
+    assert.equal(h.brains.at(-1)!.stopped >= 1, true);
+  }
+});
+
+test("区切りは新しい起動を確認した後、そのsessionイベントより先に記録する", async () => {
+  const h = makeSession({ configureBrain: (brain, index) => {
+    if (index !== 1) return;
+    const start = brain.start.bind(brain);
+    brain.start = async options => { await start(options); brain.emit({ kind: "session", sessionId: "new-session",
+      model: "opus", apiKeySource: null, mcpServers: [{ name: "ebi-control", status: "connected" }], capabilities: [] }); };
+  } });
+  await h.session.start(); await h.session.newConversation(); await waitEvents(h, 2);
+  assert.deepEqual(h.events.map(event => event.event.kind), ["cleared", "session"]);
+  await h.session.stop();
+});
+
+test("旧プロセスの終了が不明なら、新規起動も会話の消去も行わない", async () => {
+  const h = makeSession({ configureBrain: (brain, index) => {
+    if (index === 0) brain.stop = async () => { throw new Error("synthetic stop not confirmed"); };
+  } });
+  await h.session.start();
+  await assert.rejects(h.session.newConversation(), /stop not confirmed/);
+  assert.equal(h.brains.length, 1); assert.equal(h.session.state, "stopped");
+  assert.equal(h.events.some(event => event.event.kind === "cleared"), false);
+  assert.equal((await h.session.sendUserText("blocked")).accepted, false);
+  h.brains[0].stop = async () => { h.brains[0].close(); };
+  await h.session.stop();
 });
 
 // ===== PR-M4（入力系）=====

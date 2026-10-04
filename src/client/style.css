@@ -707,6 +707,25 @@ button:hover { filter: brightness(1.07); }
   .pane-term { touch-action: pan-y; padding: 2px; }
 }
 
+/* Phone width: keep every terminal key visible without a hidden horizontal tail. */
+@media (max-width: 480px) {
+  .key-assist:not([hidden]) {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 4px;
+    overflow-x: hidden;
+  }
+  .key-assist .ka-btn { min-width: 0; min-height: 44px; padding: 6px 0; }
+  .key-assist [data-key="esc"] { grid-area: 1 / 1; }
+  .key-assist [data-key="tab"] { grid-area: 1 / 2; }
+  .key-assist [data-key="ctrl"] { grid-area: 1 / 3; }
+  .key-assist [data-key="c-c"] { grid-area: 1 / 4; }
+  .key-assist [data-key="left"] { grid-area: 2 / 1; }
+  .key-assist [data-key="up"] { grid-area: 2 / 2; }
+  .key-assist [data-key="down"] { grid-area: 2 / 3; }
+  .key-assist [data-key="right"] { grid-area: 2 / 4; }
+}
+
 /* 空状態（未選択 / 全 agent 終了）。stage 中央に表示。 */
 .empty {
   flex: 1 1 auto;

@@ -1,4 +1,28 @@
-# 🦐 ebi-team
+# Negi-Teams
+
+Negi-Teamsの[Phase 0〜8実装・受入の現在地](docs/negi-teams-implementation-status.md)に、実証済みの範囲と残る判断をまとめています。
+
+UIは[Material 3 Expressiveに再設計](docs/negi-teams/material3-expressive-ui.md)しました。作業一覧を入口に、Taskの実行と成果レビューへ移動します。PCのナビゲーションrail・一覧/詳細・レビュー操作paneと、スマホの下部ナビゲーション・単一詳細を用意しています。以下の接続・運用機能は元のebi-teamを基盤にしています。
+
+Negi-Teams Phase 0–1 の読み取り専用 Codex 履歴診断は [導入・検証手順](docs/negi-teams-phase0-phase1.md) を参照してください。既存の実行機能とは独立したローカル CLI です。
+
+Phase 2 の最小Vault連携は [Vaultの利用手順](docs/negi-teams-phase2.md) を参照してください。ID付きMarkdownの検証、ローカル検索、Context Pack生成を行います。
+
+Phase 3 の[単一タスク台帳とCodex通信層](docs/negi-teams-phase3-offline.md)はmockで検証し、[隔離checkoutでの実接続記録](docs/negi-teams-phase3-live.md)でAstra→Solの1件を確認しました。[Vault Task実行画面](docs/negi-teams-task-ui.md)から開始・停止・操作承認・成果レビューを行えます。旧worker経路の全面移行と実成果の人間受入は未完了です。
+
+照合待ちのTaskは同じ画面で保存済み実行・差分・成果・操作許可を確認できます。WindowsではJob所属プロセスの終了を記録しますが、外部サービス経由を含む起動済み処理全体の終了証明は未実装のため、実Taskの照合終了・実行枠の解放は保留します。確認から新しいモデルturnや再実行は開始しません。
+
+結果通知は修正版・受入・取消ごとに版を追加し、古い通知と伝達記録を保持します。作業一覧は最新、チャットは履歴を表示し、委任元の同じ会話への次の送信に最新の有効な通知だけを添えます。[通知形式の更新と残留lockの運用](docs/negi-teams-master-task-tools.md#通知の版更新と運用2026-10-02)を確認してください。
+
+Phase 4 の[単一スケジューラと差分統合](docs/negi-teams-phase4.md)は、実行枠・依存・書込競合・結果不明の停止を管理します。登録Taskの並行実行CLIと、最新の検証済み成果を別clean checkoutへ統合するCLIを実文書で確認しました。明示登録した統合成果も共通レビュー画面で固定版を確認し、署名付き受入・取消を行えます。実成果の人間受入と既存起動経路への全面接続は未完了です。
+
+Phase 5 の[Jev shadow 接続の初期検証](docs/negi-teams-phase5.md)では、実際のJevへの小規模な判定と、外部送信・予算・重複送信を制限するローカル経路を確認しました。人間校正とactive化は未完了です。
+
+Phase 6 の[レビューと知識循環](docs/negi-teams-phase6.md)は、認証付き自由文からLesson候補を作り、別の明示知識承認を経て次のTaskへ参照を渡します。Material 3 Expressiveの知識画面で適用範囲・反例・失効を管理し、分類と根拠の版/hashを照合します。成果の受入・取消は別操作です。通常workerへの差戻し、複数事例の照合、Policyへの昇格は未完了です。
+
+Phase 7 の[限定比較とPolicy版管理の基礎](docs/negi-teams-phase7.md)は、同一条件での実モデル比較と人間承認を要する設定版の遷移を記録します。2件の比較では時間の改善方向が分かれ、Policyは有効化していません。
+
+Phase 8 の[モバイル表示とローカル認証の限定修正](docs/negi-teams-phase8.md)では、狭幅で隠れていた入力補助キーを表示し、共有トークンのブラウザ保存を廃止しました。読み取り専用Codex Masterのチャット1turnと、合成Taskの操作承認・成果受入・取消をChromiumで確認しました。実機と実成果の人間受入は未確認です。
 
 Claude Code CLI の上に複数のエージェント（本プロジェクトでは「エビ」と呼びます）をオーケストレーションし、localhost の Web UI から一括で見て・触れて・操作できるようにする開発支援ツールです。
 
@@ -188,7 +212,7 @@ ops/clean-generated-images.sh --dry-run                            # ~/.codex/ge
 
 バックエンドの解決順は **spawn 引数 `backend` > 役割の `backend` > `defaultBackend` > env `EBI_BACKEND` > `claude`**。未実装・未知の id は黙って claude に落とさず明示エラーになります。**master（統括役）は何を設定しても常に claude 固定**です（統括系を落とさないための fail-safe）。後述の「master チャット UI」で `brain` を明示したときだけ、master の頭脳を別 CLI にできます（既定は claude）。
 
-spawn 時の明示指定は master の MCP ツール（`spawn_ebi` / `spawn_engineer` / `send_message` の `backend` 引数）、制御API（`POST /control/spawn` の `backend`）、UI ヘッダの backend セレクトから行えます。
+spawn 時の明示指定は master の MCP ツール（`spawn_ebi` / `spawn_engineer` / `send_message` の `backend` 引数）、制御API（`POST /control/spawn` の `backend`）、UIの「担当を追加」ダイアログの接続先から行えます。
 
 `permissionMode` は抽象語彙で、各 CLI のフラグへ写像されます（**`plan` の厳密な等価物は codex / gemini に無く近似**です）。
 

@@ -21,6 +21,7 @@
 
 import { toCodexConfigArgs, toCodexProjectsTrustArgs } from "./mcpSpec.ts";
 import { CODEX_TRAITS } from "./profiles.ts";
+import { matchesCommandName } from "./commandName.ts";
 import type {
   BackendEnvInput,
   BackendLaunchInput,
@@ -96,7 +97,7 @@ export const CODEX_BACKEND: EbiBackend = {
   defaultCommand: "codex",
 
   matches(command: string): boolean {
-    return command === "codex" || command.endsWith("/codex");
+    return matchesCommandName(command, "codex");
   },
 
   /**

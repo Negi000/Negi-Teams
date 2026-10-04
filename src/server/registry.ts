@@ -10,7 +10,7 @@ import {
 } from "./agent.ts";
 import { Mailbox } from "./mailbox.ts";
 import { logDelivery } from "./deliveryLog.ts";
-import { resolveBackend } from "./backends/index.ts";
+import { getBackend, resolveBackend } from "./backends/index.ts";
 import {
   BROADCAST_TARGET,
   type AgentMode,
@@ -129,8 +129,8 @@ export function isNotifyMode(): boolean {
  * 事前判定に使う（無ければ PTY へ即フォールバックして無駄な待ちを作らない）。
  */
 export function hasControlBridge(agent: Pick<Agent, "launch">): boolean {
-  const { command, args, env } = agent.launch;
-  const backend = resolveBackend(command);
+  const { command, args, env, backend: explicit } = agent.launch;
+  const backend = explicit ? getBackend(explicit) : resolveBackend(command);
   return backend !== null && backend.hasControlBridge(args, env ?? {});
 }
 
@@ -141,7 +141,8 @@ export function hasControlBridge(agent: Pick<Agent, "launch">): boolean {
  * command がどの backend にも一致しないスタブ起動は従来どおり true（判定は hasControlBridge 側に任せる）。
  */
 export function supportsChannelInject(agent: Pick<Agent, "launch">): boolean {
-  const backend = resolveBackend(agent.launch.command);
+  const backend = agent.launch.backend ? getBackend(agent.launch.backend) :
+    resolveBackend(agent.launch.command);
   return backend === null ? true : backend.supportsChannelInject;
 }
 

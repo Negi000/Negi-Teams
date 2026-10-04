@@ -11,6 +11,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildSpawnEnv } from "../src/server/agent.ts";
 
+test("parent control-plane names are excluded regardless of Windows environment key case", () => {
+  const result = buildSpawnEnv({ PATH: "synthetic", negi_policy_config: "private-policy",
+    NeGi_PoLiCy_CoNfIg: "private-alias", ebi_auth_token: "private-token", NEGI_REVIEW_CONFIG: "private-review", NeGi_PoLiCy_SiGnInG_SeCrEt: "private-key" },
+    undefined, false, {}, ["NEGI_POLICY_CONFIG", "EBI_AUTH_TOKEN", "NEGI_REVIEW_CONFIG", "NEGI_POLICY_SIGNING_SECRET"]);
+  assert.equal(result.PATH, "synthetic");
+  for (const name of Object.keys(result)) assert.ok(!["NEGI_POLICY_CONFIG", "EBI_AUTH_TOKEN", "NEGI_REVIEW_CONFIG", "NEGI_POLICY_SIGNING_SECRET"].includes(name.toUpperCase()));
+});
+
 test("インライン TUI 既定 env が注入される", () => {
   const env = buildSpawnEnv({ PATH: "/usr/bin" }, undefined, true);
   assert.equal(env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN, "1");

@@ -6,6 +6,10 @@ export * from "./claudeArgs.ts";
 export * from "./claudeEvents.ts";
 export { ClaudeHeadlessBrain, CLAUDE_BRAIN_CAPABILITIES } from "./claudeBrain.ts";
 export { CodexHeadlessBrain, CODEX_BRAIN_CAPABILITIES } from "./codexBrain.ts";
+export { CodexAppServerBrain, CODEX_READ_ONLY_BRAIN_CAPABILITIES } from "./codexAppServerBrain.ts";
+export { AppServerTransport } from "./appServerTransport.ts";
+export { CodexAppServerClient } from "./appServerClient.ts";
+export { AppServerProcess } from "./appServerProcess.ts";
 
 import {
   IMPLEMENTED_MASTER_BRAIN_IDS,

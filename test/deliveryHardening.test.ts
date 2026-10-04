@@ -16,6 +16,7 @@ import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { ptyFixtureLaunch, readyPtyFixture, stopRegistry, writePtyFixture } from "./helpers/ptyFixture.ts";
 
 // deliver の待ちを短くしてテストを速くする（registry.ts はモジュール読込時に env を読む）。
 process.env.EBI_DELIVER_ACK_TIMEOUT_MS = "300";
@@ -163,15 +164,15 @@ test("echoNeedle: id が長くても針は行頭タグだけで完結する", ()
 // ===== 4. confirmed と queued の区別 =====
 
 const busySpawnConfig: SpawnConfig = {
-  command: "bash",
-  args: ["-c", "cat"],
+  command: process.execPath,
+  args: ptyFixtureLaunch(".").args,
   // busy 判定を長めに保ち、「相手が作業中」を deterministic に作る。
   idleThresholdMs: 3000,
   scrollbackBytes: 64 * 1024,
   devChannelsAllowlist: [],
 };
 const handlers: AgentHandlers = { onData() {}, onStatus() {}, onExit() {}, onNotice() {} };
-const launch = (cwd: string) => ({ command: "bash", args: ["-c", "cat"], cwd, model: null });
+const launch = (cwd: string) => ptyFixtureLaunch(cwd);
 
 const registries: InstanceType<typeof Registry>[] = [];
 function makeRegistry(mb: InstanceType<typeof Mailbox>, config = busySpawnConfig) {
@@ -179,14 +180,14 @@ function makeRegistry(mb: InstanceType<typeof Mailbox>, config = busySpawnConfig
   registries.push(r);
   return r;
 }
-afterEach(() => {
-  for (const r of registries.splice(0)) r.killAll();
+afterEach(async () => {
+  for (const r of registries.splice(0)) await stopRegistry(r);
 });
 
 test("回帰: busy で滞留した PTY 注入は confirmed:true を返さず queued として区別する", async () => {
   const mb = new Mailbox();
   const reg = makeRegistry(mb);
-  const agent = reg.spawn(".", handlers, { id: "master", launch: launch(".") });
+  const agent = await readyPtyFixture(reg.spawn(".", handlers, { id: "master", launch: launch(".") }));
 
   // idle のうちは即送信 → confirmed:true。
   const sent = await reg.deliver("master", "ebi-1", "いま送れる依頼");
@@ -195,8 +196,7 @@ test("回帰: busy で滞留した PTY 注入は confirmed:true を返さず que
   assert.equal(sent.queued, false);
 
   // 出力を起こして busy にする（cat のエコーで idle タイマが再武装される）。
-  agent.write("作業中の出力\n");
-  await sleep(120);
+  await writePtyFixture(agent, "作業中の出力\n");
   assert.equal(agent.getStatus(), "busy");
 
   const queued = await reg.deliver("master", "ebi-1", "busy 中に来た依頼");
@@ -210,9 +210,8 @@ test("回帰: busy で滞留した PTY 注入は confirmed:true を返さず que
 test("resolveAndInject / reverseInject の details にも queued が載る", async () => {
   const mb = new Mailbox();
   const reg = makeRegistry(mb);
-  const agent = reg.spawn(".", handlers, { id: "master", launch: launch(".") });
-  agent.write("作業中\n");
-  await sleep(120);
+  const agent = await readyPtyFixture(reg.spawn(".", handlers, { id: "master", launch: launch(".") }));
+  await writePtyFixture(agent, "作業中\n");
 
   const res = await reg.resolveAndInject("master", "user", "busy 中の指示");
   assert.deepEqual(res.delivered, ["master"]);
@@ -231,9 +230,8 @@ test("回帰: 滞留中の注入は agent 破棄時に無言で消さず記録�
   try {
     const mb = new Mailbox();
     const reg = makeRegistry(mb);
-    const agent = reg.spawn(".", handlers, { id: "ebi-1", launch: launch(".") });
-    agent.write("作業中\n");
-    await sleep(120);
+    const agent = await readyPtyFixture(reg.spawn(".", handlers, { id: "ebi-1", launch: launch(".") }));
+    await writePtyFixture(agent, "作業中\n");
     await reg.deliver("ebi-1", "master", "失われては困る本文");
     assert.equal(agent.pendingInjectCount(), 1);
 

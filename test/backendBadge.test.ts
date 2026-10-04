@@ -115,3 +115,12 @@ test("registry に居ない usage（kill 済み等）も行として残す（bac
   assert.equal(rows[0].backend, undefined);
   assert.equal(backendBadge(rows[0].backend).id, "unknown");
 });
+
+test("Codex chat master のApp Server観測値はPTY codex欠測と区別する", () => {
+  const master = { ...agent("master", "codex"), kind: "master" as const,
+    mode: "connected" as const };
+  const rows = mergeUsageRows([usage("master", 0)], [master]);
+  assert.equal(rows[0].chatMaster, true);
+  assert.equal(rows[0].usage?.contextUsedPct, 10);
+  assert.equal(mergeUsageRows([], [agent("pty-codex", "codex")])[0].chatMaster, false);
+});

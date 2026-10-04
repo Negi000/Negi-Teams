@@ -26,11 +26,11 @@
 //
 // 実行: node --import tsx --test test/dupDelivery.test.ts
 
-import { test, after, afterEach } from "node:test";
+import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { ptyFixtureLaunch, readyPtyFixture, stopRegistry, waitPtyFixture } from "./helpers/ptyFixture.ts";
 
 // registry.ts / agent.ts はモジュール読込時に env を読むので、動的 import より前に設定する。
 process.env.EBI_DELIVER_ACK_TIMEOUT_MS = "300";
@@ -46,31 +46,23 @@ import { deliveryTag, deliveryText } from "../src/shared/deliveryTag.ts";
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 const spawnConfig: SpawnConfig = {
-  command: "bash",
-  args: ["-c", "cat"],
-  idleThresholdMs: 150,
+  command: process.execPath,
+  args: ptyFixtureLaunch(".").args,
+  idleThresholdMs: 1000,
   scrollbackBytes: 256 * 1024,
   devChannelsAllowlist: [],
 };
+const notices: string[] = [];
 const handlers: AgentHandlers = {
   onData() {},
   onStatus() {},
   onExit() {},
-  onNotice() {},
+  onNotice(_id, text) { notices.push(text); },
 };
 
-// hasControlBridge を満たす fake claude。PTY へ書いた内容は端末エコーで **1 回だけ**
-// scrollback に現れる（`cat` にすると端末エコー＋cat 出力で 2 回になり、重複の数え上げが
-// 曖昧になるため、アプリ側の出力は捨てる）。
-const fakeClaudeDir = mkdtempSync(join(tmpdir(), "ebi-fake-claude-dup-"));
-const fakeClaude = join(fakeClaudeDir, "claude");
-writeFileSync(fakeClaude, "#!/bin/sh\nexec cat > /dev/null\n", { mode: 0o755 });
-const bridgeLaunch = (cwd: string) => ({
-  command: fakeClaude,
-  args: ["--mcp-config", "/dev/null"],
-  cwd,
-  model: null,
-});
+// Explicit Claude backend with synthetic MCP args exercises channel delivery.
+// The Node fixture echoes each input once after an observed startup marker.
+const bridgeLaunch = (cwd: string) => ptyFixtureLaunch(cwd, true);
 
 const registries: InstanceType<typeof Registry>[] = [];
 function makeRegistry(mb: InstanceType<typeof Mailbox>) {
@@ -79,10 +71,11 @@ function makeRegistry(mb: InstanceType<typeof Mailbox>) {
   registries.push(r);
   return r;
 }
-afterEach(() => {
-  for (const r of registries.splice(0)) r.killAll();
+afterEach(async () => {
+  await Promise.all([...busyDrivers].map((driver) => driver.stop()));
+  for (const r of registries.splice(0)) await stopRegistry(r);
+  notices.length = 0;
 });
-after(() => rmSync(fakeClaudeDir, { recursive: true, force: true }));
 
 /** compact 済み scrollback に needle が何回現れるか。 */
 function countOccurrences(haystack: string, needle: string): number {
@@ -97,20 +90,24 @@ function countOccurrences(haystack: string, needle: string): number {
 const compact = (s: string) => s.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").replace(/\s+/g, "");
 
 /** 対象を busy に保ち続けるドライバ（stop() で解除）。 */
+const busyDrivers = new Set<{ stop(): Promise<void> }>();
 function keepBusy(agent: { write(d: string): void }) {
   let stopped = false;
   const loop = (async () => {
     while (!stopped) {
-      agent.write(".");
+      agent.write(".\n");
       await sleep(60);
     }
   })();
-  return {
+  const driver = {
     async stop() {
       stopped = true;
       await loop;
+      busyDrivers.delete(driver);
     },
   };
+  busyDrivers.add(driver);
+  return driver;
 }
 
 const BODY = "報告ID R-001 二重配送の調査が完了しました";
@@ -140,13 +137,13 @@ function renderChannelLine(from: string, body: string, msgId: number, columns = 
 test("錠前: notification 経路と PTY 注入経路の行頭タグ表記が完全一致する", async () => {
   const mb = new Mailbox();
   const reg = makeRegistry(mb);
-  const agent = reg.spawn(".", handlers, { id: "ebi-tag", launch: bridgeLaunch(".") });
+  const agent = await readyPtyFixture(reg.spawn(".", handlers, { id: "ebi-tag", launch: bridgeLaunch(".") }));
 
   // notification 経路が組み立てる本文（src/mcp/control-server.ts と同じ deliveryText）。
   const viaNotify = deliveryText("master", BODY, 90);
   // PTY 注入経路が stdin へ書く本文（Agent.inject の内部と同じ組み立て）。
   agent.inject("master", BODY, undefined, 90);
-  await sleep(300);
+  await waitPtyFixture(agent, a => compact(a.getScrollback()).includes(compact(viaNotify)), "render injected text");
 
   assert.ok(
     compact(agent.getScrollback()).includes(compact(viaNotify)),
@@ -162,11 +159,11 @@ test("錠前: notification 経路と PTY 注入経路の行頭タグ表記が完
 test("回帰(和文長文): 表示幅で切り詰められてもタグで照合が成立し、PTY 注入が抑止される", async () => {
   const mb = new Mailbox();
   const reg = makeRegistry(mb);
-  const master = reg.spawn(".", handlers, {
+  const master = await readyPtyFixture(reg.spawn(".", handlers, {
     id: "master",
     kind: "master",
     launch: bridgeLaunch("."),
-  });
+  }));
 
   // 実障害と同じ形の和文長文（旧実装ではこれが 100% 二重着弾していた）。
   const jaBody =
@@ -181,7 +178,7 @@ test("回帰(和文長文): 表示幅で切り詰められてもタグで照合�
   })();
 
   const busy = keepBusy(master);
-  await sleep(200); // busy を確立させる
+  await waitPtyFixture(master, a => a.getStatus() === "busy", "become busy");
   const out = await reg.deliver("master", "vc-lp", jaBody, "reply");
   await bridge;
 
@@ -195,11 +192,11 @@ test("回帰(和文長文): 表示幅で切り詰められてもタグで照合�
     "前提確認: 本文先頭 24 文字は描画に現れない（旧方式の針では原理的に一致しなかった）",
   );
   master.write(`${rendered}\n`);
-  await sleep(200);
+  await waitPtyFixture(master, a => compact(a.getScrollback()).includes(compact(rendered)), "render channel text");
 
   // idle 復帰 → flush（guard がタグを再照合して注入を取りやめるはず）。
   await busy.stop();
-  await sleep(1500);
+  await waitPtyFixture(master, () => notices.some(text => text.startsWith("idle 復帰: 保留していた注入")), "finish guarded queue flush");
 
   const seen = compact(master.getScrollback());
   assert.equal(
@@ -219,11 +216,11 @@ test("回帰(和文長文): 表示幅で切り詰められてもタグで照合�
 test("回帰: busy で echo-timeout → 滞留した注入は、channel 行が描画されたら flush 時に抑止される", async () => {
   const mb = new Mailbox();
   const reg = makeRegistry(mb);
-  const master = reg.spawn(".", handlers, {
+  const master = await readyPtyFixture(reg.spawn(".", handlers, {
     id: "master",
     kind: "master",
     launch: bridgeLaunch("."),
-  });
+  }));
 
   // ブリッジ役: ack は返す（＝notification は確かに転送された）が、
   // busy な harness はまだ本文を描画しない。
@@ -235,7 +232,7 @@ test("回帰: busy で echo-timeout → 滞留した注入は、channel 行が�
   })();
 
   const busy = keepBusy(master);
-  await sleep(200); // busy を確立させる
+  await waitPtyFixture(master, a => a.getStatus() === "busy", "become busy");
   const out = await reg.deliver("master", "vc-lp", BODY, "reply");
   await bridge;
 
@@ -244,11 +241,11 @@ test("回帰: busy で echo-timeout → 滞留した注入は、channel 行が�
 
   // harness が遅れて channel 本文を描画した（＝1 通目は実際に届いていた）。
   master.write(`ebi-control: ${deliveryText("vc-lp", `[reply] ${BODY}`, msgId)}\n`);
-  await sleep(200);
+  await waitPtyFixture(master, a => compact(a.getScrollback()).includes(compact(deliveryText("vc-lp", `[reply] ${BODY}`, msgId))), "render channel text");
 
   // idle 復帰 → flush（guard がエコーを再照合して注入を取りやめるはず）。
   await busy.stop();
-  await sleep(1500);
+  await waitPtyFixture(master, () => notices.some(text => text.startsWith("idle 復帰: 保留していた注入")), "finish guarded queue flush");
 
   const seen = compact(master.getScrollback());
   assert.equal(
@@ -261,11 +258,11 @@ test("回帰: busy で echo-timeout → 滞留した注入は、channel 行が�
 test("channel 行が描画されない場合は従来どおり flush で注入する（取りこぼさない）", async () => {
   const mb = new Mailbox();
   const reg = makeRegistry(mb);
-  const master = reg.spawn(".", handlers, {
+  const master = await readyPtyFixture(reg.spawn(".", handlers, {
     id: "master",
     kind: "master",
     launch: bridgeLaunch("."),
-  });
+  }));
 
   let msgId = 0;
   const bridge = (async () => {
@@ -275,14 +272,15 @@ test("channel 行が描画されない場合は従来どおり flush で注入�
   })();
 
   const busy = keepBusy(master);
-  await sleep(200);
+  await waitPtyFixture(master, a => a.getStatus() === "busy", "become busy");
   const out = await reg.deliver("master", "vc-lp", BODY, "reply");
   await bridge;
   assert.equal(out.queued, true);
 
   // 描画は起きない（harness が channel を捨てたケース）。
   await busy.stop();
-  await sleep(1500);
+  await waitPtyFixture(master, a => notices.some(text => text.startsWith("idle 復帰: 保留していた注入")) &&
+    compact(a.getScrollback()).includes(compact(BODY)), "render queue flush");
 
   const seen = compact(master.getScrollback());
   assert.equal(
@@ -299,12 +297,13 @@ test("channel 行が描画されない場合は従来どおり flush で注入�
 test("idle な相手への guard 付き注入も、書く直前に描画済みなら suppressed（重複を作らない）", async () => {
   const mb = new Mailbox();
   const reg = makeRegistry(mb);
-  const agent = reg.spawn(".", handlers, { id: "ebi-9", launch: bridgeLaunch(".") });
+  const agent = await readyPtyFixture(reg.spawn(".", handlers, { id: "ebi-9", launch: bridgeLaunch(".") }));
 
   const mark = agent.scrollbackMark();
   // エコー確認の締切「直後」に描画されたケース（deliver は既にフォールバックを決めている）。
   agent.write(`ebi-control: ${deliveryText("vc-lp", `[reply] ${BODY}`, 12)}\n`);
-  await sleep(400); // idle 化 ＋ 描画の反映を待つ
+  await waitPtyFixture(agent, a => a.getStatus() === "idle" &&
+    compact(a.getScrollback()).includes(compact(deliveryText("vc-lp", `[reply] ${BODY}`, 12))), "render channel text and become idle");
 
   let suppressed = 0;
   const state = agent.inject(
@@ -327,13 +326,14 @@ test("idle な相手への guard 付き注入も、書く直前に描画済み�
 test("回帰: 別の msgId の描画では抑止しない（取りこぼしを作らない）", async () => {
   const mb = new Mailbox();
   const reg = makeRegistry(mb);
-  const agent = reg.spawn(".", handlers, { id: "ebi-11", launch: bridgeLaunch(".") });
+  const agent = await readyPtyFixture(reg.spawn(".", handlers, { id: "ebi-11", launch: bridgeLaunch(".") }));
 
   const mark = agent.scrollbackMark();
   // 直前に届いた **別の** メッセージ（msgId=12）の描画。これを根拠に msgId=13 を抑止しては
   // ならない（本文が似ていても別配送＝取りこぼしになる）。
   agent.write(`ebi-control: ${deliveryText("vc-lp", `[reply] ${BODY}`, 12)}\n`);
-  await sleep(400);
+  await waitPtyFixture(agent, a => a.getStatus() === "idle" &&
+    compact(a.getScrollback()).includes(compact(deliveryText("vc-lp", `[reply] ${BODY}`, 12))), "render channel text and become idle");
 
   const state = agent.inject(
     "vc-lp",
@@ -341,7 +341,7 @@ test("回帰: 別の msgId の描画では抑止しない（取りこぼしを�
     { tag: deliveryTag("vc-lp", 13), mark },
     13,
   );
-  await sleep(300);
+  await waitPtyFixture(agent, a => compact(a.getScrollback()).includes(compact(deliveryText("vc-lp", `[reply] ${BODY}`, 13))), "render the distinct message");
 
   assert.equal(state, "sent", "別 msgId の描画は抑止の根拠にしない");
   assert.ok(
@@ -353,12 +353,12 @@ test("回帰: 別の msgId の描画では抑止しない（取りこぼしを�
 test("guard が無い通常の注入（PTY 専用経路）は従来どおり必ず送る", async () => {
   const mb = new Mailbox();
   const reg = makeRegistry(mb);
-  const agent = reg.spawn(".", handlers, { id: "ebi-10", launch: bridgeLaunch(".") });
+  const agent = await readyPtyFixture(reg.spawn(".", handlers, { id: "ebi-10", launch: bridgeLaunch(".") }));
   agent.write(`ebi-control: [from:master] ${BODY}\n`);
-  await sleep(400);
+  await waitPtyFixture(agent, a => a.getStatus() === "idle" && compact(a.getScrollback()).includes(compact(BODY)), "render original text and become idle");
 
   const state = agent.inject("master", BODY);
-  await sleep(300);
+  await waitPtyFixture(agent, a => countOccurrences(compact(a.getScrollback()), compact(BODY)) >= 2, "render unguarded injection");
   assert.equal(state, "sent");
   assert.equal(
     countOccurrences(compact(agent.getScrollback()), compact(BODY)),

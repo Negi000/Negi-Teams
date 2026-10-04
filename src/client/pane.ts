@@ -64,8 +64,8 @@ export class Pane {
     if (this.onSummarize) {
       const btn = document.createElement("button");
       btn.className = "summarize";
-      btn.textContent = "🔍 要約";
-      btn.title = "サブスク(claude CLI / Haiku)でこのエビの直近の状況を要約（オンデマンド）";
+      btn.textContent = "要約";
+      btn.title = "サブスクリプションのモデルで、この担当の直近の状況を要約";
       btn.addEventListener("click", (e) => {
         e.stopPropagation();
         this.onSummarize?.(this.id);
@@ -80,7 +80,7 @@ export class Pane {
     const badge = document.createElement("span");
     badge.className = `kind-badge kind-${record.kind}`;
     badge.textContent =
-      record.kind === "master" ? "👑 master" : record.kind === "supervisor" ? "🛡 supervisor" : "dynamic";
+      record.kind === "master" ? "統括" : record.kind === "supervisor" ? "監督" : "担当";
     if (record.model) badge.title = `model: ${record.model}`;
     idWrap.append(document.createTextNode(" "), badge);
 
@@ -100,7 +100,8 @@ export class Pane {
       const killBtn = document.createElement("button");
       killBtn.className = "kill";
       killBtn.textContent = "✕";
-      killBtn.title = "この agent を kill";
+      killBtn.title = "この担当を終了";
+      killBtn.setAttribute("aria-label", "この担当を終了");
       killBtn.addEventListener("click", (e) => {
         e.stopPropagation();
         this.onKill(this.id);
@@ -142,14 +143,7 @@ export class Pane {
 
     // ペインへの生キー入力をサーバへ。
     // Ctrl 武装中は、次の 1 打鍵（英字）を Ctrl 修飾（0x01–0x1a）に変換して送る。
-    this.term.onData((data) => {
-      if (this.ctrlArmed && data.length === 1) {
-        const code = data.toLowerCase().charCodeAt(0);
-        if (code >= 97 && code <= 122) data = String.fromCharCode(code & 0x1f);
-        this.setCtrlArmed(false);
-      }
-      this.onInput(this.id, data);
-    });
+    this.term.onData((data) => this.forwardInput(data));
 
     // 要素サイズ変化に追従して fit + PTY resize 連動。
     this.ro = new ResizeObserver(() => this.refit());
@@ -185,14 +179,32 @@ export class Pane {
    * PTY へ直接書き込み、送出後に xterm を再フォーカスしてソフトキーボードを保つ。
    */
   sendKey(seq: string): void {
-    this.onInput(this.id, seq);
+    this.forwardInput(seq);
     this.term.focus();
+  }
+
+  private forwardInput(data: string): void {
+    if (this.ctrlArmed && data.length === 1) {
+      const code = data.toLowerCase().charCodeAt(0);
+      if (code >= 97 && code <= 122) data = String.fromCharCode(code & 0x1f);
+      this.setCtrlArmed(false);
+    }
+    this.onInput(this.id, data);
   }
 
   /** Ctrl 武装をトグルする（入力補助バーの Ctrl ボタン）。 */
   toggleCtrl(): void {
     this.setCtrlArmed(!this.ctrlArmed);
     this.term.focus();
+  }
+
+  get isCtrlArmed(): boolean {
+    return this.ctrlArmed;
+  }
+
+  /** 担当や表示の切替後に、見えないCtrl修飾を持ち越さない。 */
+  cancelCtrl(): void {
+    this.setCtrlArmed(false);
   }
 
   /** Ctrl 武装状態を設定し、変化を通知する。 */
@@ -219,6 +231,7 @@ export class Pane {
    * 表示にした瞬間はレイアウト確定後に fit して PTY へ resize を送る。
    */
   setVisible(visible: boolean): void {
+    if (!visible) this.cancelCtrl();
     this.el.classList.toggle("hidden", !visible);
     if (visible) {
       // レイアウト確定を待ってから fit（隠れている間はサイズ 0 になりがち）。

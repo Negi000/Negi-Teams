@@ -3,6 +3,8 @@ import { Dashboard } from "./dashboard.ts";
 import { Viewer } from "./viewer.ts";
 import { FilePicker } from "./filePicker.ts";
 import { ChatPanel } from "./chat.ts";
+import { Workbench } from "./workbench.ts";
+import { material3Styles, materialIcon, negiBrand, negiNavigation } from "../shared/material3.ts";
 import {
   type ClientMessage,
   type ServerMessage,
@@ -10,6 +12,24 @@ import {
   type ViewerRecord,
 } from "../shared/protocol.ts";
 import { backendBadge } from "../shared/backendBadge.ts";
+
+// Older login pages copied the shared secret into JavaScript-readable storage.
+// The HttpOnly cookie is sufficient; clear the old copy on the normal app path.
+try { window.localStorage.removeItem("ebi_auth_token"); } catch { /* storage unavailable */ }
+
+const materialStyle = document.createElement("style");
+materialStyle.textContent = material3Styles;
+// Shared base comes before the workspace-specific refinements.
+const workspaceStyleLink = document.querySelector('link[href="./expressive.css"]') ?? document.querySelector('link[rel="stylesheet"]');
+if (workspaceStyleLink) workspaceStyleLink.before(materialStyle); else document.head.append(materialStyle);
+document.getElementById("app-brand")!.innerHTML = negiBrand();
+document.getElementById("app-navigation")!.innerHTML = negiNavigation("overview");
+document.getElementById("theme-toggle")!.innerHTML = materialIcon("theme");
+try { document.documentElement.dataset.theme = localStorage.getItem("negi-theme") === "dark" ? "dark" : "light"; } catch { document.documentElement.dataset.theme = "light"; }
+const themeToggle = document.getElementById("theme-toggle")!;
+function themeLabel(): void { const dark = document.documentElement.dataset.theme === "dark"; themeToggle.setAttribute("aria-label", dark ? "ライトテーマに切り替え" : "ダークテーマに切り替え"); themeToggle.setAttribute("aria-pressed", String(dark)); }
+themeToggle.addEventListener("click", () => { document.documentElement.dataset.theme = document.documentElement.dataset.theme === "dark" ? "light" : "dark"; try { localStorage.setItem("negi-theme", document.documentElement.dataset.theme); } catch { /* preference only */ } themeLabel(); });
+themeLabel();
 
 // ===== DOM 参照 =====
 const stage = document.getElementById("stage") as HTMLElement;
@@ -35,6 +55,9 @@ const sidebar = document.getElementById("sidebar") as HTMLElement;
 const sidebarToggle = document.getElementById("sidebar-toggle") as HTMLButtonElement;
 const sidebarBackdrop = document.getElementById("sidebar-backdrop") as HTMLElement;
 const keyAssist = document.getElementById("key-assist") as HTMLElement;
+const spawnDialog = document.getElementById("spawn-dialog") as HTMLDialogElement;
+for (const id of ["open-spawn", "open-spawn-mobile"]) document.getElementById(id)!.addEventListener("click", () => spawnDialog.showModal());
+document.getElementById("spawn-close")!.addEventListener("click", () => spawnDialog.close());
 
 // ===== 状態 =====
 const panes = new Map<string, Pane>();
@@ -45,6 +68,12 @@ let viewers: ViewerRecord[] = [];
 // REGISTRY 最上段に常設する合成エントリ（ダッシュボード）。サーバ registry には入れない
 // クライアント側の擬似エントリ。選択するとメイン領域に xterm ではなくダッシュボード DOM を出す。
 const DASHBOARD_ID = "__dashboard__";
+const OVERVIEW_ID = "__overview__";
+const workbench = new Workbench(document.getElementById("workbench")!, openTeam);
+function openTeam(): void { setActive(chatMasterId() ?? registry[0]?.id ?? null); }
+document.getElementById("nav-overview")!.addEventListener("click", event => { event.preventDefault(); setActive(OVERVIEW_ID); });
+document.getElementById("nav-workspace")!.addEventListener("click", event => { event.preventDefault(); openTeam(); });
+document.getElementById("nav-usage")!.addEventListener("click", event => { event.preventDefault(); setActive(DASHBOARD_ID); });
 
 // 使用状況ダッシュボード（WS `usage` を受けて描画する）。
 const dashboard = new Dashboard(document.getElementById("dashboard") as HTMLElement);
@@ -60,17 +89,19 @@ const viewer = new Viewer(document.getElementById("viewer") as HTMLElement, (id)
 //（registry にはモードの情報が無いため。サーバは接続直後、registry より先に chatState を送る）。
 const chatPanel = new ChatPanel(
   document.getElementById("chat") as HTMLElement,
-  (id, text, attachments, replyTo) =>
+  (id, text, attachments, replyTo, requestId) =>
     sendMsg({
       type: "chatSend",
       id,
       text,
+      ...(requestId ? { requestId } : {}),
       ...(attachments.length > 0 ? { attachments } : {}),
       ...(replyTo ? { replyTo } : {}),
     }),
   (id) => sendMsg({ type: "chatStop", id }),
-  (id) => sendMsg({ type: "chatNew", id }),
+  (id, request) => sendMsg({ type: "chatNew", id, ...request }),
   (id, requestId, answer) => sendMsg({ type: "chatAnswer", id, requestId, ...answer }),
+  (id, requestId) => sendMsg({ type: "chatConversationStatus", id, requestId }),
 );
 
 /** chat モードの master の id（未確定なら null＝従来どおり PTY ペインを出す）。 */
@@ -96,11 +127,13 @@ function sortAgents(agents: AgentRecord[]): AgentRecord[] {
   );
 }
 // メイン領域に単独表示している agent。未選択（＝空状態）なら null。
-let activeId: string | null = null;
+let activeId: string | null = new URLSearchParams(location.search).get("view") === "usage" ? DASHBOARD_ID :
+  new URLSearchParams(location.search).get("view") === "workspace" ? null : OVERVIEW_ID;
 // spawn 直後に自動選択したい agent。registry 反映時に拾って選択する。
 let pendingSelectId: string | null = null;
 // 監督・要約機能が有効か（サーバの capabilities = サブスク claude CLI の有無で決まる）。
 let supervisorEnabled = false;
+let managedTasksOnly = false;
 
 /** 現在 active な viewer レコード（activeId が viewer id のとき）。無ければ null。 */
 function activeViewer(): ViewerRecord | null {
@@ -115,6 +148,7 @@ function selectionExists(id: string | null): boolean {
   if (!id) return false;
   return (
     id === DASHBOARD_ID ||
+    id === OVERVIEW_ID ||
     id === chatMasterId() ||
     panes.has(id) ||
     viewers.some((v) => v.id === id)
@@ -148,6 +182,9 @@ function connect(): void {
     connStatus.className = "conn ng";
     // 再接続時はサーバから chatSnapshot が再送されて会話が戻る。
     chatPanel.markDisconnected();
+    workbench.markDisconnected();
+    for (const pane of panes.values()) pane.cancelCtrl();
+    updateCtrlIndicator(false);
     if (reconnectTimer === null) {
       reconnectTimer = window.setTimeout(() => {
         reconnectTimer = null;
@@ -169,15 +206,23 @@ function connect(): void {
   });
 }
 
-function sendMsg(msg: ClientMessage): void {
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+function sendMsg(msg: ClientMessage): boolean {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  ws.send(JSON.stringify(msg));
+  return true;
 }
 
 // ===== サーバメッセージ処理 =====
 function handleServerMessage(msg: ServerMessage): void {
   switch (msg.type) {
+    case "taskResults":
+      workbench.updateResults(msg.results);
+      break;
     case "registry":
       registry = sortAgents(msg.agents);
+      workbench.updateAgents(registry);
+      chatPanel.setCodexReadOnly(registry.some((a) => a.id === chatMasterId() &&
+        a.kind === "master" && a.backend === "codex"));
       // ダッシュボードは registry の backend を見て「—（未対応）」行を出す（PR-E）。
       dashboard.updateAgents(registry);
       syncPanes();
@@ -222,6 +267,15 @@ function handleServerMessage(msg: ServerMessage): void {
       addNotice("system", `エラー: ${msg.text}`);
       break;
     case "capabilities":
+      chatPanel.setConversationsEnabled(Boolean(msg.codexConversations), msg.conversationAuthority);
+      managedTasksOnly = Boolean(msg.managedTasksOnly);
+      for (const id of ["open-spawn", "open-spawn-mobile"]) document.getElementById(id)!.hidden = managedTasksOnly;
+      if (managedTasksOnly && spawnDialog.open) spawnDialog.close();
+      stage.querySelector(".empty")?.remove();renderEmpty();
+      document.getElementById("nav-review")!.setAttribute("aria-disabled", String(!msg.reviews));
+      document.getElementById("nav-task")!.setAttribute("aria-disabled", String(!msg.tasks));
+      for (const [id, available] of [["nav-review", msg.reviews], ["nav-task", msg.tasks]] as const) document.getElementById(id)!.tabIndex = available ? 0 : -1;
+      workbench.setCapabilities({ tasks: Boolean(msg.tasks), reviews: Boolean(msg.reviews),taskAuthoring:Boolean(msg.taskAuthoring),projectSetup:Boolean(msg.projectSetup) });
       // サーバ能力に応じて要約 UI の有無を切り替える。
       // 既存ペインは再生成して要約ボタンの有無を反映する（接続/再接続時のみ・低頻度）。
       if (msg.supervisor !== supervisorEnabled) {
@@ -264,8 +318,11 @@ function handleServerMessage(msg: ServerMessage): void {
       break;
     }
     case "chatState":
+      workbench.updateMasterState(msg.id, msg.state);
       // chat モードの master が居ることの判定材料も兼ねる（registry には情報が無い）。
-      chatPanel.applyState(msg.id, msg.state, msg.pending);
+      chatPanel.applyState(msg.id, msg.state, msg.pending, msg.threadId);
+      chatPanel.setCodexReadOnly(registry.some((a) => a.id === msg.id &&
+        a.kind === "master" && a.backend === "codex"));
       // registry より先に届くのが通常だが、後から届いたときは PTY ペインを畳んで chat に寄せる。
       if (panes.has(msg.id)) {
         const wasActive = activeId === msg.id;
@@ -275,10 +332,16 @@ function handleServerMessage(msg: ServerMessage): void {
       }
       break;
     case "chatSnapshot":
-      chatPanel.applySnapshot(msg.events, msg.hasMore);
+      chatPanel.applySnapshot(msg.events, msg.hasMore, msg.threadId);
       break;
     case "chatEvent":
       chatPanel.applyEvent({ seq: msg.seq, ts: msg.ts, event: msg.event });
+      break;
+    case "chatSendResult":
+      chatPanel.applySendResult(msg.id, msg.requestId, msg.accepted, msg.reason);
+      break;
+    case "chatConversationResult":
+      chatPanel.applyConversationResult(msg);
       break;
     case "dirListing":
       // ファイルピッカーのディレクトリ列挙応答。error なら理由をモーダル内に表示。
@@ -347,7 +410,8 @@ function syncPanes(): void {
     applyVisibility();
     renderEmpty();
   } else {
-    setActive(registry.length > 0 ? registry[0].id : DASHBOARD_ID);
+    const requested = new URLSearchParams(location.search).get("view");
+    setActive(requested === "workspace" ? registry[0]?.id ?? null : OVERVIEW_ID);
   }
 }
 
@@ -368,8 +432,12 @@ function removePane(id: string): void {
 // ===== 選択（master-detail の切り替え）=====
 function setActive(id: string | null): void {
   activeId = id;
-  // ペイン切替時は入力補助バーの Ctrl ハイライトをリセットする（武装は各ペイン固有）。
-  updateCtrlIndicator(false);
+  const view = id === OVERVIEW_ID ? "overview" : id === DASHBOARD_ID ? "usage" : "workspace";
+  document.querySelector<HTMLElement>(".layout")!.dataset.view = view;
+  for (const key of ["overview", "workspace", "usage"]) { const a = document.getElementById(`nav-${key}`)!; if (view === key) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); }
+  const url = new URL(location.href); if (view === "overview") url.searchParams.delete("view"); else url.searchParams.set("view", view); history.replaceState({}, "", url);
+  document.title = `${view === "overview" ? "作業一覧" : view === "usage" ? "使用状況" : "チーム"} · Negi-Teams`;
+  setDrawer(false);
   applyVisibility();
   renderRegistry();
   renderEmpty();
@@ -381,13 +449,15 @@ function setActive(id: string | null): void {
 // ダッシュボード or viewer 選択時は全 xterm ペインを隠し、対応する合成パネル DOM を出す。
 function applyVisibility(): void {
   const showDashboard = activeId === DASHBOARD_ID;
+  const showOverview = activeId === OVERVIEW_ID;
   const activeVw = activeViewer();
   const showViewer = activeVw !== null;
   const showChat = activeId !== null && activeId === chatMasterId();
   dashboard.setVisible(showDashboard);
+  workbench.setVisible(showOverview);
   viewer.setVisible(showViewer, activeVw);
   chatPanel.setVisible(showChat);
-  const showPane = !showDashboard && !showViewer && !showChat;
+  const showPane = !showOverview && !showDashboard && !showViewer && !showChat;
   for (const [pid, pane] of panes) pane.setVisible(showPane && pid === activeId);
   // 入力補助バーは xterm ペイン専用（chat では入力欄が本体なので出さない）。
   syncKeyAssistVisibility();
@@ -399,15 +469,23 @@ function renderEmpty(): void {
   // ダッシュボード / viewer 表示中は空状態を出さない（メイン領域はそれらが占める）。
   const isEmpty =
     activeId !== DASHBOARD_ID &&
-    activeId !== chatMasterId() &&
+    activeId !== OVERVIEW_ID &&
+    (activeId === null || activeId !== chatMasterId()) &&
     activeViewer() === null &&
     (activeId === null || !panes.has(activeId));
   if (isEmpty) {
     if (!existing) {
       const div = document.createElement("div");
       div.className = "empty";
-      div.textContent =
-        "エビが選択されていません。左上の「＋ エビを追加」で spawn し、右の REGISTRY から選んでください。";
+      const title = document.createElement("h1"), copy = document.createElement("p"), actions = document.createElement("div");
+      title.textContent = "チーム";
+      copy.textContent = managedTasksOnly ? "統括の接続を確認してください。作業一覧からTaskを確認できます。" : "接続した担当はいません。担当を追加するか、作業一覧からTaskを確認してください。";
+      actions.className = "md-actions";
+      const add = document.createElement("button"), overview = document.createElement("button");
+      add.textContent = "担当を追加"; add.className = "md-primary"; add.onclick = () => spawnDialog.showModal();
+      overview.textContent = "作業一覧を開く"; overview.className = "md-tonal"; overview.onclick = () => setActive(OVERVIEW_ID);
+      if (!managedTasksOnly) actions.append(add);
+      actions.append(overview); div.append(title, copy, actions);
       stage.appendChild(div);
     }
   } else {
@@ -427,7 +505,7 @@ function renderRegistry(): void {
     tr.addEventListener("click", () => setActive(DASHBOARD_ID));
     const td = document.createElement("td");
     td.colSpan = 6;
-    td.textContent = "📊 ダッシュボード";
+    const button = document.createElement("button"); button.className = "registry-select md-text"; button.textContent = "使用状況"; button.addEventListener("click", event => { event.stopPropagation(); setActive(DASHBOARD_ID); }); td.append(button);
     tr.appendChild(td);
     registryBody.appendChild(tr);
   }
@@ -440,7 +518,7 @@ function renderRegistry(): void {
     tr.addEventListener("click", () => filePicker.open());
     const td = document.createElement("td");
     td.colSpan = 6;
-    td.textContent = "📂 ファイルを開く";
+    const button = document.createElement("button"); button.className = "registry-select md-text"; button.textContent = "資料を開く"; button.addEventListener("click", event => { event.stopPropagation(); filePicker.open(); }); td.append(button);
     tr.appendChild(td);
     registryBody.appendChild(tr);
   }
@@ -460,7 +538,7 @@ function renderRegistry(): void {
     // id セル: 固定エビは種別バッジ（master/supervisor）を併記する。
     const idTd = document.createElement("td");
     idTd.title = a.id;
-    idTd.append(document.createTextNode(a.id));
+    const selectButton = document.createElement("button"); selectButton.className = "registry-select md-text"; selectButton.textContent = a.kind === "master" ? "統括" : a.kind === "supervisor" ? "監督" : a.id; selectButton.title = a.id; selectButton.addEventListener("click", event => { event.stopPropagation(); setActive(a.id); }); idTd.append(selectButton);
     // chat モードの master は 💬 を id 直後に併記（terminal モードとの区別。設計 §5.1）。
     // 狭い id セルでも省略されないよう、種別/backend バッジより前に置く。
     if (a.id === chatMasterId()) {
@@ -483,7 +561,9 @@ function renderRegistry(): void {
       const badge = document.createElement("span");
       badge.className = `backend-badge backend-${bb.id}`;
       badge.textContent = bb.emoji;
-      badge.title = bb.reportsUsage
+      badge.title = a.kind === "master" && a.mode === "connected" && a.backend === "codex"
+        ? `backend: codex（App Server: cost不明 / context観測）${a.model ? ` / model: ${a.model}` : ""}`
+        : bb.reportsUsage
         ? `backend: ${bb.label}${a.model ? ` / model: ${a.model}` : ""}`
         : `backend: ${bb.label}（cost / context は未対応）${a.model ? ` / model: ${a.model}` : ""}`;
       idTd.append(document.createTextNode(" "), badge);
@@ -493,7 +573,7 @@ function renderRegistry(): void {
     const modeTd = document.createElement("td");
     const modeBtn = document.createElement("button");
     modeBtn.className = "mode-toggle " + a.mode;
-    modeBtn.textContent = a.mode === "connected" ? "🔗 connected" : "⛓️ isolated";
+    modeBtn.textContent = a.mode === "connected" ? "接続" : "単独";
     modeBtn.title = "クリックで connected/isolated を切替";
     modeBtn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -529,7 +609,7 @@ function renderRegistry(): void {
     td.colSpan = 5;
     td.className = "viewer-row-label";
     // 画像 viewer は一覧でも一目で分かるようアイコンを変える（パネル側と揃える）。
-    td.append(document.createTextNode(`${v.format === "image" ? "🖼" : "📄"} ${v.title}`));
+    const selectButton = document.createElement("button"); selectButton.className = "registry-select md-text"; selectButton.textContent = v.title; selectButton.addEventListener("click", event => { event.stopPropagation(); setActive(v.id); }); td.append(selectButton);
 
     // ✗（閉じる）セル。行選択へ伝播させない。
     const closeTd = document.createElement("td");
@@ -640,6 +720,7 @@ spawnFollow.addEventListener("change", () => {
 });
 
 spawnBtn.addEventListener("click", () => {
+  if (!ws || ws.readyState !== WebSocket.OPEN) { addNotice("system", "接続を確認してから担当を起動してください。"); return; }
   const cwd = spawnCwd.value.trim();
   // 空文字は「サーバ既定に任せる」＝ backend を送らない（従来どおりの挙動）。
   const backend = spawnBackend.value || undefined;
@@ -657,6 +738,7 @@ spawnBtn.addEventListener("click", () => {
   } else {
     sendMsg({ type: "spawn", cwd: cwd || undefined, backend });
   }
+  spawnDialog.close();
 });
 
 // ウィンドウリサイズ時は、表示中の agent だけ fit&resize すれば良い
@@ -668,11 +750,30 @@ window.addEventListener("resize", () => {
 
 // ===== スマホ: サイドバー（registry ドロワー）開閉 =====
 function setDrawer(open: boolean): void {
+  if (open && document.querySelector<HTMLElement>(".layout")!.dataset.view !== "workspace") openTeam();
   sidebar.classList.toggle("open", open);
+  sidebarToggle.setAttribute("aria-expanded", String(open));
   sidebarBackdrop.hidden = !open;
+  const modal = open && window.matchMedia("(max-width: 768px)").matches;
+  sidebar.setAttribute("role", modal ? "dialog" : "complementary");
+  if (modal) sidebar.setAttribute("aria-modal", "true"); else sidebar.removeAttribute("aria-modal");
+  stage.inert = modal;
+  document.getElementById("app-navigation")!.inert = modal;
+  keyAssist.inert = modal;
+  for (const element of document.querySelectorAll<HTMLElement>(".md-brand, #theme-toggle, #open-spawn")) element.inert = modal;
+  if (modal) requestAnimationFrame(() => sidebar.querySelector<HTMLButtonElement>("button")?.focus());
 }
 sidebarToggle.addEventListener("click", () => setDrawer(!sidebar.classList.contains("open")));
 sidebarBackdrop.addEventListener("click", () => setDrawer(false));
+document.addEventListener("keydown", event => { if (event.key === "Escape" && !document.querySelector("dialog[open]") && sidebar.classList.contains("open")) { setDrawer(false); sidebarToggle.focus(); } });
+document.addEventListener("keydown", event => {
+  if (event.key !== "Tab" || document.querySelector("dialog[open]") || sidebar.getAttribute("aria-modal") !== "true") return;
+  const targets = [sidebarToggle, ...sidebar.querySelectorAll<HTMLElement>("button:not(:disabled), summary, a[href], input:not(:disabled), select:not(:disabled), [tabindex='0']")].filter(element => element.getClientRects().length > 0);
+  const first = targets[0], last = targets.at(-1)!;
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+});
+window.addEventListener("resize", () => { if (sidebar.getAttribute("aria-modal") === "true" && !window.matchMedia("(max-width: 768px)").matches) setDrawer(false); });
 // registry から選択したら（狭幅では）ドロワーを閉じてメインへ戻す。
 registryBody.addEventListener("click", () => {
   if (window.matchMedia("(max-width: 768px)").matches) setDrawer(false);
@@ -694,13 +795,18 @@ const ctrlBtn = keyAssist.querySelector('[data-key="ctrl"]') as HTMLButtonElemen
 /** Ctrl ボタンのハイライト（武装中表示）を更新する。 */
 function updateCtrlIndicator(armed: boolean): void {
   ctrlBtn?.classList.toggle("armed", armed);
+  ctrlBtn?.setAttribute("aria-pressed", String(armed));
+  if (ctrlBtn) ctrlBtn.title = armed ? "次の1文字にCtrl修飾を付けます。もう一度押すと解除" : "次の1文字にCtrl修飾を付ける";
 }
 
 /** 狭幅かどうかで入力補助バーの表示を切り替える。 */
 function syncKeyAssistVisibility(): void {
   const narrow = window.matchMedia("(max-width: 768px)").matches;
   // chat パネル表示中は xterm が無いので入力補助バーの出番も無い（入力欄を隠さない）。
-  keyAssist.hidden = !narrow || (activeId !== null && activeId === chatMasterId());
+  const pane = activeId ? panes.get(activeId) : undefined;
+  keyAssist.hidden = !narrow || !pane;
+  if (keyAssist.hidden) pane?.cancelCtrl();
+  updateCtrlIndicator(!keyAssist.hidden && (pane?.isCtrlArmed ?? false));
 }
 syncKeyAssistVisibility();
 window.addEventListener("resize", syncKeyAssistVisibility);
@@ -721,4 +827,5 @@ keyAssist.addEventListener("click", (ev) => {
   if (seq) pane.sendKey(seq);
 });
 
+setActive(activeId);
 connect();

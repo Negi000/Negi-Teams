@@ -8,6 +8,7 @@
 // - config が無い場合は固定エビ無し（空配列）として扱い、起動は継続する（任意機能）。
 
 import { readFile } from "node:fs/promises";
+import { CONTROL_PLANE_ENV } from "./controlPlaneEnv.ts";
 import { statSync } from "node:fs";
 import { isAbsolute, resolve, dirname } from "node:path";
 import { homedir } from "node:os";
@@ -368,8 +369,12 @@ function expandEnv(input: string, configDir?: string): string {
   if (configDir) {
     s = s.replace(/\$\{?EBI_TEAM\}?/g, configDir);
   }
-  s = s.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (m, name: string) => process.env[name] ?? m);
-  s = s.replace(/\$([A-Za-z_][A-Za-z0-9_]*)/g, (m, name: string) => process.env[name] ?? m);
+  const environmentValue = (literal: string, name: string) => {
+    if (CONTROL_PLANE_ENV.some(key => key === name.toUpperCase())) throw Error(`固定エビ設定ではサーバー秘密・管理設定の環境変数を展開できません: ${name}`);
+    return process.env[name] ?? literal;
+  };
+  s = s.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, environmentValue);
+  s = s.replace(/\$([A-Za-z_][A-Za-z0-9_]*)/g, environmentValue);
   return s;
 }
 

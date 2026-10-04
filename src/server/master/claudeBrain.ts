@@ -9,6 +9,7 @@
 // PR-M1 ではサーバのどこからも呼ばれない（UI 配線は PR-M2）＝外形ゼロ差分。
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { withoutControlPlaneEnv } from "../controlPlaneEnv.ts";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import {
@@ -164,7 +165,7 @@ export class ClaudeHeadlessBrain implements MasterBrain {
       extraArgs: startOpts.extraArgs,
     });
     const parentEnv = this.opts.parentEnv ?? process.env;
-    const childEnv = applyMasterEnvDenyList(parentEnv);
+    const childEnv = withoutControlPlaneEnv(applyMasterEnvDenyList(parentEnv));
     const pre = evaluateMasterPreflight({ args, childEnv, parentEnv });
     if (!pre.ok) {
       throw new Error(`master の起動前チェックに失敗しました: ${pre.errors.join(" / ")}`);

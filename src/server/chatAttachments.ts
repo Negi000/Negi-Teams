@@ -13,7 +13,7 @@
 
 import { randomBytes } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 /** 受け付ける MIME → 拡張子。ここに無い MIME は保存しない（実行可能形式を弾く）。 */
 export const ALLOWED_ATTACH_TYPES: Readonly<Record<string, string>> = {
@@ -111,7 +111,7 @@ export class ChatAttachmentStore {
     if (!isValidAttachmentName(name)) return null;
     const path = join(this.dir, name);
     // join 後に保存庫の外へ出ていないことを二重で確認する（name 検証が破られた場合の保険）。
-    if (!resolve(path).startsWith(`${this.dir}/`)) return null;
+    if (dirname(resolve(path)) !== this.dir) return null;
     let bytes: Buffer;
     try {
       bytes = await readFile(path);
