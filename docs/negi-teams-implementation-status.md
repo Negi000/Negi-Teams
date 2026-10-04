@@ -599,3 +599,13 @@ Browser plugin not availableのためPlaywright CLI/Chromeを使い、compiled�
 Browser plugin not availableのため既存Playwright/Chromeを使用。合成prepare失敗と実native索引・compiled HTTPで確認→Space明示確認→終了→再読込→close intent欠落の保持画面を検証する。1440/375/320px、明暗、48px操作、320pxのカード下端/下部ナビ、theme保持、横はみ出し/overlay/予期しないconsole/page errorなしを確認する。GUI証拠は公開差分外で、実Codexモデルの成功とは扱わない。
 
 全73要件・Phase0〜8と全体ゴールはACTIVE。旧実モデル要求を再送しておらず、その元例外も復元しない。実Astra→Sol→レビュー→Astra、stale/未知ownerと部分作成の汎用復旧、全reader移行の実証、directory metadataを含む停電/UNC/Linux、外部writer隔離、Jev・知識・Policy・履歴・旧dispatch全面移行、実機safe-area/keyboardと利用者受入を継続する。draft進捗でありproduction activation・release・全体完成・CI成功ではない。
+
+## 2026-10-04: 統合の重複範囲を統括へ戻す導線
+
+Material 3 Expressiveの統合画面に、検証済み成果の変更範囲が重なる場合の相談カードを接続した。全sourceを既存の認証済みreaderで照合した後だけ、重なるパス・元レビュー・契約版/成果hash/受入条件入り依頼文を表示する。clipboard成功/失敗、選択変更/再取得時の古い案内消去を区別する。重なる所有範囲を許可する変更、モデル起動、差分適用、自動受入はない。詳しい範囲と途中失敗は[統合画面の記録](./negi-teams-integration-execution.md#2026-10-04-重なる変更範囲を統括へ戻す)を参照する。
+
+新規境界1＋既存統合3の4/4成功（失敗/取消/skip 0、333502.5711ms、actual exit0）、型検査/build/差分検査成功。保存済みfixtureとcompiled HTTPの画面5ケース＋未完了1ケースを補助修正後に確認し、見出しだけの最終変更後は合成sourceで1440/375/320px・明暗6ケースを再確認した。予期しないconsole/page error/横はみ出し/overlay0、48px、見出し1行、キーボードコピー/clipboard読戻し。期待するpreview409のresource errorは別記録。補助試験の失敗は保持し、成功に合算しない。実モデルturn0、人間受入null、私有helper/server/browser終了。
+
+過去節の「実Astra→Sol→レビュー→Astraは未確認」は、[現在の実結果伝達の証拠](./negi-teams-verification-handoff.md)を優先して読む。実Codexとindexed保存の同一Astraへの結果伝達・再起動復元は既に確認済みで、実利用者受入は未取得。別ファイルの実コード分解/統合/後続も[既存QA](./negi-teams-code-integration-qa.md)で確認済み。今回これらを再実行していない。
+
+全73要件・Phase0〜8と全体ゴールはACTIVE。今回の相談UIを任意の実コード競合解消・利用者受入・全体完成へ換算しない。native Luna調査の開始保留を維持する。保存の版移行/旧writer/汎用復旧/性能、外部CLI制御、Jev全gate/日本語/残高上限、知識寿命/複数事例/派生失効、Policy利益と人間承認、履歴最新性、実機safe-area/keyboardは継続する。CI結果空のdraft進捗である。

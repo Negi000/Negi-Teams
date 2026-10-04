@@ -203,3 +203,9 @@ compiled通常serverと合成保存TaskでChromium1440/375/320px・両テーマ�
 | 操作 | チーム移動・テーマ切替後のtitle/表示を確認。320pxの操作48px以上、入力/送信bottom712px < 下部nav top740px |
 
 画像3枚はローカルvisualizationsに保存し、公開差分へ含めない。私有browser/serverを終了した。今回Task実行、成果受入、実provider/model送信、Codex新規会話、実機safe-area/仮想キーボード、人の使いやすさの受入を検証したものではない。今後の保存確認画面も同じtokensとPC/スマホ別導線へ接続する。
+
+## 2026-10-04: 統合の重複範囲を相談するカード
+
+既存の色・shape・type・focus・48px操作とPCの選択/内容2列、スマホの1列/下部ナビを使い、[重なる変更範囲の案内](../negi-teams-integration-execution.md#2026-10-04-重なる変更範囲を統括へ戻す)を追加した。短い見出し、重なるファイル、元レビュー、確認できる依頼文、コピーと統括への移動を一つの判断単位にする。内部パスやモデル権限の設定を通常の画面へ追加しない。
+
+境界/既存統合4件、型検査/build/差分検査成功。compiled HTTPと保存されたfixture成果の5ケース＋未完了1ケースを確認し、見出し修正後の最終buildは合成sourceで1440/375/320px・明暗6ケースを確認した。最終の実theme、見出し1行、48px、横幅、focus/Enterコピー、clipboard読戻し、overlayなしと予期しないconsole/page error0を確認。preview409の期待resource error6件を分けて記録する。補助script/初期theme設定の途中失敗は保持し、成功に合算しない。画像・証拠は公開差分外。実コード競合の解決・人間受入・実機safe-area/仮想キーボードは未確認。

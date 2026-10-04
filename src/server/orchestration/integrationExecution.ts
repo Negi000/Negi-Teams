@@ -53,7 +53,19 @@ interface Setup { schema: "negi-integration-execution/1"; id: string; requestId:
 interface Result { evidenceRef: string; status: "ready_for_review" | "failed"; resultRequestId: string }
 export interface IntegrationPreview {
   hash: string; profileId: string; projectTitle: string; baseSha: string; paths: string[]; verification: string[];
-  sources: Array<{ id: string; title: string; taskId: string; version: number; revision: number; artifactSha256: string; acceptance: string[] }>;
+  sources: Array<{ id: string; title: string; taskId: string; version: number; revision: number; artifactSha256: string; reviewId: string; acceptance: string[] }>;
+}
+export interface IntegrationConflict {
+  kind: "overlapping_paths"; profileId: string; projectTitle: string; baseSha: string;
+  paths: string[]; sources: IntegrationPreview["sources"];
+}
+// Read-only guidance. This never approves a selection or starts a resolution turn.
+export class IntegrationConflictError extends Error {
+  readonly conflict: IntegrationConflict;
+  constructor(conflict: IntegrationConflict) {
+    super("変更範囲が重なっています。元の成果を確認し、統括に解決の計画を依頼してください。");
+    this.conflict = structuredClone(conflict);
+  }
 }
 export interface IntegrationExecutionView {
   id: string; hash: string; projectTitle: string; sourceRunIds: string[]; baseSha: string;
@@ -114,6 +126,7 @@ export class LocalIntegrationExecutionService {
     if (!Array.isArray(ids) || ids.length < 2 || ids.length > 8 || new Set(ids).size !== ids.length ||
       ids.some(id => typeof id !== "string" || !/^[a-zA-Z0-9._-]{1,100}$/.test(id))) throw Error("Select two to eight distinct Tasks");
     const p = this.profile(profileId), sources: IntegrationSource[] = [], pins: SourcePin[] = [], paths: string[] = [];
+    const overlapping = new Set<string>();
     const rows: IntegrationPreview["sources"] = [], commands: VerificationCommand[] = [...p.config.verification];
     let baseSha: string | null = null;
     const scheduler = (await this.tasks.registeredScheduler(p.config.schedulerPath).read()).state;
@@ -134,16 +147,23 @@ export class LocalIntegrationExecutionService {
           !(await git(p.repository, ["ls-tree", manifest.baseSha, "--", file.path])) &&
           ((await lstat(join(source.config.checkout, file.path))).mode & 0o111)) throw Error("New executable files need a separate integration plan");
         const key = file.path.toLowerCase();
-        if (paths.some(path => { const prior = path.toLowerCase(); return prior === key || prior.startsWith(key + "/") || key.startsWith(prior + "/"); }))
-          throw Error("変更範囲が重なっています。統括に競合の解決を依頼してください。");
+        for (const path of paths) {
+          const prior = path.toLowerCase();
+          if (prior === key || prior.startsWith(key + "/") || key.startsWith(prior + "/")) {
+            overlapping.add(path); overlapping.add(file.path);
+          }
+        }
         paths.push(file.path);
       }
       pins.push({ runId: id, configSha256: source.configSha256, manifestSha256: hash(manifest) }); sources.push(source);
       rows.push({ id, title: this.tasks.list().find(t => t.id === id)!.title, taskId: state.contract.vaultId,
         version: state.contract.version, revision: manifest.revision ?? 0, artifactSha256: manifest.review.verifiedArtifactSha256,
-        acceptance: [...(state.contract.acceptance ?? [])] });
+        reviewId: manifest.review.id, acceptance: [...(state.contract.acceptance ?? [])] });
       commands.push(...source.config.verification);
     }
+    // Finish every source's current-state checks before exposing any guidance.
+    if (overlapping.size) throw new IntegrationConflictError({ kind: "overlapping_paths", profileId,
+      projectTitle: p.title, baseSha: baseSha!, paths: [...overlapping].sort(), sources: rows });
     const uniqueCommands = [...new Map(commands.map(c => [JSON.stringify(c), c])).values()];
     const resources = [...new Set([p.config, ...sources.map(s => s.config)].flatMap(c => c.resources))].sort();
     const selection: Selection = { profileId, profileHash: p.hash, baseSha: baseSha!, pins, paths: paths.sort(), commandsSha256: hash(uniqueCommands), resources };
