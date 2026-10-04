@@ -4,7 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, open, readFile, opendir, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { HumanReviewProofStore, isReviewRequestId, type HumanReviewReceipt } from "./humanReviewProof.ts";
-import type { VaultRunConfig } from "./vaultRunConfig.ts";
+import { vaultWorker, type VaultRunConfig } from "./vaultRunConfig.ts";
 import type { VaultTaskContract } from "./vaultTaskContract.ts";
 import { loadApprovedTaskPlan } from "./approvedTaskPlan.ts";
 import { checkoutFacts, reconciliationHash } from "./taskReconciliation.ts";
@@ -76,9 +76,10 @@ function held(d:PreflightRecoveryDossier,baseSha:string){
   if(d.checkout.head!==baseSha)reasons.push("契約の基準から現在の版が変わっています。");
   return reasons;
 }
-function work(source:PreflightRecoverySource):ScheduledWork{return {id:source.config.runId,parentId:null,dependencies:[],role:"sol",checkout:source.config.checkout,
-  checkoutMode:"write",resources:source.config.resources.map(name=>({name,mode:"write"})),reserveUsd:0,
-  execution:source.config.approvedPlan?"direct":"astra_to_sol"}}
+function work(source:PreflightRecoverySource):ScheduledWork{const worker=vaultWorker(source.config);return {id:source.config.runId,parentId:null,dependencies:[],role:worker.role,checkout:source.config.checkout,
+  ...(source.config.taskMode?{taskMode:source.config.taskMode}:{}),
+  checkoutMode:worker.checkoutMode,resources:source.config.resources.map(name=>({name,mode:worker.checkoutMode})),reserveUsd:0,
+  execution:source.config.approvedPlan?"direct":worker.role==="luna"?"astra_to_luna":"astra_to_sol"}}
 export class TaskPreflightRecovery{
   private constructor(private readonly proofs:HumanReviewProofStore){}
   static async open(root:string){return new TaskPreflightRecovery(await HumanReviewProofStore.open(join(root,"preflight-proofs"),512_000))}

@@ -24,7 +24,7 @@ export interface VaultRunBase {
   approvedPlan?: { proofDirectory: string; requestId: string };
 }
 export type VaultRunConfig = VaultRunBase & (
-  { sol: { model: string; effort: string }; taskMode?: never; luna?: never; lunaPolicy?: never } |
+  { sol: { model: string; effort: string }; taskMode?: "integration_resolution"; luna?: never; lunaPolicy?: never } |
   { taskMode: "read_only_research"; luna: { model: string; effort: string }; sol?: never;
     /** The configured Luna profile is the fixed baseline; absent means explicit. */
     lunaPolicy?: "approved-policy/1" }
@@ -37,6 +37,9 @@ export function vaultWorker(config: VaultRunConfig) {
 export function assertVaultWorkerContract(config: VaultRunConfig, contract: { taskClass?: string }): void {
   if ((config.taskMode === "read_only_research") !== (contract.taskClass === "read_only_research"))
     throw Error("Read-only research requires its explicit Luna configuration and Vault task class");
+  if ((config.taskMode === "integration_resolution") !== (contract.taskClass === "integration_resolution") ||
+      config.taskMode === "integration_resolution" && !config.approvedPlan)
+    throw Error("Resolution requires its explicit configuration, Task class and approved plan");
 }
 /** Replays keep the original selection; current activation/rollback is irrelevant. */
 export function assertTaskWorkerProfileRegistration(config: VaultRunConfig,
@@ -76,10 +79,11 @@ export function parseVaultRunConfig(value: unknown): VaultRunConfig {
   // sol and therefore reject this registration rather than grant write access.
   const readOnly = row.taskMode === "read_only_research";
   if (row.lunaPolicy !== undefined && (!readOnly || row.lunaPolicy !== "approved-policy/1") || (readOnly ? "sol" in row :
-      row.taskMode !== undefined || row.luna !== undefined))
+      row.taskMode !== undefined && row.taskMode !== "integration_resolution" || row.luna !== undefined))
     throw Error("Vault run worker mode invalid or ambiguous");
   const worker = readOnly ? { taskMode: "read_only_research" as const, luna: role(row.luna, "luna"),
-    ...(row.lunaPolicy === "approved-policy/1" ? { lunaPolicy: "approved-policy/1" as const } : {}) } : { sol: role(row.sol, "sol") };
+    ...(row.lunaPolicy === "approved-policy/1" ? { lunaPolicy: "approved-policy/1" as const } : {}) } : { sol: role(row.sol, "sol"),
+      ...(row.taskMode === "integration_resolution" ? { taskMode:"integration_resolution" as const } : {}) };
   if (!Array.isArray(row.verification) || row.verification.length > 10 ||
       !Array.isArray(row.resources) || row.resources.length > 20) {
     throw new Error("Vault run verification/resources invalid");
@@ -116,6 +120,7 @@ export function parseVaultRunConfig(value: unknown): VaultRunConfig {
       throw new Error("Approved Task plan identity invalid");
     approvedPlan = { proofDirectory: path(plan.proofDirectory, "approvedPlan.proofDirectory"), requestId: plan.requestId };
   }
+  if(row.taskMode==="integration_resolution"&&!approvedPlan)throw Error("Resolution configuration requires a signed approved plan");
   return { executable: path(row.executable, "executable"),
     checkout: path(row.checkout, "checkout"), vault: path(row.vault, "vault"),
     snapshot: path(row.snapshot, "snapshot"), outputDir: path(row.outputDir, "outputDir"),

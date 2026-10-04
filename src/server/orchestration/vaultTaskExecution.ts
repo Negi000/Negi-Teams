@@ -82,7 +82,7 @@ export async function submitVaultRun(prepared: PreparedVaultRun, scheduler: File
   await scheduler.append({ key: `${config.runId}:submit`, at: new Date().toISOString(),
     action: { type: "submit", work: { id: config.runId, parentId: null, dependencies: [],
       role: worker.role, checkout: config.checkout, checkoutMode: worker.checkoutMode,
-      ...(worker.role==="luna"?{taskMode:"read_only_research" as const}:{}),
+      ...(config.taskMode?{taskMode:config.taskMode}:{}),
       execution: config.approvedPlan ? "direct" : worker.role==="luna"?"astra_to_luna":"astra_to_sol",
       resources: config.resources.map((name) => ({ name, mode: worker.checkoutMode })), reserveUsd: 0 } } });
 }
@@ -99,6 +99,8 @@ export async function executeVaultRun(prepared: PreparedVaultRun, scheduler: Fil
                                       signal?: AbortSignal, hooks?: TaskExecutionHooks): Promise<TaskSnapshot> {
   const { config, contract } = prepared;
   assertVaultWorkerContract(config,contract);
+  if(config.taskMode==="integration_resolution"&&(!hooks?.admit||!prepared.approvedPlan))
+    throw Error("Resolution source admission and signed plan must be restored before execution");
   const workerProfile=vaultWorker(config),research=workerProfile.role==="luna";
   if(research)assertResearchDispatchIsolation();
   if(config.lunaPolicy && !hooks?.approvedResearchPolicy) throw Error("Approved research Policy authority is unavailable");
@@ -111,6 +113,7 @@ export async function executeVaultRun(prepared: PreparedVaultRun, scheduler: Fil
     prepared.executionConfigSha256??hash(JSON.stringify({config,snapshotSha256:hash(await readFile(config.snapshot))})), `${config.runId}:dispatch`);
   // Admission occurs before opening either provider process.
   try { return await runScheduledVaultTask({ scheduler, dispatchKey: `${config.runId}:dispatch`, signal,
+    taskMode:config.taskMode,
     admit:hooks?.admit,
     beforeRelease:()=>owner.assertProcessesEnded(),
     onCapacityReleased: hooks?.onCapacityReleased,

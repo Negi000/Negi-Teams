@@ -609,3 +609,13 @@ Material 3 Expressiveの統合画面に、検証済み成果の変更範囲が�
 過去節の「実Astra→Sol→レビュー→Astraは未確認」は、[現在の実結果伝達の証拠](./negi-teams-verification-handoff.md)を優先して読む。実Codexとindexed保存の同一Astraへの結果伝達・再起動復元は既に確認済みで、実利用者受入は未取得。別ファイルの実コード分解/統合/後続も[既存QA](./negi-teams-code-integration-qa.md)で確認済み。今回これらを再実行していない。
 
 全73要件・Phase0〜8と全体ゴールはACTIVE。今回の相談UIを任意の実コード競合解消・利用者受入・全体完成へ換算しない。native Luna調査の開始保留を維持する。保存の版移行/旧writer/汎用復旧/性能、外部CLI制御、Jev全gate/日本語/残高上限、知識寿命/複数事例/派生失効、Policy利益と人間承認、履歴最新性、実機safe-area/keyboardは継続する。CI結果空のdraft進捗である。
+
+## 2026-10-04追加: M3の元成果確認と専用の解決Task
+
+[方式・操作・固定版・互換条件・最終証拠](negi-teams-integration-resolution.md)。統合相談→Astraによる全原文/契約/必須仕様/固定検証の再読→全受入条件を引き継ぐ専用案→Material 3 Expressiveの元成果確認→署名契約/新worktree→直接Sol→固定検証→通常レビューを接続した。PCは一覧＋詳細、スマホは選択＋単一詳細。確定前に元成果のレビューと条件を表示し、固定版と原文はdetailsで確認する。
+
+元契約・仕様・artifact・差分・版・取消と新契約の追加仕様を、確定/開始/claim/実thread/start・turn/startで照合する。native→review guardを実RPC応答まで保持し、送信前拒否と送信後の結果不明を区別する。原文・条件・コマンド・資源のunion上限は承認前に拒否し、切捨てない。draft v2とintegration_resolutionの設定/Task class/scheduler記録で、旧readerや元成果admissionを復元できないCLI/runnerを拒否する。元差分・主checkout・人間受入を自動変更しない。未送信終了では元の担当/read-write権限を保持する。
+
+最終の解決2件は2/2・失敗/取消/skip0・278004.3927ms・actual exit0。直前の関連24件中23成功/1再起動fixture手順失敗（actual exit1）を保持し、修正したfixtureの影響範囲だけ再実行した。通常の契約確定/直接Solも正規化修正後に確認。型検査/build/差分検査成功、GUI6ケースと最終buildの代表2ケース、48px・横超過/overlayなし・予期しないconsole/page error0、アニメーション完了後の画像を確認した。重複集合は合算しない。独立read-only監査で追加material blockerなし、監査側変更/テストなし。
+
+実providerでのこの新経路、任意のコード競合の品質、部分作成/unknownの完全な復旧、reader/writer参加・版移行・保持/性能、実機safe-area/keyboard、人の全導線受入を継続する。既存の実Astra結果伝達/別ファイル実コード統合を新経路の実モデル証明へ換算しない。native Luna開始保留、Jev/知識/Policy/履歴等の残工程、全73要件・Phase0–8を維持し、全体の完成宣言ではない。

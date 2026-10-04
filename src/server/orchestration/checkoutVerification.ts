@@ -39,7 +39,7 @@ interface CheckoutVerificationOptions {
   allowedPaths: string[]; requiredVerification: string[]; commands: VerificationCommand[];
   processOwner?:TaskExecutionOwner;
   /** Explicit research mode; legacy/write callers still require a diff. */
-  taskMode?: "read_only_research";
+  taskMode?: "read_only_research" | "integration_resolution";
 }
 export async function verifyConfiguredCheckout(options:CheckoutVerificationOptions, signal?: AbortSignal, outputName = "verification.json") {
   if (outputName !== "command-verification.json" && !/^verification(?:-r[1-9][0-9]?)?\.json$/.test(outputName)) throw Error("Verification output name invalid");

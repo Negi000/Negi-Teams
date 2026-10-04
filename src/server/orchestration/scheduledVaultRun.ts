@@ -19,6 +19,7 @@ export interface ScheduledVaultRunOptions {
   signal?: AbortSignal;
   onCapacityReleased?: () => Promise<void>;
   admit?:TaskAdmissionGuard;
+  taskMode?:"read_only_research"|"integration_resolution";
   beforeRelease?:()=>Promise<void>;
 }
 
@@ -36,12 +37,14 @@ export async function runScheduledVaultTask(options: ScheduledVaultRunOptions): 
   const research = run.luna !== undefined && run.sol === undefined;
   if (!registered || registered.work.role !== (research ? "luna" : "sol") ||
       registered.work.checkoutMode !== (research ? "read" : "write") ||
-      registered.work.taskMode !== (research ? "read_only_research" : undefined) ||
+      registered.work.taskMode !== (research ? "read_only_research" : options.taskMode) ||
       (registered.work.execution !== "direct" && registered.work.execution !== (research ? "astra_to_luna" : "astra_to_sol") &&
         !(registered.work.execution === undefined && !research)) ||
       resolve(registered.work.checkout).toLowerCase() !== resolve(run.cwd).toLowerCase()) {
     throw new Error("scheduled run does not match registered worker and checkout permissions");
   }
+  if(registered.work.taskMode==="integration_resolution"&&(!options.admit||!run.approvedPlan||research))
+    throw Error("Resolution requires restored source admission before scheduler claim");
   const claim=()=>scheduler.claim(run.runId,dispatchKey);
   if(options.admit)await options.admit(claim);else await claim();
   const record = async (keySuffix: string, action: SchedulerAction) => {
@@ -90,8 +93,8 @@ export async function runScheduledVaultTask(options: ScheduledVaultRunOptions): 
     };
   // Preserve the historical Sol checkpoint for injected callers, including its
   // after-wait contract recheck. Research has its own exact worker checkpoint.
-  const executionRun:VaultRunOptions=isPipeline?{...run,
-    ...(research?{beforeWorker:checkpoint}:{beforeSol:checkpoint})}:run;
+  const executionRun:VaultRunOptions={...run,...(options.admit?{providerAdmission:options.admit}:{}),
+    ...(isPipeline?(research?{beforeWorker:checkpoint}:{beforeSol:checkpoint}):{})};
   try {
     result = await (options.execute ?? runSingleTaskFromVault)(executionRun);
     if (isPipeline && ["ready_for_review", "accepted"].includes(result.status) &&

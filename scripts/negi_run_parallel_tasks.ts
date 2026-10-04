@@ -28,6 +28,8 @@ const [taskPath, reviewPath] = process.argv.slice(2);
 if (!taskPath || !reviewPath || process.argv.length !== 4)
   throw new Error("Usage: node --import tsx scripts/negi_run_parallel_tasks.ts <absolute-tasks.json> <absolute-reviews.json>");
 const catalog = await json(taskPath) as { runs: Array<{ title: string; config: unknown }> };
+if(catalog.runs.some(run=>parseVaultRunConfig(run.config).taskMode==="integration_resolution"))
+  throw Error("Resolution must start through its restored contract/source admission service");
 const service = await LocalTaskService.open(catalog);
 try {
   if (catalog.runs.length < 2 || catalog.runs.length > 3) throw new Error("Parallel run requires two or three registered Tasks");

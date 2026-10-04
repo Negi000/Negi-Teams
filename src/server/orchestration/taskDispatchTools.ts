@@ -1,6 +1,7 @@
 // Planner tools dispatch the same fixed catalog and scheduler used by the Task UI.
 // They cannot create roots/commands, alter contracts, approve operations or accept results.
 import { createHash } from "node:crypto";
+import { IntegrationResolutionPlanLimitError } from "./integrationResolution.ts";
 import type { CodexDynamicToolCall, CodexDynamicToolDefinition, CodexDynamicToolResult, CodexDynamicToolLimits } from "../master/appServerClient.ts";
 import type { LocalTaskService, TaskRunView, TaskRequestOrigin } from "./taskService.ts";
 import type { TaskResultContext } from "./taskResults.ts";
@@ -33,8 +34,13 @@ const taskSchema = {type:"object",additionalProperties:false,properties:{
   maxAttempts:{type:"integer",minimum:1,maximum:3},timeLimitMinutes:{type:"integer",minimum:1,maximum:480}},
   required:["title","objective","inScope","outOfScope","allowedPaths","invariants","acceptance","escalation","implementationPlan","references","maxAttempts","timeLimitMinutes"]};
 const authoringDefinitions = [
+  definition("negi_read_integration_sources", "変更範囲が重なる検証済みTaskの原文・契約・固定版と引継ぐ検証を読む。統合を解決する新契約の前に使う。差分適用やモデル起動は行わない。大きすぎる成果は分割して確認する。", {
+    profile_id:runId, source_run_ids:{type:"array",minItems:2,maxItems:8,items:runId} },["profile_id","source_run_ids"]),
+  definition("negi_propose_resolution_task", "読んだ固定成果を統合する解決Taskの契約案を保存する。元成果の全受入条件をそのまま含め、変更範囲は元成果のファイル集合と一致させる。元成果・必須仕様・検証を変更せず、一つの作業場所でSolが解決する計画を作る。具体的な人間確認後にだけ契約化でき、ここでは実装や成果受入を開始しない。", {
+    profile_id:runId, source_run_ids:{type:"array",minItems:2,maxItems:8,items:runId},source_selection_sha256:configHash,
+    task:taskSchema },["profile_id","source_run_ids","source_selection_sha256","task"]),
   definition("negi_list_projects", "新しい独立Taskを作れる、利用者設定済みプロジェクトと実行条件を読む。保存先・コマンド・モデル・権限は変更できない。", {}, []),
-  definition("negi_read_project", "契約案を作る前に必須仕様と指定した参照の全文・版・hashを読む。未確認の仕様や依存Taskを推測せず、独立Taskだけを計画する。", {
+  definition("negi_read_project", "契約案を作る前に必須仕様と指定した参照の全文・版・hashを読む。未確認の仕様や依存Taskを推測しない。通常Taskは独立して計画し、重なる元成果の解決には固定成果の読取と解決Taskの専用ツールを使う。", {
     profile_id:runId, baseline_id:baselineId, reference_ids:{type:"array",maxItems:50,items:runId} },["profile_id"]),
   definition("negi_propose_task", "利用者の新しい依頼について、読んだ仕様に基づく短い契約案とSolへの実行計画を保存する。実装・Vault active化・worktree作成・成果受入は行わない。契約画面URLを利用者に案内する。依存Taskが必要なら案を作らずその依存を解決する。", {
     profile_id:runId, baseline_id:baselineId, task:taskSchema },["profile_id","task"]),
@@ -83,6 +89,8 @@ export function registeredTaskTools(service: LocalTaskService, masterId: string,
   if (!/^[a-zA-Z0-9._-]{1,100}$/.test(masterId)) throw new Error("Task planner identity invalid");
   return { definitions: structuredClone([...definitions,...(authoring?authoringDefinitions:[])]), ...(authoring?{authoring:true,
     limits: { negi_propose_task: { argumentBytes: 10_000, resultBytes: 24_000 },
+      negi_read_integration_sources: { argumentBytes: 8000, resultBytes: 64_000 },
+      negi_propose_resolution_task: { argumentBytes: 12_000, resultBytes: 24_000 },
       negi_propose_task_decomposition: { argumentBytes: 50_000, resultBytes: 24_000 },
       negi_read_project: { argumentBytes: 8000, resultBytes: 64_000 } }}:{}),
     prepareResultContext: (threadId, input) => service.prepareResultContext(masterId, threadId, input), async invoke(call) {
@@ -93,6 +101,18 @@ export function registeredTaskTools(service: LocalTaskService, masterId: string,
       let value: unknown;
       if (authoring && call.tool === "negi_list_projects") {
         argumentsObject(call.arguments,[]); value = { projects:authoring.service.listProfiles() };
+      } else if (authoring && ["negi_read_integration_sources","negi_propose_resolution_task"].includes(call.tool)) {
+        const args=argumentsObject(call.arguments,call.tool==="negi_read_integration_sources"?["profile_id","source_run_ids"]:
+          ["profile_id","source_run_ids","source_selection_sha256","task"]);
+        if (typeof args.profile_id!=="string" || !Array.isArray(args.source_run_ids) || args.source_run_ids.some(id=>typeof id!=="string"))
+          throw Error("Resolution source selection invalid");
+        if (call.tool==="negi_read_integration_sources") value=await authoring.service.readIntegrationResolution(args.profile_id,args.source_run_ids);
+        else {
+          if(typeof args.source_selection_sha256!=="string")throw Error("Resolution source hash required");
+          const draft=await authoring.service.proposeResolution(args.profile_id,args.source_run_ids,args.source_selection_sha256,args.task,{...origin,...authoring.planner});
+          value={draftId:draft.id,title:draft.title,hash:draft.hash,status:draft.status,url:`/task-plans?draft=${draft.id}`,
+            executionStarted:false,humanConfirmationRequired:true};
+        }
       } else if (authoring && ["negi_read_project","negi_propose_task","negi_propose_task_decomposition"].includes(call.tool)) {
         const args=argumentsObject(call.arguments,call.tool==="negi_read_project"?["profile_id","reference_ids","baseline_id"]:
           call.tool==="negi_propose_task_decomposition"?["profile_id","decomposition","baseline_id"]:["profile_id","task","baseline_id"]);
@@ -143,9 +163,12 @@ export function registeredTaskTools(service: LocalTaskService, masterId: string,
         } else throw new Error("Task tool not registered");
       }
       const text = JSON.stringify(value);
-      if (Buffer.byteLength(text) > (call.tool==="negi_read_project"?64_000:24_000)) throw new Error("Complete Task response exceeds tool limit");
+      if (Buffer.byteLength(text) > (["negi_read_project","negi_read_integration_sources"].includes(call.tool)?64_000:24_000)) throw new Error("Complete Task response exceeds tool limit");
       return { success: true, text };
     } catch (error) {
+      if (error instanceof IntegrationResolutionPlanLimitError) return { success:false,text:JSON.stringify({
+        error:"元成果の原文・条件・検証を一つの解決契約へ収められません。成果を分けて計画し、元成果の条件を再確認してください。",
+        nextAction:"decompose_and_review",noAutomaticRetry:true }) };
       if (call.tool === "negi_propose_task_decomposition" && error instanceof TaskDecompositionKeyError) {
         return { success: false, text: JSON.stringify({ code: "invalid_decomposition_key",
           error: "作業IDは小文字の英字から始め、英小文字・数字・ハイフンだけで40文字以内にしてください。依存先も同じIDを使います。例: task-counts。",
@@ -153,7 +176,8 @@ export function registeredTaskTools(service: LocalTaskService, masterId: string,
           noAutomaticRetry: true }) };
       }
       return { success: false, text: JSON.stringify({ error: "Taskの契約・版・現在の状態を照合できません。再委任せずTask画面で確認してください。",
-        nextTool: call.tool.includes("project")||call.tool.startsWith("negi_propose_task") ? "negi_read_project" : "negi_read_task", noAutomaticRetry: true }) };
+        nextTool: ["negi_read_integration_sources","negi_propose_resolution_task"].includes(call.tool) ? "negi_read_integration_sources" :
+          call.tool.includes("project")||call.tool.startsWith("negi_propose_task") ? "negi_read_project" : "negi_read_task", noAutomaticRetry: true }) };
     }
   } };
 }

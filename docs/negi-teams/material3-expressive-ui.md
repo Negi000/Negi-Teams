@@ -209,3 +209,11 @@ compiled通常serverと合成保存TaskでChromium1440/375/320px・両テーマ�
 既存の色・shape・type・focus・48px操作とPCの選択/内容2列、スマホの1列/下部ナビを使い、[重なる変更範囲の案内](../negi-teams-integration-execution.md#2026-10-04-重なる変更範囲を統括へ戻す)を追加した。短い見出し、重なるファイル、元レビュー、確認できる依頼文、コピーと統括への移動を一つの判断単位にする。内部パスやモデル権限の設定を通常の画面へ追加しない。
 
 境界/既存統合4件、型検査/build/差分検査成功。compiled HTTPと保存されたfixture成果の5ケース＋未完了1ケースを確認し、見出し修正後の最終buildは合成sourceで1440/375/320px・明暗6ケースを確認した。最終の実theme、見出し1行、48px、横幅、focus/Enterコピー、clipboard読戻し、overlayなしと予期しないconsole/page error0を確認。preview409の期待resource error6件を分けて記録する。補助script/初期theme設定の途中失敗は保持し、成功に合算しない。画像・証拠は公開差分外。実コード競合の解決・人間受入・実機safe-area/仮想キーボードは未確認。
+
+## 2026-10-04: 解決契約で元成果を確認する
+
+[固定原文を使う解決Task](../negi-teams-integration-resolution.md)を、統括の契約案カードと契約確認へ接続した。確定操作より前に元成果のタイトル・引き継ぐ受入条件・元レビューを表示し、固定版と元契約の条件、全成果原文を別のdetailsで確認できる。PCは一覧＋詳細、スマホは契約選択＋単一詳細を使い、同じMaterialの色・shape・type・focus・48px操作を保持する。通常契約への切替や取得失敗で古い元成果を消し、同じ選択の更新では展開状態を保持する。
+
+Browser plugin not availableのため既存Playwright/Chromiumで、compiled HTTPと合成の契約viewを操作した。1440/375/320px・明暗6ケースでURL/title、元原文のtextContent表示、review link、keyboard開閉、同じ選択の更新、通常契約への切替、deep link/reload、stale時の確定拒否、取得失敗後の消去、明示確定1回、48px・横超過/overlayなし・予期しないconsole/page error0を確認した。期待するstale409のresource error6件は別記録。
+
+その後のbackend修正でpage/HTTP sourceが同じであることを照合し、最終buildで1440px light・320px darkの代表2ケースを再確認した。初期galleryは表示アニメーション途中の画像だったため、完了とopacity1を待って画像を撮り直し、最終2枚を直接確認した。画像の撮直しを追加機能や6ケースへの件数加算と扱わない。所有browser/serverは終了し、ログ・画像・途中失敗は公開差分外に保存した。実保存と固定コード検証は別のGit/Vault/Task/Review試験で、GUIの合成viewを実provider・実機safe-area/keyboard・人の使いやすさの受入へ換算しない。

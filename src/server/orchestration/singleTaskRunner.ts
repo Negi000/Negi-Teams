@@ -30,6 +30,7 @@ export interface SingleTaskRunOptions {
   deadlineAtMs?: number;
   beforeSol?: () => Promise<void>;
   beforeWorker?: () => Promise<void>;
+  providerAdmission?: <T>(operation: () => Promise<T>) => Promise<T>;
   astraContext?: string;
   approvedPlan?: ApprovedTaskPlan;
   solContext?: string;
@@ -39,6 +40,13 @@ export interface SingleTaskRunOptions {
   onProviderTerminal?: (data: { role: TaskRole; attemptId: string; threadId: string; turnId: string }) => Promise<void>;
   verify: (evidence: { contract: ContractRef; planRef: string; workRef: string }) =>
     Promise<{ outcome: "passed" | "failed" | "unknown"; evidenceRef: string }>;
+}
+class ProviderAdmissionRejected extends Error {}
+async function admitProvider<T>(options: SingleTaskRunOptions, operation: () => Promise<T>): Promise<T> {
+  if (!options.providerAdmission) return operation();
+  let dispatched = false;
+  try { return await options.providerAdmission(() => { dispatched = true; return operation(); }); }
+  catch (error) { if (!dispatched) throw new ProviderAdmissionRejected("Source admission declined before provider dispatch", { cause: error }); throw error; }
 }
 
 const verificationResponsibility =
@@ -121,6 +129,8 @@ function observedUsage(result: CodexTurnObservation, threadId: string): AttemptU
 }
 
 export async function runSingleTask(options: SingleTaskRunOptions): Promise<TaskSnapshot> {
+  if(options.contract.taskClass==="integration_resolution"&&(!options.providerAdmission||!options.approvedPlan))
+    throw Error("Resolution source admission and approved plan are required before provider dispatch");
   const readOnly = options.contract.taskClass === "read_only_research";
   if(readOnly)researchReviewMetadata(options.contract);
   const worker = readOnly ? options.luna : options.sol;
@@ -177,10 +187,12 @@ export async function runSingleTask(options: SingleTaskRunOptions): Promise<Task
         reason: `${role} task time limit expired before dispatch` }), text: null, ref: null };
     }
     try {
-      identity = await settings.client.startThread({ cwd: options.cwd, model: settings.model,
-        sandbox: role === "sol" ? "workspace-write" : "read-only", ...(readOnly?{readOnlyContract:true as const}:{}) });
+      identity = await admitProvider(options, () => settings.client.startThread({ cwd: options.cwd, model: settings.model,
+        sandbox: role === "sol" ? "workspace-write" : "read-only", ...(readOnly?{readOnlyContract:true as const}:{}) }));
       await append({ type: "bind_thread", attemptId, threadId: identity.threadId });
-    } catch {
+    } catch (error) {
+      if (error instanceof ProviderAdmissionRejected) return { state: await append({ type: "fail_attempt", attemptId,
+        reason: `${role} source admission declined before thread/start` }), text: null, ref: null };
       return { state: await append({ type: "provider_unknown", attemptId,
         reason: `${role} thread creation or ledger binding not confirmed` }), text: null, ref: null };
     }
@@ -197,14 +209,16 @@ export async function runSingleTask(options: SingleTaskRunOptions): Promise<Task
         reason: `${role} task time limit expired before turn dispatch` }), text: null, ref: null };
     }
     try {
-      turnId = await settings.client.startTurn(prompt, settings.effort);
+      turnId = await admitProvider(options, () => settings.client.startTurn(prompt, settings.effort));
       await append({ type: "bind_provider", attemptId, threadId: identity.threadId, turnId });
       await options.onProviderBound?.({ role, attemptId, threadId: identity.threadId, turnId });
       const remaining = options.deadlineAtMs === undefined ? options.turnTimeoutMs :
         Math.min(options.turnTimeoutMs, Math.max(1, options.deadlineAtMs - Date.now()));
       result = await settings.client.waitForTurn(turnId, remaining);
       await options.onProviderTerminal?.({ role, attemptId, threadId: identity.threadId, turnId });
-    } catch {
+    } catch (error) {
+      if (error instanceof ProviderAdmissionRejected) return { state: await append({ type: "fail_attempt", attemptId,
+        reason: `${role} source admission declined before turn/start` }), text: null, ref: null };
       return { state: await append({ type: "provider_unknown", attemptId,
         reason: `${role} provider outcome not confirmed` }), text: null, ref: null };
     }

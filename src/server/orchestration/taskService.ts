@@ -464,6 +464,31 @@ export class LocalTaskService {
     return this.runtimeInventory?Object.freeze({root:join(this.root,"master-conversations"),
       turnRoot:join(this.root,"master-turns"),schedulerPath:this.scheduler.path}):null;
   }
+  /** Trusted authoring reads, ordered native storage -> review source guard. */
+  withIntegrationSources<T>(operation: () => Promise<T>): Promise<T> {
+    if (!this.reviews) throw Error("Resolution requires the registered Task review service");
+    this.reviews.assertResultSourceStorage(this.resultSourceStorageRegistration());
+    return this.reviews.withResultSource(operation);
+  }
+  async verifyIntegrationContract(id: string): Promise<void> {
+    const run = this.registered(id);
+    if (hash(await readFile(run.config.snapshot)) !== run.snapshotSha256)
+      throw Error("Resolution source contract snapshot changed");
+    // The source checkout is a verified dirty result. Revision validation keeps
+    // its scope while re-exporting the active Vault Task and complete note closure.
+    await loadVaultTaskContract(run.config.vault, run.config.snapshot, run.config.checkout, undefined,
+      { baseSha: String(run.contract.baseSha), sha256: String(run.contract.sha256) });
+  }
+  async integrationArtifact(id: string, expectedSha256: string) {
+    return this.withIntegrationSources(async () => {
+      const source = await this.integrationSource(id), manifest = await source.readManifest!();
+      if (manifest.review.verifiedArtifactSha256 !== expectedSha256) throw Error("Resolution artifact version changed");
+      const artifact = await this.reviews!.snapshot(manifest.review.id, { includeRelations: false });
+      if (artifact.integrityError || artifact.status === "revoked" || artifact.artifactSha256 !== expectedSha256)
+        throw Error("Resolution artifact requires correction or reconciliation");
+      return { id: artifact.id, content: artifact.content, artifactSha256: artifact.artifactSha256 };
+    });
+  }
   async connectReviews(service: LocalReviewService): Promise<void> {
     const registration=this.resultSourceStorageRegistration();
     if(registration)service.bindResultSourceStorage(registration,operation=>this.runtimeInventory!.withStorage(operation));
@@ -912,7 +937,9 @@ export class LocalTaskService {
     const nativeResearch=run.config.taskMode==="read_only_research"&&
       (this.runtime.prepare===prepareVaultRun||this.runtime.execute===executeVaultRun);
     const startHoldReason=nativeResearch&&!request&&!entry&&!state?
-      "Lunaの調査は準備中のため、まだ開始できません。契約と保存済みの成果は確認できます。":null;
+      "Lunaの調査は準備中のため、まだ開始できません。契約と保存済みの成果は確認できます。":
+      run.config.taskMode==="integration_resolution"&&!this.admissionGuards.has(id)?
+      "元成果を照合する契約サービスを復元してから開始できます。":null;
     return { id, title: run.title, configSha256: run.configSha256,
       project: run.contract.project as string, objective: run.contract.objective as string,
       taskId: run.contract.vaultId as string, version: run.contract.version as number,
@@ -1004,6 +1031,7 @@ export class LocalTaskService {
       for (const [id, prepared] of this.prepared) {
         const entry = state.entries.find((item) => item.work.id === id);
         if (this.active.has(id) || !entry || !schedulerWorkEligible(state, entry)) continue;
+        if(prepared.config.taskMode==="integration_resolution"&&!this.admissionGuards.has(id))continue;
         const controller = new AbortController();
         let owner: TaskExecutionOwner | undefined;
         const promise = Promise.resolve().then(async () => {
@@ -1059,7 +1087,10 @@ export class LocalTaskService {
   private async admitWhenAvailable<T>(id:string,operation:()=>Promise<T>,signal:AbortSignal,deadline:number):Promise<T> {
     for(;;){
       if(signal.aborted||this.closing||Date.now()>=deadline)throw Error("Task stopped before integration admission");
-      try{return await this.admissionGuards.get(id)!(operation)}
+      try{return await this.admissionGuards.get(id)!(()=>{
+        if(signal.aborted||this.closing||Date.now()>=deadline)throw Error("Task stopped before provider admission");
+        return operation();
+      })}
       catch(error){if(!(error instanceof ReviewDecisionBusyError))throw error;await wait(100,undefined,{signal})}
     }
   }

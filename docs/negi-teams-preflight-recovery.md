@@ -46,3 +46,9 @@ Task開始の結果通知・状態読取は、configuration writerとpreflight o
 合成の事前確認失敗から実native索引・ビルド済みHTTP/Chromeで確認、明示終了、再読込、署名記録欠落時の保留を検証する。PC1440px、375px、320px、明暗、Space確認、48px操作、横幅、consoleを確認する。これは新しい実Astra→Sol→レビュー→Astraの成功やnative phoneの受入ではない。
 
 既存の失敗した実モデル要求は再送・削除していない。原因を失った旧generic failureから正確な例外を復元しない。部分作成、未知provider/owner、全reader参加の測定、directory metadataを含む実停電耐性、実機safe area/keyboard、旧dispatch全面移行と全73要件の受入は継続する。この追加はdraft上の進捗で、production activation、完成、release、CI成功を意味しない。
+
+## 2026-10-04: Task区分と担当権限を保存する
+
+[解決Task](negi-teams-integration-resolution.md)の未送信終了では、integration_resolutionとSol/write/directを作業記録へ残す。結果不明の照合にも同じ区分を残す。未送信の明示調査はLuna/read・資源read・元の実行形態を保持し、Sol/writeへ読み替えない。終了専用条件と共通scheduler検証の両方を満たす場合だけterminal予約を保存する。開始保留のnative Lunaを有効にする変更ではない。
+
+終了writerの既定off、運用者の明示activation、全reader/writer更新、元要求・署名・無admissionの照合、未知状態の保留、旧版との混在非対応を維持する。モデルturn・claim・submitは終了操作から送信しない。

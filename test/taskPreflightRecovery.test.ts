@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +18,8 @@ import { observeRuntimeHelper } from "../src/server/orchestration/runtimeHelperO
 import { LocalReviewService } from "../src/server/orchestration/reviewService.ts";
 import type { VaultRunConfig } from "../src/server/orchestration/vaultRunConfig.ts";
 import type { VaultTaskContract } from "../src/server/orchestration/vaultTaskContract.ts";
+import { TaskPreflightRecovery, type PreflightRecoverySource } from "../src/server/orchestration/taskPreflightRecovery.ts";
+import { FileTaskLedger } from "../src/server/orchestration/singleTask.ts";
 
 async function fixture(run:(f:Awaited<ReturnType<typeof setup>>)=>Promise<void>,indexed=false){
  const dir=await mkdtemp(join(tmpdir(),"negi-preflight-recovery-"));
@@ -67,6 +69,32 @@ test("authenticated close preserves evidence and reserves the old run terminal a
   assert.equal((await reload.start(view.id,view.configSha256,f.requestId)).status,"cancelled");
   await assert.rejects(reload.start(view.id,view.configSha256,randomUUID()),/already requested/);
  }finally{await reload.close();await service.close()}
+}));
+
+test("unsent research closure preserves Luna read permissions without dispatch",async()=>fixture(async f=>{
+ const root=join(f.dir,"research-state");await mkdir(root);
+ const {sol,...shared}=f.config;
+ const config:VaultRunConfig={...shared,runId:"research-unsent",taskMode:"read_only_research",luna:sol,
+  snapshot:join(root,"contract.json"),outputDir:join(root,"output"),schedulerPath:join(root,"scheduler.jsonl"),resources:["research"]};
+ const contract:VaultTaskContract={...f.contract,taskClass:"read_only_research"};
+ const snapshot=JSON.stringify(contract),configSha256="b".repeat(64);
+ await writeFile(config.snapshot,snapshot);
+ await writeFile(join(root,config.runId+".request.json"),JSON.stringify({runId:config.runId,configSha256,requestId:randomUUID(),at:new Date().toISOString()}));
+ await writeFile(join(root,config.runId+".error.json"),"Synthetic unsent failure");
+ const scheduler=new FileScheduler(config.schedulerPath);await scheduler.ensureSubscriptionConfiguration();
+ const source:PreflightRecoverySource={root,config,configSha256,contract,
+  snapshotSha256:createHash("sha256").update(snapshot).digest("hex"),ledger:new FileTaskLedger(join(config.outputDir,"run.jsonl")),
+  scheduler,isActive:()=>false,withStorage:async run=>run()};
+ try{const recovery=await TaskPreflightRecovery.open(root),inspection=await recovery.inspect(source,randomUUID());
+  assert.equal(inspection.canClose,true);
+  await recovery.close(source,randomUUID(),inspection.inspectionId,inspection.dossierSha256);
+  const schedule=await scheduler.read(),entry=schedule.state!.entries[0];
+  assert.equal(entry.status,"cancelled");assert.equal(entry.work.role,"luna");assert.equal(entry.work.checkoutMode,"read");
+  assert.equal(entry.work.taskMode,"read_only_research");assert.equal(entry.work.execution,"astra_to_luna");
+  assert.deepEqual(entry.work.resources,[{name:"research",mode:"read"}]);
+  assert.equal(await recovery.verifyClosed(source,entry,schedule.events),true);
+  assert.equal(schedule.events.some(e=>e.action.type==="submit"||e.action.type==="claim"),false);
+ }finally{await f.service.close()}
 }));
 
 test("changed checkout, output ownership, scheduler admission and stale lock each hold preflight closure",async()=>fixture(async f=>{

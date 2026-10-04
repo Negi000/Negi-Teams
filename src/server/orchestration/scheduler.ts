@@ -36,7 +36,7 @@ export interface ScheduledWork {
   /** Old unphased Sol writers conservatively reserve both role limits until terminal. */
   execution?: "direct" | "astra_to_sol" | "astra_to_luna";
   /** A Luna implementation role alone is not a read-only permission boundary. */
-  taskMode?: "read_only_research";
+  taskMode?: "read_only_research" | "integration_resolution";
   /** Server-owned binding for resident Master records. Legacy records lack this binding. */
   masterOwner?: { masterId: string; requestSha256: string };
 }
@@ -203,7 +203,8 @@ export function reduceScheduler(state: SchedulerSnapshot | null,
   }
   if (action.type === "submit" || action.type === "close_unsubmitted") {
     const work = action.work;
-    if (action.type === "close_unsubmitted") reject(work.role === "sol" && work.checkoutMode === "write" &&
+    if (action.type === "close_unsubmitted") reject((work.role === "sol" && work.checkoutMode === "write" ||
+      work.taskMode === "read_only_research" && work.role === "luna" && work.checkoutMode === "read") &&
       work.masterOwner === undefined && work.parentId === null && work.dependencies.length === 0 && work.reserveUsd === 0 &&
       /^user:preflight-close:[0-9a-f-]{36}$/.test(action.evidenceRef), "invalid unsubmitted close");
     reject(work.masterOwner === undefined || (Boolean(work.masterOwner) && typeof work.masterOwner === "object" && !Array.isArray(work.masterOwner) && Object.keys(work.masterOwner).length === 2 &&
@@ -217,6 +218,7 @@ export function reduceScheduler(state: SchedulerSnapshot | null,
       ["read", "write"].includes(work.checkoutMode) &&
       (work.role !== "astra" || work.checkoutMode === "read") &&
       (work.taskMode === undefined ? work.execution !== "astra_to_luna" :
+        work.taskMode === "integration_resolution" ? work.role === "sol" && work.checkoutMode === "write" && work.execution === "direct" :
         work.taskMode === "read_only_research" && work.role === "luna" && work.checkoutMode === "read" &&
         work.resources.every(claim=>claim.mode==="read") &&
         (work.execution === "direct" || work.execution === "astra_to_luna")) &&

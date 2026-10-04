@@ -11,12 +11,13 @@ if (!path || !isAbsolute(path) || process.argv.length !== 3) {
   process.exitCode = 2;
 } else {
   const config = parseVaultRunConfig(JSON.parse(await readFile(path, "utf8")));
+  if(config.taskMode==="integration_resolution")throw Error("Resolution must start through its restored contract/source admission service");
   const prepared = await prepareVaultRun(config);
   const scheduler = new FileScheduler(config.schedulerPath);
   await submitVaultRun(prepared, scheduler);
   const result = await executeVaultRun(prepared, scheduler);
   process.stdout.write(JSON.stringify({ runId: config.runId, taskId: prepared.contract.vaultId,
-    ...(config.taskMode?{taskMode:config.taskMode,resultKind:"read-only-artifact",reviewAvailability:"not-registered"}:{}),
+    ...(config.taskMode==="read_only_research"?{taskMode:config.taskMode,resultKind:"read-only-artifact",reviewAvailability:"not-registered"}:{}),
     status: result.status, schedulerStatus: (await scheduler.read()).state?.entries.find((entry) =>
       entry.work.id === config.runId)?.status, verification: result.verification, acceptedBy: result.acceptedBy,
     attempts: result.attempts.map((attempt) => ({ role: attempt.role,

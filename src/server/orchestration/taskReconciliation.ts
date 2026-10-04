@@ -25,7 +25,7 @@ export interface TaskReconciliationSource {
 }
 export interface TaskReconciliationDossier {
   runId:string;configSha256:string;snapshotSha256:string;
-  taskMode?:"read_only_research";
+  taskMode?:"read_only_research"|"integration_resolution";
   contract:Pick<TaskSnapshot["contract"],"vaultId"|"version"|"sha256"|"baseSha"> & {scope:{allowedPaths:string[]}};taskStatus:string;attempt:Attempt;
   approvals:Array<{id:string;operation:string;target:string;targetSha256:string;targetTruncated:boolean;decision:string}>;
   approvalSummary:{count:number;omitted:number;sha256:string};
@@ -158,7 +158,7 @@ async function localDossier(source:TaskReconciliationSource):Promise<TaskReconci
   const authoritySha256=await storedContract(source,state);
   const owner=await inspectTaskExecutionOwner(config.outputDir,config.runId,source.configSha256,entry.claimKey);
   return {runId:config.runId,configSha256:source.configSha256,snapshotSha256:source.snapshotSha256,
-    ...(worker.role==="luna"?{taskMode:"read_only_research" as const}:{}),
+    ...(config.taskMode?{taskMode:config.taskMode}:{}),
     contract:{vaultId:state.contract.vaultId,version:state.contract.version,sha256:state.contract.sha256,baseSha:state.contract.baseSha,
       scope:{allowedPaths:state.contract.scope?.allowedPaths??[]}},taskStatus:state.status,attempt,
     approvals:state.approvals.slice(-100).map(a=>({id:a.id.slice(0,160),operation:a.operation.slice(0,200),target:a.target.slice(0,500),

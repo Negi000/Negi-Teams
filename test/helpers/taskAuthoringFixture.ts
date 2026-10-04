@@ -20,7 +20,10 @@ const requestOrigin = { kind:origin.kind,masterId:origin.masterId,threadId:origi
 const git = (cwd:string,args:string[])=>execFileSync("git",args,{cwd,windowsHide:true,encoding:"utf8",stdio:["ignore","pipe","pipe"]}).trim();
 const note = (id:string,kind:string,body:string,extra="") => `---\nid: ${id}\nkind: ${kind}\nproject: fixture\nscope: project\nstatus: active\nversion: 1\nupdated: 2026-10-01\nsensitivity: local\nsource_refs:\n  - user:fixture\n${extra}---\n${body}\n`;
 
-async function setup(verification?: (root: string) => VaultRunConfig["verification"]) {
+async function setup(verification?: (root: string) => VaultRunConfig["verification"], fixtureHooks?: {
+  write?: (prepared: PreparedVaultRun, prompt: string) => Promise<void>;
+  thread?: (prepared: PreparedVaultRun) => Promise<void>;
+}) {
   const root=await mkdtemp(join(tmpdir(),"negi-authoring-")),repo=join(root,"repo"),vault=join(root,"vault");
   try {
   await mkdir(repo);await mkdir(join(repo,"docs"));await writeFile(join(repo,"docs","base.txt"),"base\n");
@@ -39,16 +42,16 @@ async function setup(verification?: (root: string) => VaultRunConfig["verificati
   const catalog={stateRoot:join(root,"task-state"),runs:[{title:"Trusted template",config}]};
   const authoringConfig={storageRoot:join(root,"authoring"),profiles:[{id:"docs-project",title:"ドキュメント作業",templateRunId:"template",repository:repo,
     worktreeRoot:join(root,"worktrees"),allowedPaths:["docs"],maxAttempts:1,timeLimitMinutes:5}]};
-  let astraCalls=0,solCalls=0;
+  let astraCalls=0,solCalls=0;const prompts:string[]=[];
   const prepare=async(config:VaultRunConfig)=>{const contract=await loadVaultTaskContract(config.vault,config.snapshot,config.checkout);
     return {config,contract,approvedPlan:await loadApprovedTaskPlan(config,contract)};};
   const runtime={prepare,submit:submitVaultRun,execute:async(prepared:PreparedVaultRun,scheduler:Parameters<typeof submitVaultRun>[1],_signal?:AbortSignal,hooks?:import("../../src/server/orchestration/vaultTaskExecution.ts").TaskExecutionHooks)=>{
     const {config}=prepared;
     const client=(role:"astra"|"sol"):SingleTaskClient=>({async initialize(){},async discoverModels(){return[{model:config[role].model,efforts:["medium"],inputModalities:["text"]}]},
-      async startThread(options){if(role==="astra")astraCalls++;else solCalls++;return{threadId:`thread-${role}`,requestedModel:options.model,resolvedModel:options.model,modelProvider:"fixture",rerouted:false}},
-      async startTurn(prompt){assert.match(prompt,/承認された文書を1件作る/);await writeFile(join(config.checkout,prepared.contract.scope.allowedPaths[0]),"approved fixture result\n");return`turn-${role}`},
+      async startThread(options){if(role==="astra")astraCalls++;else solCalls++;await fixtureHooks?.thread?.(prepared);return{threadId:`thread-${role}`,requestedModel:options.model,resolvedModel:options.model,modelProvider:"fixture",rerouted:false}},
+      async startTurn(prompt){prompts.push(prompt);if(fixtureHooks?.write)await fixtureHooks.write(prepared,prompt);else{assert.match(prompt,/承認された文書を1件作る/);await writeFile(join(config.checkout,prepared.contract.scope.allowedPaths[0]),"approved fixture result\n")}return`turn-${role}`},
       async waitForTurn(turnId){return{turnId,status:"completed",finalText:"Fixture result",contextInputTokens:null,contextWindow:null,lastUsage:null}}});
-    return runScheduledVaultTask({scheduler,admit:hooks?.admit,dispatchKey:`${config.runId}:dispatch`,run:{runId:config.runId,cwd:config.checkout,
+    return runScheduledVaultTask({scheduler,admit:hooks?.admit,taskMode:config.taskMode,dispatchKey:`${config.runId}:dispatch`,run:{runId:config.runId,cwd:config.checkout,
       vaultDirectory:config.vault,snapshotPath:config.snapshot,artifactDir:join(config.outputDir,"artifacts"),ledger:new FileTaskLedger(join(config.outputDir,"run.jsonl")),
       astra:{...config.astra,client:client("astra")},sol:{...config.sol,client:client("sol")},approvedPlan:prepared.approvedPlan,
       turnTimeoutMs:5000,verify:()=>verifyVaultRun(prepared)},execute:runSingleTaskFromVault});
@@ -58,7 +61,7 @@ async function setup(verification?: (root: string) => VaultRunConfig["verificati
   const fields:TaskPlanFields={title:"承認する新しい文書",objective:"承認された文書を1件作る",inScope:["docs/result.txtを追加"],outOfScope:["公開と既存文書の変更"],
     allowedPaths:["docs/result.txt"],invariants:["既存文書を維持する"],acceptance:["指定内容の文書が存在する"],escalation:["仕様変更が必要なら停止"],
     implementationPlan:["承認された文書を1件作る","指定チェックを実行して結果を報告する"],references:refs.sources.map(({id,version,sha256})=>({id,version,sha256})),maxAttempts:1,timeLimitMinutes:5};
-  return {root,repo,vault,spec,config,catalog,authoringConfig,fields,tasks,authoring,runtime,calls:()=>({astra:astraCalls,sol:solCalls}),
+  return {root,repo,vault,spec,config,catalog,authoringConfig,fields,tasks,authoring,runtime,prompts,calls:()=>({astra:astraCalls,sol:solCalls}),
     close:async()=>{await tasks.close();await rm(root,{recursive:true,force:true})}};
   } catch(error) { await rm(root,{recursive:true,force:true});throw error; }
 }
