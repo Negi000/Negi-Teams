@@ -130,6 +130,13 @@ const storageMaintenance=process.env.NEGI_STORAGE_MAINTENANCE==="1";
 if(storageMaintenance&&!authConfig.token)throw Error("Storage maintenance requires EBI_AUTH_TOKEN");
 let storageMode:StorageMode="legacy",storageModeInvalid=false;
 try{storageMode=parseStorageMode(process.env.NEGI_STORAGE_MODE)}catch{storageModeInvalid=true}
+// Dispatch authority is independent of the storage format. A Task catalog or
+// saved-project host must not also start unaccounted CLI/PTY work, including
+// before setup is complete or after a runtime service fails to open.
+const managedTasksOnly=storageMode==="indexed"||Boolean(process.env.NEGI_TASK_CONFIG||process.env.NEGI_SETUP_ROOT);
+const managedTaskNotice="この環境では、作業一覧から契約を確認して担当を開始してください。統括への依頼はチャットから送信できます。";
+const legacyExecutionControls=new Set(["/control/spawn","/control/inject","/control/reverse-inject",
+  "/control/send","/control/summarize","/control/setMode","/control/chat-permission"]);
 let projectSetup:LocalProjectSetup|null=null,projectConfiguration:LocalProjectConfiguration|null=null;
 let bootConfiguration:ProjectConfiguration|null=null,configurationStartupHeld=false;
 try{
@@ -549,6 +556,8 @@ async function startMasterChatSession(spec: FixedEbiSpec, setupOptions?:ReturnTy
   const codexReadOnly = setupOptions ?? (spec.brain === "codex"
     ? codexMasterLaunchOptions({ model: spec.launch.model, extraArgs: spec.extraArgs })
     : null);
+  if(managedTasksOnly&&(spec.kind!=="master"||spec.ui!=="chat"||spec.brain!=="codex"||!codexReadOnly))
+    throw Error("Task環境の統括には、共有実行枠を使うCodexチャットを設定してください。");
   if (codexReadOnly && !taskService)
     throw new Error("Codex chat master requires NEGI_TASK_CONFIG for shared turn admission");
   // config の args に --mcp-config を手書きしている場合はそちらを尊重する
@@ -990,6 +999,10 @@ const httpServer = createServer(async (req, res) => {
     res.writeHead(503,{"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store"});
     res.end(JSON.stringify({error:"保存・起動条件の確認中です。新しい実行・旧ツールの操作を保留しています。"}));return;
   }
+  if(managedTasksOnly&&req.method==="POST"&&legacyExecutionControls.has(urlPath)){
+    res.writeHead(409,{"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store"});
+    res.end(JSON.stringify({error:managedTaskNotice}));return;
+  }
   if (await controlApi(req, res, urlPath, url.searchParams)) return;
   let filePath = join(CLIENT_DIST, normalize(urlPath === "/" ? "/index.html" : urlPath));
   // ディレクトリトラバーサル防止。
@@ -1031,7 +1044,7 @@ const wss = new WebSocketServer({
 wss.on("connection", (ws) => {
   clients.add(ws);
   // 接続直後にサーバ能力（監督が有効か）を送る。クライアントはこれで要約 UI の出し分けをする。
-  send(ws, { type: "capabilities", supervisor: storageMode!=="indexed"&&supervisor.enabled, reviews: reviewService !== null, tasks: taskService !== null,taskAuthoring:taskAuthoringService!==null&&setupModelsVerified,projectSetup:!!authConfig.token,managedTasksOnly:storageMode==="indexed",codexConversations:storageMode==="indexed",conversationAuthority:storageConsole?.registrationSha256 });
+  send(ws, { type: "capabilities", supervisor: !managedTasksOnly&&supervisor.enabled, reviews: reviewService !== null, tasks: taskService !== null,taskAuthoring:taskAuthoringService!==null&&setupModelsVerified,projectSetup:!!authConfig.token,managedTasksOnly,codexConversations:storageMode==="indexed",conversationAuthority:storageConsole?.registrationSha256 });
   // master が ui:"chat" なら、registry より**先に** state と直近の会話を送る。
   // クライアントは「chatState を受けた id＝chat モードの master」と判定して xterm ペインを
   // 作らない分岐に入るので、registry を先に送ると一瞬だけ PTY ペインが生えてしまう。
@@ -1079,6 +1092,9 @@ function idsOf(msg: SubscribeMessage | UnsubscribeMessage): string[] {
 }
 
 function handleClientMessage(ws: WebSocket, msg: ClientMessage): void {
+  if(managedTasksOnly&&["spawn","input","setMode","summarize"].includes(msg.type)){
+    send(ws,{type:"error",text:managedTaskNotice});return;
+  }
   if(executionHeld()&&["input","setMode","summarize","chatAnswer"].includes(msg.type)){
     send(ws,{type:"error",text:"保存・起動条件の確認中です。新しい入力や実行を保留しています。"});return;
   }
@@ -1337,7 +1353,7 @@ async function handleSpawn(ws: WebSocket, msg: SpawnMessage): Promise<void> {
  */
 async function spawnAgent(params: GeneralizedSpawnParams): Promise<string> {
   if(executionHeld())throw Error("保存・起動条件を確認できないため開始を保留しています。");
-  if(storageMode==="indexed")throw Error("このワークスペースでは、作業画面から契約を確認して担当を開始してください。");
+  if(managedTasksOnly)throw Error(managedTaskNotice);
   const cwd = params.cwd && params.cwd.trim() ? params.cwd.trim() : DEFAULT_CWD;
 
   // 役割（EBI_ROLES）を解決する。後方互換: asEngineer=true は role="engineer" と等価。
@@ -1748,6 +1764,7 @@ export type SendMessageResult =
  */
 async function sendMessage(params: SendMessageParams): Promise<SendMessageResult> {
   if(executionHeld())throw Error("保存・起動条件を確認できないため送信を保留しています。");
+  if(managedTasksOnly)throw Error(managedTaskNotice);
   const { to, message } = params;
   const from = params.from ?? "user";
 
@@ -1876,7 +1893,7 @@ async function summarizeAgent(
   id: string,
 ): Promise<{ ok: true; text: string } | { ok: false; reason: string }> {
   if(executionHeld())return {ok:false,reason:"保存・起動条件の確認中のため要約を保留しています。"};
-  if(storageMode==="indexed")return {ok:false,reason:"このワークスペースでは統括チャットから確認してください。"};
+  if(managedTasksOnly)return {ok:false,reason:managedTaskNotice};
   const agent = registry.get(id);
   if (!agent) return { ok: false, reason: `agent が見つかりません: ${id}` };
   return supervisor.summarize(agent.getScrollback());
@@ -1924,7 +1941,7 @@ async function startFixedEbi(): Promise<void> {
       await projectConfiguration!.admit(bootConfiguration!.hash,()=>startMasterChatSession(spec,{...codexMasterLaunchOptions({model:spec.launch.model,extraArgs:[]},
         {...process.env,EBI_CODEX_READ_ONLY_MASTER:"1",EBI_CODEX_APP_SERVER_EXE:config.executable,EBI_CODEX_MASTER_EFFORT:config.astra.effort}),requiredModels:setupStartup!.requiredModels}));
       setupModelsVerified=true;
-      broadcast({type:"capabilities",supervisor:storageMode!=="indexed"&&supervisor.enabled,reviews:reviewService!==null,tasks:taskService!==null,taskAuthoring:taskAuthoringService!==null,projectSetup:!!authConfig.token,managedTasksOnly:storageMode==="indexed",codexConversations:storageMode==="indexed",conversationAuthority:storageConsole?.registrationSha256});
+      broadcast({type:"capabilities",supervisor:!managedTasksOnly&&supervisor.enabled,reviews:reviewService!==null,tasks:taskService!==null,taskAuthoring:taskAuthoringService!==null,projectSetup:!!authConfig.token,managedTasksOnly,codexConversations:storageMode==="indexed",conversationAuthority:storageConsole?.registrationSha256});
       return;
     }
     // master には役割別 MCP config を spawn 直前に自動付与する（config への手書きを不要にし、
@@ -1937,6 +1954,15 @@ async function startFixedEbi(): Promise<void> {
         process.env.EBI_MASTER_UI,
       ),
     );
+    // Validate the entire set before any member starts; a later incompatible
+    // fixed agent must not leave an earlier planner or PTY running.
+    if(managedTasksOnly&&specs.length>1)
+      throw Error("Task環境の統括は1つにしてください。複数の会話を同時に起動できません。");
+    if(managedTasksOnly)for(const spec of specs){
+      if(spec.kind!=="master"||spec.ui!=="chat"||spec.brain!=="codex")
+        throw Error("Task環境では旧CLIの固定担当を起動できません。共有実行枠を使うCodexチャットを設定してください。");
+      codexMasterLaunchOptions({model:spec.launch.model,extraArgs:spec.extraArgs});
+    }
     if (specs.length === 0) {
       console.log(`[ebi-team] 固定エビ: なし（${CONFIG_PATH} 未配置または fixedEbi 空）`);
       return;
@@ -1963,7 +1989,8 @@ async function startFixedEbi(): Promise<void> {
     }
   } catch (err) {
     if(setupStartup&&!storageMaintenance&&!storageStartupHeld&&!configurationStartupHeld)setupActivationError="担当モデル・ログイン・起動設定を確認できないため保留しています。現在の設定とサーバーの起動状態を確認してください。";
-    console.warn(`[ebi-team] 固定エビ config の読み込みに失敗（動的エビのみで継続）:`, err);
+    if(managedTasksOnly)broadcast({type:"notice",id:"fixed-startup",text:"統括の起動設定を確認できません。Task環境では旧CLIの担当を起動せず、作業一覧の登録済みTaskを使用します。"});
+    console.warn(`[ebi-team] 固定エビ config の読み込みに失敗:`, err);
   }
 }
 

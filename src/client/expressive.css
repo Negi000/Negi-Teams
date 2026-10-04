@@ -137,7 +137,7 @@
 .negi-workspace .summary-panel { border:0; background:var(--md-tertiary-container); color:var(--md-on-tertiary-container); border-radius:24px }
 .negi-workspace .empty { color:var(--md-on-surface-variant); font-size:16px; flex-direction:column; gap:16px; padding:24px; }
 .negi-workspace .empty h1 { color:var(--md-on-surface) }
-.negi-workspace .empty p { max-width:480px }
+.negi-workspace .empty p { max-width:480px; text-wrap:balance }
 .negi-workspace .empty .md-actions { justify-content:center }
 .negi-workspace .fp-panel { border-radius:28px; background:var(--md-surface); color:var(--md-on-surface); border:0; padding:0; width:calc(100% - 32px); max-height:calc(100dvh - 48px - env(safe-area-inset-top) - env(safe-area-inset-bottom)); box-shadow:0 16px 64px #0003 }
 .negi-workspace .fp-panel::backdrop { background:#10241766; backdrop-filter:blur(3px) }

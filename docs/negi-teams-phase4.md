@@ -1,5 +1,7 @@
 # Phase 4: 単一スケジューラの土台
 
+2026-10-04に[Task環境の旧dispatch境界](negi-teams-managed-dispatch.md)を追加した。保存方式がlegacyでもTaskカタログ/setup rootを指定したホストは旧PTY/注入/要約を開始できず、固定統括は共有枠を使うCodexチャット最大1件に制限する。Task未設定の独立互換ホストは維持する。合成・GUI・実provider・人間受入を分け、外部旧processの隔離やNT-010全体の完了とは扱わない。
+
 `src/server/orchestration/scheduler.ts`は、登録済みの作業だけを開始するローカルJSONL台帳である。実モデルの起動、承認、OS sandboxは持たない。`scheduledVaultRun.ts`がVault契約に基づくAstra→Solの1runをこの受付へ通す。
 
 2026-10-03に、[明示的なLuna読み取り専用Taskと専用成果レビュー](negi-teams-luna-tasks.md)を追加した。role/mode、Context Pack、計画→作業枠、native process owner、権限要求拒否、tool authorityの保留、変更ゼロの固定検証を分けて記録する。通常Task・raw/template契約案・並列CLIからの専用成果登録、署名付き受入/取消・再起動復元・元Astra通知を接続し、Material 3 ExpressiveのPC/スマホ画面で操作した。researchはWindows専用で、実model調査turn・tool-free profile・approved Policy選択は未完。既存Git差分レビューを空差分対応へ緩めない。

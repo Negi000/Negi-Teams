@@ -2,6 +2,14 @@
 
 ユーザーの2026-10-01の追加要件。Phase 0–8の目的を維持し、元のebi-team UIから画面構造と操作の流れを作り変える。
 
+## 2026-10-04: Task環境の操作表示と案内の折返し
+
+[管理dispatchの境界](../negi-teams-managed-dispatch.md)をcapabilitiesへ反映した。legacy保存でもTaskカタログ/setup rootの環境は旧「担当を追加」と要約を表示しない。チームの空状態は統括の接続確認と作業一覧への操作を示す。案内は`text-wrap: balance`でPC/スマホとも文末2文字だけの行を避ける。独立した互換ホストの追加dialogは開閉できる。
+
+compiled通常server、Cookieログイン、実model/PTY開始0でGUI7ケース成功。1440×1000・375×812・320×812の明暗で、URL/title・本文・横超過/overlayなし、旧追加操作非表示、Taskの深いリンク・契約のキーボード開閉・reload、互換dialogを開きEscapeで取消を確認した。console/page error0。案内の行は1440/375pxで16・17文字、320pxで10・10・13文字。最終画像を直接確認し、server/CSS原文SHA一致と所有server/browser終了を確認した。最終assetsは`index-DHYLeU02.css` / `index-pKJQL3xk.js`。最初の非表示optionを待つselector失敗と、折返し修正前のGUI成功を合算しない。
+
+Browser plugin not availableのため既存Playwrightを使用し、私有証拠は公開差分外に保存した。実機safe-area/仮想キーボード、実providerの通し作業と人間の使いやすさの受入は未確認。
+
 ## 2026-10-03: 調査の開始保留と更新中の読取
 
 [native調査の権限競合](../negi-teams-luna-tasks.md#2026-10-03追記-native調査の開始を保留する)を実CLIで確認したため、開始前の現在地に「Lunaの調査は準備中のため、まだ開始できません。契約と保存済みの成果は確認できます。」を表示する。開始操作を隠し、内部原因は通常本文へ出さない。契約を読む操作と保存済み成果の確認は使える。通常Taskへ切り替えると、そのTaskの開始可否と案内に戻る。

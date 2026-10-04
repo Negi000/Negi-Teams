@@ -1,6 +1,16 @@
 # Negi-Teams 実装と受入の現在地
 
-2026-10-03（JST）。基準は `NEGI_TEAMS_MASTER_PLAN.ja.md` のPhase 0〜8と `REQUIREMENTS_TRACEABILITY.ja.md`。この表は実装・合成テスト・実モデル観測・人間受入を分ける。Git管理外の実行証拠も参照しており、実装差分の公開を全Phaseの完了宣言とは扱わない。
+2026-10-04（JST）。基準は `NEGI_TEAMS_MASTER_PLAN.ja.md` のPhase 0〜8と `REQUIREMENTS_TRACEABILITY.ja.md`。この表は実装・合成テスト・実モデル観測・人間受入を分ける。Git管理外の実行証拠も参照しており、実装差分の公開を全Phaseの完了宣言とは扱わない。
+
+## 2026-10-04追加: Task環境の旧起動迂回とMaterial画面の操作
+
+[起動経路・検証・残条件](negi-teams-managed-dispatch.md)。legacy保存でもTaskカタログ/setup rootを指定したホストは契約を通る実行を使う。旧HTTP7経路、WSの追加/入力/要約、直接helper、固定担当の混在・複数統括を実行前に拒否し、サービスの開始保留から旧起動へ戻さない。独立したTask未設定の互換ホストは維持する。無観測のPTYをschedulerへ登録したという意味ではなく、管理ホストの旧迂回を閉じる変更である。
+
+独立レビューで複数の統括が単一sessionを上書きし、先のprocessを終了管理から外す問題を修正した。関連30件成功に続き、最終の境界6件成功。実HTTP/WSと起動前sentinel、共有枠を使う合成チャット、設定未完了/破損/単独旧担当/混在/複数統括/独立互換を確認した。30件の途中に統括数制限を追加したため、最終変更後の全件実行とは扱わず、重複する6件と合算しない。型検査・最終build・差分検査が成功した。
+
+compiled通常serverとCookie認証のGUI7ケースで1440/375/320pxの明暗、追加操作非表示、Taskの深いリンク・契約のキーボード・reload、互換dialogの取消を確認した。空状態の文末2文字だけの折返しも均等化した。横超過/overlay/console/page error0、実model/PTY開始0。私有server/browserは終了。Browser plugin not availableのため既存Playwrightを使用し、画像/ログ/失敗した合成fixture/selector試験は公開差分外に保持した。
+
+native Luna調査の構造的隔離、実Astra→Sol→受入→Astra、外部旧process/別writer、実機と人間受入など残条件を維持する。NT-010/073の進捗であり、全73要件・Phase0–8のゴールはACTIVE。
 
 ## 2026-10-03追加: 通常TaskのPolicy固定とMaterialでの出典表示
 
